@@ -1,0 +1,333 @@
+//! Resilience ("what if this breaks?"), power use, traffic by time of day, router-behind-router (WAN port),
+//! extra Wi-Fi names per access point, a simple content filter and duplicating devices.
+use crate::extras::{Use, GUEST_VLAN};
+use crate::net::{Device, Kind, Link, Network};
+use std::collections::{HashSet, VecDeque};
+
+/// Typical average power draw (W) over a day, including standby.
+pub fn default_watts(k: Kind) -> f32 {
+    use Kind::*;
+    match k {
+        Internet | Neighbor | Interference => 0.0,
+        HomeRouter => 12.0,
+        Router => 20.0,
+        Switch => 8.0,
+        AccessPoint => 0.0, // powered over the cable: counted at its switch
+        Extender => 5.0,
+        Desktop => 45.0,
+        Laptop => 12.0,
+        Phone => 2.0,
+        Server => 90.0,
+        Nas => 25.0,
+        Printer => 4.0,
+        Tv => 35.0,
+        SmartHome => 1.0,
+        Speaker => 6.0,
+        Camera => 0.0, // powered over the cable
+        Console => 25.0,
+    }
+}
+
+/// How active an app is at a given hour, relative to its busy-hour demand (0..1).
+pub fn activity(u: Use, hour: f32) -> f32 {
+    let h = hour.rem_euclid(24.0);
+    let evening: f32 = if (18.0..23.5).contains(&h) { 1.0 } else if (7.0..18.0).contains(&h) { 0.35 } else { 0.05 };
+    let daytime: f32 = if (8.0..18.0).contains(&h) { 1.0 } else if (18.0..22.0).contains(&h) { 0.4 } else { 0.05 };
+    match u {
+        Use::Stream4k | Use::StreamHd | Use::Gaming | Use::Download | Use::Music => evening,
+        Use::VideoCall | Use::Browsing => daytime.max(evening * 0.6),
+        // Backups usually run at night, when nobody notices.
+        Use::Backup => if (1.0..5.0).contains(&h) { 1.0 } else { 0.05 },
+        Use::Camera => 1.0,
+    }
+}
+
+pub fn clock(hour: f32) -> String {
+    let h = hour.rem_euclid(24.0);
+    format!("{:02}:{:02}", h as u32, ((h.fract()) * 60.0).round() as u32 % 60)
+}
+
+impl Network {
+    /// The link two neighbours actually use: the main line while it works, the mobile backup otherwise.
+    pub fn link_between(&self, a: u32, b: u32) -> Option<&Link> {
+        let pair = |l: &&Link| (l.a == a && l.b == b) || (l.a == b && l.b == a);
+        let ok = |l: &&Link| self.link_ok(l);
+        self.links
+            .iter()
+            .filter(pair)
+            .filter(ok)
+            .min_by_key(|l| l.medium == crate::net::Medium::Cellular)
+            .or_else(|| self.links.iter().find(pair))
+    }
+
+    /// A link that carries traffic right now: plugged in and both ends switched on.
+    pub fn link_ok(&self, l: &Link) -> bool {
+        !l.unplugged && self.dev(l.a).is_some_and(|d| !d.off) && self.dev(l.b).is_some_and(|d| !d.off)
+    }
+
+    /// Devices reachable from `start` over working links, without passing through `without`.
+    fn reach(&self, start: u32, without: Option<u32>) -> HashSet<u32> {
+        let mut seen = HashSet::from([start]);
+        let mut q = VecDeque::from([start]);
+        while let Some(c) = q.pop_front() {
+            // End devices don't pass traffic on.
+            if c != start && self.dev(c).is_some_and(|d| d.kind.is_host()) {
+                continue;
+            }
+            for l in self.links.iter().filter(|l| (l.a == c || l.b == c) && self.link_ok(l)) {
+                let o = l.other(c).0;
+                if Some(o) != without && seen.insert(o) {
+                    q.push_back(o);
+                }
+            }
+        }
+        seen
+    }
+
+    /// Single points of failure: for each piece of network gear, how many devices lose their way to the
+    /// internet (or to the main router when there's no internet) if it fails. Worst first.
+    pub fn weak_spots(&self) -> Vec<(u32, usize)> {
+        let root = self.devices.iter().find(|d| d.kind == Kind::Internet).or_else(|| self.devices.iter().find(|d| d.kind.routes())).map(|d| d.id);
+        let Some(root) = root else { return vec![] };
+        let users = |set: &HashSet<u32>| self.devices.iter().filter(|d| d.kind.is_host() && set.contains(&d.id)).count();
+        let base = users(&self.reach(root, None));
+        let mut v: Vec<(u32, usize)> = self
+            .devices
+            .iter()
+            .filter(|d| d.id != root && !d.kind.is_host() && !d.kind.foreign() && !d.off)
+            .map(|d| (d.id, base.saturating_sub(users(&self.reach(root, Some(d.id))))))
+            .filter(|x| x.1 > 0)
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v
+    }
+
+    /// Average power of everything in the plan (W), with PoE devices counted once (at their switch, plus losses).
+    pub fn power_w(&self) -> f32 {
+        let own: f32 = self.devices.iter().filter(|d| !d.off).map(|d| d.watts).sum();
+        let poe: f32 = self.devices.iter().filter(|d| !d.off && d.poe_draw > 0.0).map(|d| d.poe_draw * 0.6 * 1.1).sum();
+        own + poe
+    }
+
+    pub fn yearly_kwh(&self) -> f32 {
+        self.power_w() * 24.0 * 365.0 / 1000.0
+    }
+
+    /// Makes `link` this home router's internet (WAN) port — a router behind another router.
+    pub fn set_wan(&mut self, router: u32, link: u32, on: bool) {
+        let port = if on { 1 } else { 0 };
+        if let Some(l) = self.links.iter_mut().find(|l| l.id == link) {
+            if l.a == router {
+                l.a_if = port;
+            } else if l.b == router {
+                l.b_if = port;
+            }
+            // The cable moves over to the WAN side (or back): assign_ports picks the port.
+            l.set_port_at(router, None);
+        }
+        self.assign_ports();
+        let d = self.dev_mut(router).unwrap();
+        d.dhcp_client = true;
+    }
+
+    /// Every network name a radio broadcasts, with the VLAN it leads to.
+    pub fn names_of(d: &Device) -> Vec<(String, u16)> {
+        let mut v = vec![(d.ssid.clone(), 1)];
+        v.extend(d.ssids.iter().cloned());
+        if d.ifaces.iter().any(|f| f.vlan == GUEST_VLAN) && !d.guest_ssid.is_empty() {
+            v.push((d.guest_ssid.clone(), GUEST_VLAN));
+        }
+        v
+    }
+
+    /// The network name a Wi-Fi client is on.
+    pub fn joined<'a>(cl: &'a Device, ap: &'a Device) -> &'a str {
+        if cl.join.is_empty() { &ap.ssid } else { &cl.join }
+    }
+
+    /// Joins a client to one of its access point's names; it lands in that name's VLAN.
+    pub fn join(&mut self, client: u32, name: &str, vlan: u16) {
+        let d = self.dev_mut(client).unwrap();
+        d.join = name.to_string();
+        if let Some(f) = d.ifaces.first_mut() {
+            f.vlan = vlan;
+        }
+        let mut log = vec![];
+        self.dhcp_one(client, &mut log);
+    }
+
+    /// A router's content filter: "block-site example.net" lines (also covers sub-domains).
+    pub fn blocked_by(&self, d: &Device, name: &str) -> Option<String> {
+        d.rules.lines().find_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            let site = w.get(1)?;
+            (w.first() == Some(&"block-site") && (name == *site || name.ends_with(&format!(".{site}")))).then(|| site.to_string())
+        })
+    }
+
+    /// Points a directional antenna straight at another device.
+    pub fn aim_at(&mut self, id: u32, target: u32) {
+        let Some(t) = self.dev(target).map(|d| d.pos) else { return };
+        let d = self.dev_mut(id).unwrap();
+        d.aim = (t[1] - d.pos[1]).atan2(t[0] - d.pos[0]).to_degrees().rem_euclid(360.0);
+    }
+
+    /// A copy of a device next to it, with fresh addresses and no cables.
+    pub fn duplicate(&mut self, id: u32) -> Option<u32> {
+        let src = self.dev(id)?.clone();
+        let new = self.add_device(src.kind, [src.pos[0] + 50.0, src.pos[1] + 50.0]);
+        let fresh = self.dev(new).unwrap().clone();
+        let d = self.dev_mut(new).unwrap();
+        *d = Device { id: new, name: format!("{} copy", src.name), pos: fresh.pos, ifaces: fresh.ifaces, ..src };
+        if d.kind.is_host() {
+            d.dhcp_client = true;
+            d.gateway.clear();
+            d.dns.clear();
+        }
+        Some(new)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::{template_seeded, Medium};
+
+    fn id(n: &Network, name: &str) -> u32 {
+        n.devices.iter().find(|d| d.name == name).unwrap().id
+    }
+
+    #[test]
+    fn failures_and_weak_spots() {
+        let mut n = template_seeded("home", 1);
+        let spots = n.weak_spots();
+        // The home router carries everyone: it's the worst single point of failure.
+        assert_eq!(n.dev(spots[0].0).unwrap().kind, Kind::HomeRouter);
+        let pc = id(&n, "Office PC");
+        assert!(n.exec(pc, "ping example.com").lines.join(" ").contains(", 4 received"));
+        let sw = id(&n, "Switch 1");
+        n.dev_mut(sw).unwrap().off = true;
+        let out = n.exec(pc, "ping example.com").lines.join(" ");
+        assert!(out.contains("100%") || out.contains("unreachable") || out.contains("No working path"), "{out}");
+        n.dev_mut(sw).unwrap().off = false;
+        let l = n.links.iter().position(|l| l.a == pc || l.b == pc).unwrap();
+        n.links[l].unplugged = true;
+        assert!(!n.exec(pc, "ping example.com").lines.join(" ").contains(", 4 received"));
+    }
+
+    #[test]
+    fn router_behind_router_is_double_nat_and_still_works() {
+        let mut n = template_seeded("home", 2);
+        let sw = id(&n, "Switch 1");
+        let r2 = n.add_device(Kind::HomeRouter, [700.0, 700.0]);
+        n.dev_mut(r2).unwrap().ifaces[0].ip = "192.168.50.1".into();
+        n.dev_mut(r2).unwrap().dhcp_from = "192.168.50.100".into();
+        n.dev_mut(r2).unwrap().dhcp_to = "192.168.50.199".into();
+        let l = n.connect(sw, r2, Medium::Cat6).unwrap();
+        n.set_wan(r2, l, true);
+        let lap = n.add_device(Kind::Laptop, [760.0, 760.0]);
+        n.connect(r2, lap, Medium::WiFi).unwrap();
+        n.run_dhcp();
+        assert!(n.dev(r2).unwrap().ifaces[1].ip.starts_with("192.168.1."));
+        assert!(n.exec(lap, "ping example.com").lines.join(" ").contains(", 4 received"));
+        assert!(n.check().iter().any(|i| i.text.contains("Double NAT")));
+    }
+
+    #[test]
+    fn extra_names_lead_into_vlans_and_filters_block_sites() {
+        let mut n = template_seeded("campus", 3);
+        let st = id(&n, "Library student 2");
+        let ap = n.wifi_ends(n.wifi_link_of(st).unwrap()).unwrap().0.id;
+        let (name, vlan) = n.dev(ap).unwrap().ssids[0].clone();
+        n.join(st, &name, vlan);
+        assert!(n.dev(st).unwrap().ifaces[0].ip.starts_with(&format!("10.1.{vlan}.")), "{:?}", n.dev(st).unwrap().ifaces);
+        let mut h = template_seeded("home", 1);
+        let r = id(&h, "Home router");
+        h.dev_mut(r).unwrap().rules = "block-site video.example.net".into();
+        let pc = id(&h, "Office PC");
+        assert!(h.exec(pc, "open video.example.net").lines.join(" ").contains("Blocked"));
+        assert!(h.exec(pc, "open example.com").lines.join(" ").contains("200 OK"));
+    }
+
+    #[test]
+    fn mobile_backup_takes_over_when_the_line_fails() {
+        let mut n = template_seeded("home", 1);
+        let (inet, r) = (n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id, id(&n, "Home router"));
+        let backup = n.connect(r, inet, Medium::Cellular).unwrap();
+        let pc = id(&n, "Office PC");
+        let normal = n.exec(pc, "speedtest").lines.join(" ");
+        assert!(!normal.contains("Mobile"), "{normal}");
+        let fibre = n.links.iter().find(|l| l.medium == Medium::Fiber).unwrap().id;
+        n.links.iter_mut().find(|l| l.id == fibre).unwrap().unplugged = true;
+        let out = n.exec(pc, "speedtest").lines.join(" ");
+        assert!(out.contains("Mobile 5G backup") || out.contains("150"), "{out}");
+        assert!(n.exec(pc, "ping example.com").lines.join(" ").contains(", 4 received"));
+        assert!(n.check().iter().any(|i| i.link == Some(backup) && i.text.contains("mobile backup")));
+        // Without a backup, the same failure takes the house offline.
+        n.remove_link(backup);
+        assert!(!n.exec(pc, "ping example.com").lines.join(" ").contains(", 4 received"));
+    }
+
+    /// One of every kind of device in a working home: each gets an address, reaches the internet the way it
+    /// should, and every command and check runs without trouble.
+    #[test]
+    fn every_kind_of_device_works() {
+        let mut n = template_seeded("blank", 7);
+        let inet = n.add_device(Kind::Internet, [0.0, 0.0]);
+        let r = n.add_device(Kind::HomeRouter, [200.0, 0.0]);
+        let sw = n.add_device(Kind::Switch, [400.0, 0.0]);
+        n.dev_mut(sw).unwrap().ports = vec![crate::ports::PortGroup::rj45(24, 1000)];
+        n.dev_mut(sw).unwrap().poe_class = 2;
+        n.dev_mut(sw).unwrap().poe_budget = 200.0;
+        n.connect(inet, r, Medium::Fiber).unwrap();
+        n.connect(r, sw, Medium::Cat6).unwrap();
+        let mut report = vec![];
+        for (i, k) in Kind::SHELF.into_iter().enumerate() {
+            if matches!(k, Kind::Internet | Kind::HomeRouter) {
+                continue;
+            }
+            let id = n.add_device(k, [300.0 + (i % 6) as f32 * 60.0, 120.0 + (i / 6) as f32 * 60.0]);
+            let res = match k {
+                Kind::Neighbor | Kind::Interference => n.connect(r, id, Medium::Cat6).err().map(|_| ()).ok_or(()),
+                Kind::Phone | Kind::SmartHome | Kind::Laptop => n.connect(r, id, Medium::WiFi).map(|_| ()).map_err(|_| ()),
+                Kind::Extender => n.connect(r, id, Medium::WiFi).map(|_| ()).map_err(|_| ()),
+                _ => n.connect(sw, id, Medium::Cat6).map(|_| ()).map_err(|_| ()),
+            };
+            report.push((k, res));
+        }
+        n.run_dhcp();
+        let issues = n.check();
+        for (k, res) in &report {
+            assert!(res.is_ok(), "{k:?}: connecting didn't behave");
+            let d = n.devices.iter().find(|d| d.kind == *k).unwrap().clone();
+            if k.is_host() {
+                assert!(d.ifaces[0].ip.starts_with("192.168."), "{k:?} got {:?}", d.ifaces[0].ip);
+                let out = n.exec(d.id, "ping example.com").lines.join(" ");
+                assert!(out.contains(" received"), "{k:?}: {out}");
+                for cmd in ["ipconfig", "traceroute example.com", "nslookup example.com", "speedtest", "wifi", "stp", "vlan", "arp", "route", "help"] {
+                    let _ = n.exec(d.id, cmd);
+                }
+            }
+            // Radios that serve others must be on air with real settings.
+            if k.transmits() && *k != Kind::Interference {
+                assert!(d.bands.iter().zip(d.width).zip(d.tx).all(|((on, w), t)| !on || (w > 0 && t > 0.0)), "{k:?}: {:?} {:?} {:?}", d.bands, d.width, d.tx);
+            }
+            assert!(issues.iter().all(|i| i.level != crate::net::Level::Error || i.dev != Some(d.id)), "{k:?}: {:?}", issues.iter().filter(|i| i.dev == Some(d.id)).collect::<Vec<_>>());
+        }
+        let _ = (n.weak_spots(), n.power_w(), n.loads(), n.stp());
+    }
+
+    #[test]
+    fn power_and_time_of_day() {
+        let mut n = template_seeded("home", 1);
+        assert!(n.power_w() > 50.0 && n.yearly_kwh() > 400.0);
+        let tv = id(&n, "Living room TV");
+        let l = n.links.iter().find(|l| l.a == tv || l.b == tv).unwrap().id;
+        let evening = n.utilisation(&n.loads(), l);
+        n.hour = 4.0;
+        assert!(n.utilisation(&n.loads(), l) < evening / 5.0);
+        let copy = n.duplicate(tv).unwrap();
+        assert_eq!(n.dev(copy).unwrap().kind, Kind::Tv);
+        assert!(n.dev(copy).unwrap().ifaces[0].mac != n.dev(tv).unwrap().ifaces[0].mac);
+    }
+}

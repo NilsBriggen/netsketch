@@ -1,0 +1,272 @@
+//! Window parts for companion-app measurements: pins on the map, the list of measured networks,
+//! and the panel of one measuring point.
+use super::*;
+use crate::companion::band_of;
+
+impl App {
+    /// Pins where measurements were taken; drag them to where you stood, click one to see its readings.
+    pub(crate) fn draw_points(&mut self, ui: &mut egui::Ui, painter: &egui::Painter) {
+        let ids: Vec<u32> = self.net.points.iter().filter(|p| p.floor == self.floor).map(|p| p.id).collect();
+        for id in ids {
+            let p = self.net.points.iter().find(|p| p.id == id).unwrap();
+            let c = self.to_screen(vec2(p.pos[0], p.pos[1]));
+            let col = if p.placed { ACCENT } else { AMBER };
+            let selected = self.sel == Sel::Point(id);
+            let r = Rect::from_center_size(c, Vec2::splat(26.0));
+            painter.circle_filled(c, 13.0, BG.gamma_multiply(0.9));
+            painter.circle_stroke(c, 13.0, Stroke::new(if selected { 3.0 } else { 2.0 }, col));
+            painter.text(c, Align2::CENTER_CENTER, ic::MAP_PIN, FontId::proportional(15.0), col);
+            // Placed pins keep quiet (their name shows on hover); unplaced ones ask to be moved.
+            if !p.placed || selected {
+                let label = if p.placed { p.name.clone() } else { format!("{} — drag me to where you measured", p.name) };
+                painter.text(c + vec2(0.0, 16.0), Align2::CENTER_TOP, label, FontId::proportional(11.0), col);
+            }
+            let resp = ui.interact(r, Id::new(("pin", id)), Sense::click_and_drag());
+            if resp.clicked() {
+                self.sel = Sel::Point(id);
+            }
+            if resp.drag_started() {
+                self.snapshot();
+            }
+            if resp.dragged() && self.mode == Mode::Design {
+                let d = resp.drag_delta() / self.zoom;
+                let p = self.net.points.iter_mut().find(|p| p.id == id).unwrap();
+                p.pos[0] += d.x;
+                p.pos[1] += d.y;
+                p.placed = true;
+                self.sel = Sel::Point(id);
+            }
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            let p = self.net.points.iter().find(|p| p.id == id).unwrap();
+            let top: Vec<String> = p.networks.iter().take(5).map(|s| format!("{:>4.0} dBm  {}", s.rssi, if s.ssid.is_empty() { "(hidden)" } else { &s.ssid })).collect();
+            resp.on_hover_text(format!("{} — {} networks measured\n{}", p.name, p.networks.len(), top.join("\n")));
+        }
+    }
+
+    /// Keeps the phone's copy of the floor plan fresh and takes in the points it sends.
+    pub(crate) fn phone_tick(&mut self, ctx: &egui::Context) {
+        let Some(link) = &self.phone else { return };
+        let now = Self::now(ctx);
+        if now - self.phone_plan_at > 1.5 {
+            self.phone_plan_at = now;
+            link.set_plan(self.net.plan_pack());
+        }
+        let got = link.take();
+        if got.is_empty() {
+            return;
+        }
+        self.snapshot();
+        let mut added = 0;
+        for body in got {
+            match self.net.import_companion(&body) {
+                Ok((p, _)) => added += p,
+                Err(e) => self.say(ctx, format!("The phone sent something unreadable: {e}")),
+            }
+        }
+        if added > 0 {
+            self.issues = None;
+            let last = self.net.points.last().map(|p| (p.name.clone(), p.placed, p.floor));
+            if let Some((name, placed, floor)) = last {
+                self.floor = floor;
+                self.say(ctx, if placed { format!("New measurement from the phone: '{name}' — pinned where you tapped.") } else { format!("New measurement from the phone: '{name}' — drag its pin to where you stood.") });
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+
+    /// The live phone link: start it, show the code, stop it.
+    fn phone_card(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        match &self.phone {
+            None => {
+                if ui.button(format!("{}  Link a phone (live)", ic::DEVICE_MOBILE)).on_hover_text("The NetSketch Survey app finds this computer on your Wi-Fi, shows your floor plan, and every measurement lands here as a pin — no files to send").clicked() {
+                    let code = format!("{:04}", crate::sim::new_seed() % 10_000);
+                    match phone_link::PhoneLink::start(phone_link::TCP_PORT, phone_link::UDP_PORT, code, self.net.title.clone()) {
+                        Ok(l) => {
+                            l.set_plan(self.net.plan_pack());
+                            self.phone = Some(l);
+                        }
+                        Err(e) => self.say(&ctx, format!("Couldn't start the phone link: {e}")),
+                    }
+                }
+            }
+            Some(l) => {
+                let heard = l.last_seen.lock().unwrap().map(|t| t.elapsed().as_secs());
+                let mut stop = false;
+                egui::Frame::new().fill(CARD).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(ic::DEVICE_MOBILE).size(20.0).color(ACCENT));
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(format!("Code {}", l.code)).size(18.0).strong().color(ACCENT));
+                            ui.label(RichText::new(format!("{}:{}", l.addr, l.port)).small().monospace().color(DIM));
+                        });
+                    });
+                    ui.label(RichText::new("In NetSketch Survey tap Link: it finds this computer on your Wi-Fi. Enter the code, tap where you stand on the plan, measure.").small().color(DIM));
+                    ui.label(RichText::new("Phone doesn't find it? Type the address above on the phone. Still nothing: this computer's firewall blocks it — allow ports 47878 (TCP) and 47879 (UDP).").small().color(DIM))
+                        .on_hover_text("Linux with ufw: sudo ufw allow 47878/tcp && sudo ufw allow 47879/udp\nWindows asks the first time — allow access on private networks.\nmacOS: allow incoming connections when asked.");
+                    ui.horizontal(|ui| {
+                        let (txt, col) = match heard {
+                            Some(s) if s < 30 => ("Phone connected".to_string(), GREEN),
+                            Some(s) => (format!("Phone last seen {} min ago", s / 60 + 1), AMBER),
+                            None => ("Waiting for the phone…".to_string(), DIM),
+                        };
+                        ui.label(RichText::new(txt).color(col));
+                        if ui.small_button("Stop").on_hover_text("Close the link").clicked() {
+                            stop = true;
+                        }
+                    });
+                });
+                if stop {
+                    self.phone = None;
+                }
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+
+    /// Overview: import a survey, see every measured access point, decide what each one is, fit the model.
+    pub(crate) fn measured_section(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.phone_card(ui);
+        let pts = self.net.points.len();
+        let unplaced = self.net.points.iter().filter(|p| !p.placed).count();
+        if pts > 0 {
+            ui.label(format!("{pts} measuring points from the companion app"));
+            if unplaced > 0 {
+                let what = if unplaced == 1 { "1 pin still needs its place: drag the orange pin".to_string() } else { format!("{unplaced} pins still need their place: drag the orange pins") };
+                ui.label(RichText::new(format!("{} {what} to where you stood.", ic::MAP_PIN)).color(AMBER));
+            }
+        }
+        let found = self.net.measured_networks();
+        if found.is_empty() {
+            return;
+        }
+        // What each measured access point can be linked to: your radios and the neighbours in the plan.
+        let targets: Vec<(u32, String)> = self.net.devices.iter().filter(|d| d.kind.transmits() && d.kind != Kind::Interference).map(|d| (d.id, d.name.clone())).collect();
+        let mut add = vec![];
+        let mut link: Option<(String, Option<u32>)> = None;
+        egui::ScrollArea::vertical().id_salt("measured").max_height(260.0).show(ui, |ui| {
+            {
+                for m in &found {
+                    ui.horizontal(|ui| {
+                    ui.add_sized([34.0, 18.0], egui::Label::new(RichText::new(format!("{:.0}", m.best)).monospace().color(quality_color(m.best))));
+                    let chans: Vec<String> = m.radios.iter().map(|(b, c, _)| format!("{} ch {c}", b.label())).collect();
+                    let busy = m.utilization.map(|u| format!(" · {:.0}% busy", u * 100.0)).unwrap_or_default();
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - 170.0).max(90.0));
+                        ui.label(if m.ssid.is_empty() { "(hidden)" } else { &m.ssid });
+                        ui.label(RichText::new(format!("{}{busy}", chans.join(" · "))).small().color(DIM));
+                    });
+                    let current = m.dev.and_then(|d| targets.iter().find(|t| t.0 == d)).map(|t| t.1.clone()).unwrap_or_else(|| "Not in the plan".into());
+                    egui::ComboBox::from_id_salt(("belongs", &m.key)).selected_text(current).width(150.0).show_ui(ui, |ui| {
+                        if ui.selectable_label(m.dev.is_none(), "Not in the plan").clicked() {
+                            link = Some((m.key.clone(), None));
+                        }
+                        if ui.selectable_label(false, format!("{} Add as a neighbour", ic::PLUS)).clicked() {
+                            add.push(m.key.clone());
+                        }
+                        ui.separator();
+                        for (id, name) in &targets {
+                            if ui.selectable_label(m.dev == Some(*id), name).clicked() {
+                                link = Some((m.key.clone(), Some(*id)));
+                            }
+                        }
+                    });
+                    });
+                    ui.add(egui::Separator::default().spacing(2.0));
+                }
+            }
+        });
+        let strangers: Vec<String> = found.iter().filter(|m| m.dev.is_none() && m.best >= -85.0).map(|m| m.key.clone()).collect();
+        ui.horizontal_wrapped(|ui| {
+            if !strangers.is_empty() && ui.small_button(format!("{} Add {} neighbours", ic::PLUS, strangers.len())).on_hover_text("Every measured network that isn't yours and is louder than −85 dBm").clicked() {
+                add.extend(strangers.iter().cloned());
+            }
+            if ui.small_button(format!("{} Fit to measurements", ic::RULER)).on_hover_text("Moves measured neighbours to where their signal fits your readings best and sets how loud every measured access point is").clicked() {
+                self.snapshot();
+                let msg = self.net.fit_all_measured();
+                self.say(&ctx, msg);
+            }
+        });
+        if !add.is_empty() {
+            self.snapshot();
+            let n = add.iter().filter_map(|k| self.net.add_measured_neighbour(k)).count();
+            self.issues = None;
+            self.say(&ctx, format!("Added {n} neighbours with their measured channels and busy time. Drag one to where it really is, then press Fit to measurements again."));
+        }
+        if let Some((k, d)) = link {
+            self.snapshot();
+            self.net.link_measured(&k, d);
+        }
+        if let Some(e) = self.net.measured_error() {
+            ui.label(RichText::new(format!("Model vs. measurement: off by {e:.1} dB on average")).color(if e < 4.0 { GREEN } else if e < 8.0 { AMBER } else { RED }));
+        }
+    }
+
+    /// One measuring point: where, what the phone heard, and how the model compares.
+    pub(crate) fn point_editor(&mut self, ui: &mut egui::Ui, id: u32) {
+        let mut delete = false;
+        let models: Vec<(String, u32)> = self.net.measured.clone();
+        let Some(p) = self.net.points.iter_mut().find(|p| p.id == id) else { return };
+        let sub = if p.phone.is_empty() { "Measuring point".to_string() } else { format!("Measured with {}", p.phone) };
+        Self::header(ui, ic::MAP_PIN, if p.placed { ACCENT } else { AMBER }, "Measuring point", &sub);
+        ui.add_space(4.0);
+        egui::Grid::new(("pt", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+            ui.label(RichText::new("Name").color(DIM));
+            ui.text_edit_singleline(&mut p.name);
+            ui.end_row();
+            ui.label(RichText::new("Storey").color(DIM));
+            ui.add(egui::DragValue::new(&mut p.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
+            ui.end_row();
+            ui.label(RichText::new("Place").color(DIM));
+            ui.label(if p.placed { RichText::new("on the map").color(GREEN) } else { RichText::new("not yet — drag the pin").color(AMBER) });
+            ui.end_row();
+            if let Some(c) = &p.connected {
+                ui.label(RichText::new("Phone was on").color(DIM));
+                ui.label(format!("{} · {:.0} dBm · {:.0} Mbit/s link", c.ssid, c.rssi, c.link_mbps));
+                ui.end_row();
+            }
+            if let Some(s) = &p.speed {
+                ui.label(RichText::new("Speed test").color(DIM));
+                ui.label(RichText::new(format!("{:.0} Mbit/s · {:.0} ms", s.down_mbps, s.latency_ms)).strong());
+                ui.end_row();
+            }
+        });
+        let p = self.net.points.iter().find(|p| p.id == id).unwrap().clone();
+        if Self::section_hint(ui, "Measured here", "What the phone heard at this spot (average of its scans). Where the network belongs to a device in the plan and the pin is placed, the model's value is shown next to it.") {
+            {
+                for s in &p.networks {
+                    ui.horizontal(|ui| {
+                    ui.add_sized([34.0, 18.0], egui::Label::new(RichText::new(format!("{:.0}", s.rssi)).monospace().color(quality_color(s.rssi))));
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - 110.0).max(90.0));
+                        ui.label(if s.ssid.is_empty() { "(hidden)" } else { &s.ssid });
+                        ui.label(RichText::new(format!("{} ch {} · {} MHz", band_of(s.freq).label(), s.channel, s.width)).small().color(DIM));
+                    });
+                    let key = crate::companion::key_of(s);
+                    let model = models.iter().find(|m| m.0 == key).and_then(|m| self.net.dev(m.1)).filter(|_| p.placed).map(|d| self.net.rssi_at(d, p.pos, p.floor, band_of(s.freq)));
+                    match model {
+                        Some(v) => {
+                            let off = v - s.rssi;
+                            ui.label(RichText::new(if off.abs() < 0.5 { format!("model {v:.0} (same)") } else { format!("model {v:.0} ({off:+.0})") }).small().color(if off.abs() < 4.0 { GREEN } else if off.abs() < 8.0 { AMBER } else { RED }));
+                        }
+                        None => {}
+                    }
+                    });
+                    ui.add(egui::Separator::default().spacing(2.0));
+                }
+            }
+        }
+        ui.add_space(6.0);
+        if ui.small_button(RichText::new(format!("{}  Remove point", ic::TRASH)).color(RED)).clicked() {
+            delete = true;
+        }
+        if delete {
+            self.snapshot();
+            self.net.points.retain(|p| p.id != id);
+            self.sel = Sel::None;
+        }
+    }
+}

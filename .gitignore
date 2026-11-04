@@ -1,0 +1,5 @@
+/target/
+/shots/
+/companion-android/build/
+# A local debug key; build.sh makes a new one when it is missing.
+/companion-android/signing.keystore

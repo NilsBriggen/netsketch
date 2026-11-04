@@ -1,0 +1,29 @@
+NetSketch Survey — the companion app for Android phones (Android 10 or newer)
+
+Install
+  1. Copy NetSketch-Survey.apk to your phone (USB cable, cloud drive, or e-mail it to yourself).
+  2. Open it on the phone. Android asks to allow installing apps from this source — allow it once.
+  3. Open "NetSketch Survey". The first measurement asks for permission to see nearby Wi-Fi networks
+     (Android files this under location), and Location has to be switched on while you measure.
+
+Link it to NetSketch (recommended)
+  1. On the computer: overview → Real measurements → "Link a phone (live)". A 4-digit code appears.
+  2. On the phone: tap "Link to NetSketch" (top right). It finds the computer on your Wi-Fi by itself;
+     if not, type the address NetSketch shows. Enter the code.
+  3. Your floor plan appears on the phone. Pick the storey, tap where you're standing — the room name
+     is filled in for you — and press "Measure here". The point appears in NetSketch right away,
+     pinned exactly where you tapped.
+  If the phone can't connect, the computer's firewall is blocking it: allow ports 47878 (TCP) and
+  47879 (UDP). Points measured while not linked stay on the phone and are sent as soon as it's linked.
+
+Without a computer nearby
+  Measure anyway (it asks for the storey instead), then "Save & share file" and import the file in
+  NetSketch under Real measurements → Import measurements…, and drag each pin to where you stood.
+
+In NetSketch afterwards
+  In the list of measured networks, networks named like yours are linked to your devices. For the
+  others choose "Add as a neighbour" (or "Add … neighbours" for all): they get their measured
+  channels, widths and busy time, placed where their signal fits your readings. Drag one to where it
+  really is and press "Fit to measurements" to refine.
+
+Build it yourself: ./build.sh (needs a JDK and the Android SDK; no Gradle).

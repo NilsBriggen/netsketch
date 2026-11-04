@@ -1,0 +1,206 @@
+//! Live link to the NetSketch Survey phone app over the home network.
+//!
+//! The phone finds this computer by itself (a broadcast "NETSKETCH?" on UDP 47879, answered with the
+//! port and plan name), then — with the 4-digit code shown here — downloads the floor plan
+//! (`GET /plan`) and sends each measurement as soon as it's taken (`POST /points`, a survey file).
+//! Nothing runs until someone presses "Link a phone"; it stops when they press Stop or close the plan.
+use crate::net::{Network, PX_PER_M};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+pub const TCP_PORT: u16 = 47878;
+pub const UDP_PORT: u16 = 47879;
+
+pub struct PhoneLink {
+    pub code: String,
+    /// This computer's address on the home network and the port, for typing in by hand.
+    pub addr: String,
+    pub port: u16,
+    plan: Arc<Mutex<String>>,
+    inbox: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    /// When a phone last talked to us (seconds since start), for the status line.
+    pub last_seen: Arc<Mutex<Option<std::time::Instant>>>,
+}
+
+impl PhoneLink {
+    /// Starts listening (ports 0 = any free port, for tests).
+    pub fn start(tcp: u16, udp: u16, code: String, title: String) -> Result<Self, String> {
+        let listener = TcpListener::bind(("0.0.0.0", tcp)).map_err(|e| format!("can't listen on port {tcp}: {e}"))?;
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let plan = Arc::new(Mutex::new(String::from("{}")));
+        let inbox = Arc::new(Mutex::new(vec![]));
+        let stop = Arc::new(AtomicBool::new(false));
+        let last_seen = Arc::new(Mutex::new(None));
+        {
+            let (plan, inbox, stop, code, seen) = (plan.clone(), inbox.clone(), stop.clone(), code.clone(), last_seen.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((s, _)) => {
+                            let (plan, inbox, code, seen) = (plan.clone(), inbox.clone(), code.clone(), seen.clone());
+                            std::thread::spawn(move || handle(s, &code, &plan, &inbox, &seen));
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(80)),
+                    }
+                }
+            });
+        }
+        // Discovery: answer "NETSKETCH?" with our port and the plan's name.
+        if let Ok(sock) = UdpSocket::bind(("0.0.0.0", udp)) {
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(300)));
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 64];
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok((n, from)) = sock.recv_from(&mut buf) {
+                        if buf[..n].starts_with(b"NETSKETCH?") {
+                            let _ = sock.send_to(format!("NETSKETCH {port} {title}").as_bytes(), from);
+                        }
+                    }
+                }
+            });
+        }
+        Ok(PhoneLink { code, addr: local_ip(), port, plan, inbox, stop, last_seen })
+    }
+
+    /// What the phone gets as the floor plan.
+    pub fn set_plan(&self, json: String) {
+        *self.plan.lock().unwrap() = json;
+    }
+
+    /// Survey files the phone sent since the last call.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inbox.lock().unwrap())
+    }
+}
+
+impl Drop for PhoneLink {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The address other devices on the home network reach this computer at (no packet is sent).
+fn local_ip() -> String {
+    UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect("192.0.2.1:9").map(|_| s)).and_then(|s| s.local_addr()).map(|a| a.ip().to_string()).unwrap_or_else(|_| "this computer".into())
+}
+
+/// One HTTP request; a phone with the right code counts as "seen".
+fn handle(mut s: TcpStream, code: &str, plan: &Mutex<String>, inbox: &Mutex<Vec<String>>, seen: &Mutex<Option<std::time::Instant>>) {
+    let _ = s.set_nonblocking(false);
+    let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut buf = vec![];
+    let mut chunk = [0u8; 8192];
+    // Read the head, then as much body as Content-Length says (at most 5 MB).
+    let (head_end, len) = loop {
+        let Ok(n) = s.read(&mut chunk) else { return };
+        if n == 0 {
+            return;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..i]).to_string();
+            let len = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+            break (i + 4, len);
+        }
+        if buf.len() > 64 * 1024 {
+            return;
+        }
+    };
+    if len > 5 * 1024 * 1024 {
+        reply(&mut s, "413 Too Large", "{\"error\":\"too large\"}");
+        return;
+    }
+    while buf.len() < head_end + len {
+        let Ok(n) = s.read(&mut chunk) else { return };
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let mut first = head.lines().next().unwrap_or("").split_whitespace();
+    let (method, target) = (first.next().unwrap_or(""), first.next().unwrap_or(""));
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let given = query.split('&').find_map(|kv| kv.strip_prefix("code=")).unwrap_or("");
+    if given != code {
+        reply(&mut s, "403 Forbidden", "{\"error\":\"wrong code\"}");
+        return;
+    }
+    *seen.lock().unwrap() = Some(std::time::Instant::now());
+    match (method, path) {
+        ("GET", "/plan") => {
+            let p = plan.lock().unwrap().clone();
+            reply(&mut s, "200 OK", &p);
+        }
+        ("POST", "/points") => {
+            let body = String::from_utf8_lossy(&buf[head_end..(head_end + len).min(buf.len())]).to_string();
+            inbox.lock().unwrap().push(body);
+            reply(&mut s, "200 OK", "{\"ok\":true}");
+        }
+        _ => reply(&mut s, "404 Not Found", "{\"error\":\"unknown\"}"),
+    }
+}
+
+fn reply(s: &mut TcpStream, status: &str, body: &str) {
+    let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+}
+
+impl Network {
+    /// The floor plan the phone shows (positions in metres): storeys, walls, room labels, devices and pins.
+    pub fn plan_pack(&self) -> String {
+        let m = |p: [f32; 2]| [p[0] / PX_PER_M, p[1] / PX_PER_M];
+        let mut floors: Vec<i8> = self.walls.iter().map(|w| w.floor).chain(self.devices.iter().map(|d| d.floor)).collect();
+        floors.sort();
+        floors.dedup();
+        serde_json::json!({
+            "format": "netsketch-plan",
+            "title": self.title,
+            "storeys": floors.iter().map(|f| serde_json::json!({"floor": f, "name": self.storey(*f)})).collect::<Vec<_>>(),
+            "walls": self.walls.iter().map(|w| serde_json::json!({"floor": w.floor, "a": m(w.a), "b": m(w.b), "kind": format!("{:?}", w.kind)})).collect::<Vec<_>>(),
+            "labels": self.labels.iter().map(|l| serde_json::json!({"floor": l.floor, "at": m(l.pos), "text": l.text})).collect::<Vec<_>>(),
+            "devices": self.devices.iter().filter(|d| !d.kind.foreign()).map(|d| serde_json::json!({"floor": d.floor, "at": m(d.pos), "name": d.name, "kind": format!("{:?}", d.kind), "radio": d.kind.radio()})).collect::<Vec<_>>(),
+            "points": self.points.iter().filter(|p| p.placed).map(|p| serde_json::json!({"floor": p.floor, "at": m(p.pos), "name": p.name})).collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn http(port: u16, req: &str) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(req.as_bytes()).unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_phone_finds_the_plan_and_sends_points_with_the_right_code() {
+        let n = crate::net::template("flat");
+        let link = PhoneLink::start(0, 0, "4831".into(), n.title.clone()).unwrap();
+        link.set_plan(n.plan_pack());
+        let port = link.port;
+        assert!(http(port, "GET /plan?code=0000 HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 403"));
+        let plan = http(port, "GET /plan?code=4831 HTTP/1.1\r\n\r\n");
+        assert!(plan.starts_with("HTTP/1.1 200") && plan.contains("netsketch-plan") && plan.contains("Bedroom"), "{plan}");
+        let body = r#"{"format":"netsketch-survey","points":[{"name":"Sofa","x":6.5,"y":3,"networks":[]}]}"#;
+        let r = http(port, &format!("POST /points?code=4831 HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len()));
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        let got = link.take();
+        assert_eq!(got, vec![body.to_string()]);
+        let mut n = n;
+        n.import_companion(&got[0]).unwrap();
+        let p = n.points.last().unwrap();
+        assert!(p.placed && (p.pos[0] - 6.5 * PX_PER_M).abs() < 0.01, "points the phone placed arrive in place");
+        assert!(link.last_seen.lock().unwrap().is_some());
+    }
+}

@@ -1,0 +1,32 @@
+{
+  "format": "netsketch-survey",
+  "version": 1,
+  "device": "Example phone (Android 15)",
+  "points": [
+    {"name": "Bedroom desk", "floor": 0, "time": "2026-11-04T10:00:00Z", "scans": 3,
+     "networks": [
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c0", "freq": 2412, "channel": 1, "width": 20, "rssi": -47.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -58.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -56.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:34", "freq": 5220, "channel": 44, "width": 80, "rssi": -69.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 2, "utilization": 0.18},
+      {"ssid": "Cafe \"Corner\"", "bssid": "02:11:22:33:44:55", "freq": 2462, "channel": 11, "width": 20, "rssi": -84.00, "security": "Open", "standard": "Wi-Fi 4"}
+     ]},
+    {"name": "Sofa", "floor": 0, "time": "2026-11-04T10:01:00Z", "scans": 3,
+     "connected": {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "rssi": -41.00, "link_mbps": 864.00, "freq": 5180},
+     "speed": {"down_mbps": 312.50, "latency_ms": 14.20},
+     "networks": [
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c0", "freq": 2412, "channel": 1, "width": 20, "rssi": -35.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -41.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -64.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:34", "freq": 5220, "channel": 44, "width": 80, "rssi": -80.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 2, "utilization": 0.18},
+      {"ssid": "", "bssid": "8e:00:11:22:33:44", "freq": 2437, "channel": 6, "width": 20, "rssi": -78.00, "security": "WPA2", "standard": ""}
+     ]},
+    {"name": "Hall", "floor": 0, "time": "2026-11-04T10:02:00Z", "scans": 3,
+     "networks": [
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c0", "freq": 2412, "channel": 1, "width": 20, "rssi": -21.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -24.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -68.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:34", "freq": 5220, "channel": 44, "width": 80, "rssi": -86.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 2, "utilization": 0.18}
+     ]}
+  ]
+}
