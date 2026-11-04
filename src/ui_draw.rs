@@ -216,7 +216,7 @@ impl App {
             return;
         };
         let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / net::PX_PER_M;
-        ui.label(RichText::new(format!("{len:.2} m on the map")).strong());
+        ui.label(RichText::new(trf("{} m on the map", &[&format!("{:.2}", len)])).strong());
         if ui.button(format!("{}  {}", ic::TREE, tr("Make this an outdoor area"))).on_hover_text(tr("A garden, terrace or yard with these two points as opposite corners: the Wi-Fi coverage section scores it")).clicked() {
             self.snapshot();
             self.net.next_id += 1;
@@ -238,7 +238,7 @@ impl App {
                 p.pos = [a[0] - (a[0] - p.pos[0]) * f, a[1] - (a[1] - p.pos[1]) * f];
                 self.measure = None;
                 let ctx = ui.ctx().clone();
-                self.say(&ctx, format!("The picture is now {:.1} m wide.", self.net.plans[i].width_m));
+                self.say(&ctx, trf("The picture is now {} m wide.", &[&format!("{:.1}", self.net.plans[i].width_m)]));
             }
         });
     }

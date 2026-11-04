@@ -41,7 +41,7 @@ impl App {
             }
             let p = self.net.points.iter().find(|p| p.id == id).unwrap();
             let top: Vec<String> = p.networks.iter().take(5).map(|s| format!("{:>4.0} dBm  {}", s.rssi, if s.ssid.is_empty() { "(hidden)" } else { &s.ssid })).collect();
-            resp.on_hover_text(format!("{} — {} networks measured\n{}", p.name, p.networks.len(), top.join("\n")));
+            resp.on_hover_text(trf("{} — {} networks measured\n{}", &[&p.name, &(p.networks.len()), &(top.join("\n"))]));
         }
     }
 
@@ -63,7 +63,7 @@ impl App {
         for body in got {
             match next.import_companion(&body) {
                 Ok((p, _)) => added += p,
-                Err(e) => self.say(ctx, format!("The phone sent something unreadable: {e}")),
+                Err(e) => self.say(ctx, trf("The phone sent something unreadable: {}", &[&e])),
             }
         }
         if added > 0 {
@@ -90,7 +90,7 @@ impl App {
                             l.set_plan(self.net.plan_pack(), &self.net.title);
                             self.phone = Some(l);
                         }
-                        Err(e) => self.say(&ctx, format!("Couldn't start the phone link: {e}")),
+                        Err(e) => self.say(&ctx, trf("Couldn't start the phone link: {}", &[&e])),
                     }
                 }
             }
@@ -101,7 +101,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(ic::DEVICE_MOBILE).size(20.0).color(pal().accent));
                         ui.vertical(|ui| {
-                            ui.label(RichText::new(format!("Code {}", l.code)).size(18.0).strong().color(pal().accent));
+                            ui.label(RichText::new(trf("Code {}", &[&l.code])).size(18.0).strong().color(pal().accent));
                             ui.label(RichText::new(format!("{}:{}", l.addr, l.port)).small().monospace().color(pal().dim));
                         });
                     });
@@ -135,10 +135,10 @@ impl App {
         let pts = self.net.points.len();
         let unplaced = self.net.points.iter().filter(|p| !p.placed).count();
         if pts > 0 {
-            ui.label(format!("{pts} measuring points from the companion app"));
+            ui.label(trf("{} measuring points from the companion app", &[&pts]));
             if unplaced > 0 {
                 let what = if unplaced == 1 { "1 pin still needs its place: drag the orange pin".to_string() } else { format!("{unplaced} pins still need their place: drag the orange pins") };
-                ui.label(RichText::new(format!("{} {what} to where you stood.", ic::MAP_PIN)).color(pal().amber));
+                ui.label(RichText::new(trf("{} {} to where you stood.", &[&(ic::MAP_PIN), &what])).color(pal().amber));
             }
         }
         let found = self.net.measured_networks();
@@ -183,7 +183,7 @@ impl App {
         });
         let strangers: Vec<String> = found.iter().filter(|m| m.dev.is_none() && m.best >= -85.0).map(|m| m.key.clone()).collect();
         ui.horizontal_wrapped(|ui| {
-            if !strangers.is_empty() && ui.small_button(format!("{} Add {} neighbours", ic::PLUS, strangers.len())).on_hover_text(tr("Every measured network that isn't yours and is louder than −85 dBm")).clicked() {
+            if !strangers.is_empty() && ui.small_button(trf("{} Add {} neighbours", &[&(ic::PLUS), &(strangers.len())])).on_hover_text(tr("Every measured network that isn't yours and is louder than −85 dBm")).clicked() {
                 add.extend(strangers.iter().cloned());
             }
             if ui.small_button(format!("{} {}", ic::RULER, tr("Fit to measurements"))).on_hover_text(tr("Moves measured neighbours to where their signal fits your readings best and sets how loud every measured access point is")).clicked() {
@@ -196,14 +196,14 @@ impl App {
             self.snapshot();
             let n = add.iter().filter_map(|k| self.net.add_measured_neighbour(k)).count();
             self.issues = None;
-            self.say(&ctx, format!("Added {n} neighbours with their measured channels and busy time. Drag one to where it really is, then press Fit to measurements again."));
+            self.say(&ctx, trf("Added {} neighbours with their measured channels and busy time. Drag one to where it really is, then press Fit to measurements again.", &[&n]));
         }
         if let Some((k, d)) = link {
             self.snapshot();
             self.net.link_measured(&k, d);
         }
         if let Some(e) = self.net.measured_error() {
-            ui.label(RichText::new(format!("Model vs. measurement: off by {e:.1} dB on average")).color(if e < 4.0 { pal().green } else if e < 8.0 { pal().amber } else { pal().red }));
+            ui.label(RichText::new(trf("Model vs. measurement: off by {} dB on average", &[&format!("{:.1}", e)])).color(if e < 4.0 { pal().green } else if e < 8.0 { pal().amber } else { pal().red }));
         }
     }
 
@@ -227,12 +227,12 @@ impl App {
             ui.end_row();
             if let Some(c) = &p.connected {
                 ui.label(RichText::new(tr("Phone was on")).color(pal().dim));
-                ui.label(format!("{} · {:.0} dBm · {:.0} Mbit/s link", c.ssid, c.rssi, c.link_mbps));
+                ui.label(trf("{} · {} dBm · {} Mbit/s link", &[&c.ssid, &format!("{:.0}", c.rssi), &format!("{:.0}", c.link_mbps)]));
                 ui.end_row();
             }
             if let Some(s) = &p.speed {
                 ui.label(RichText::new(tr("Speed test")).color(pal().dim));
-                ui.label(RichText::new(format!("{:.0} Mbit/s · {:.0} ms", s.down_mbps, s.latency_ms)).strong());
+                ui.label(RichText::new(trf("{} Mbit/s · {} ms", &[&format!("{:.0}", s.down_mbps), &format!("{:.0}", s.latency_ms)])).strong());
                 ui.end_row();
             }
         });
@@ -245,7 +245,7 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_width((ui.available_width() - 110.0).max(90.0));
                         ui.label(if s.ssid.is_empty() { "(hidden)" } else { &s.ssid });
-                        ui.label(RichText::new(format!("{} ch {} · {} MHz", band_of(s.freq).label(), s.channel, s.width)).small().color(pal().dim));
+                        ui.label(RichText::new(trf("{} ch {} · {} MHz", &[&(band_of(s.freq).label()), &s.channel, &s.width])).small().color(pal().dim));
                     });
                     let key = crate::companion::key_of(s);
                     let model = models.iter().find(|m| m.0 == key).and_then(|m| self.net.dev(m.1)).filter(|_| p.placed).map(|d| self.net.rssi_at(d, p.pos, p.floor, band_of(s.freq)));

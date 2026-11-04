@@ -70,7 +70,7 @@ impl App {
                         }
                         None => {
                             let err = self.textures.get(&path).and_then(|t| t.as_ref().err()).cloned().unwrap_or_default();
-                            self.say(&ctx, format!("Couldn't read that picture: {err}"));
+                            self.say(&ctx, trf("Couldn't read that picture: {}", &[&err]));
                         }
                     }
                 }
@@ -81,7 +81,7 @@ impl App {
             }
         });
         if let Some(Some(Err(e))) = self.net.plans.iter().find(|p| p.floor == self.floor).map(|p| self.textures.get(&p.path)) {
-            ui.label(RichText::new(format!("{} The picture can't be shown ({e}). Was it moved? Use Replace… to pick it again.", ic::WARNING)).color(pal().amber));
+            ui.label(RichText::new(trf("{} The picture can't be shown ({}). Was it moved? Use Replace… to pick it again.", &[&(ic::WARNING), &e])).color(pal().amber));
         }
         if let Some(p) = self.net.plans.iter_mut().find(|p| p.floor == self.floor) {
             egui::Grid::new("planpic").num_columns(2).show(ui, |ui| {
@@ -140,7 +140,7 @@ impl App {
             }
         });
         if let Some(e) = self.net.survey_error() {
-            ui.label(format!("{} readings · model is off by {e:.1} dB on average", self.net.survey.len()));
+            ui.label(trf("{} readings · model is off by {} dB on average", &[&(self.net.survey.len()), &format!("{:.1}", e)]));
         }
         self.measured_section(ui);
     }
@@ -158,7 +158,7 @@ impl App {
                 for u in kind.uses().iter().copied() {
                     let mut on = d.uses.contains(&u);
                     let (down, up) = u.demand();
-                    if ui.checkbox(&mut on, u.label()).on_hover_text(format!("≈ {down} Mbit/s down, {up} up{}", if u.sensitive() { " — needs low delay" } else { "" })).changed() {
+                    if ui.checkbox(&mut on, u.label()).on_hover_text(trf("≈ {} Mbit/s down, {} up{}", &[&down, &up, &(if u.sensitive() { " — needs low delay" } else { "" })])).changed() {
                         if on {
                             d.uses.push(u);
                         } else {
@@ -272,7 +272,7 @@ impl App {
             if !self.net.models.iter().any(|x| x.name == m.name) {
                 self.net.models.push(m.clone());
             }
-            self.say(&ctx, format!("Applied '{}'.", m.name));
+            self.say(&ctx, trf("Applied '{}'.", &[&m.name]));
         }
     }
 
@@ -298,7 +298,7 @@ impl App {
         let d = self.net.dev(id).unwrap();
         let links: Vec<&net::Link> = self.net.links.iter().filter(|l| l.a == id || l.b == id).collect();
         let wired = links.iter().filter(|l| !l.medium.wireless()).count();
-        ui.label(RichText::new(format!("{wired} of {} ports in use{}", d.port_count(), if d.poe_class > 0 { format!(" · {}", POE[d.poe_class as usize].0) } else { String::new() })).color(pal().dim));
+        ui.label(RichText::new(trf("{} of {} ports in use{}", &[&wired, &(d.port_count()), &(if d.poe_class > 0 { format!(" · {}", POE[d.poe_class as usize].0) } else { String::new() })])).color(pal().dim));
         if links.is_empty() {
             ui.label(RichText::new(tr("Nothing plugged in.")).color(pal().dim));
             return;
@@ -342,7 +342,7 @@ impl App {
             });
         }
         if d.poe_class > 0 {
-            ui.label(format!("PoE in use: {poe_total:.1} W of {:.0} W", d.poe_budget));
+            ui.label(trf("PoE in use: {} W of {} W", &[&format!("{:.1}", poe_total), &format!("{:.0}", d.poe_budget)]));
         }
     }
 }
@@ -376,7 +376,7 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
     if hits.is_empty() {
         ui.label(RichText::new(tr("No plan matches. Try the provider's name, or set the speed below.")).small().color(pal().dim));
     } else if hits.len() > 8 {
-        ui.label(RichText::new(format!("…and {} more: type more of the name.", hits.len() - 8)).small().color(pal().dim));
+        ui.label(RichText::new(trf("…and {} more: type more of the name.", &[&(hits.len() - 8)])).small().color(pal().dim));
     }
 }
 

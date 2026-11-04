@@ -850,6 +850,14 @@ impl Network {
 }
 
 pub fn floor_name(f: i8) -> String {
+    if crate::i18n::german() {
+        return match f {
+            0 => "Erdgeschoss".into(),
+            -1 => "Untergeschoss".into(),
+            f if f < 0 => format!("{}. Untergeschoss", -f),
+            f => format!("{f}. Obergeschoss"),
+        };
+    }
     match f {
         0 => "Ground floor".into(),
         1 => "1st floor".into(),

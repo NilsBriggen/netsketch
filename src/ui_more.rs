@@ -68,7 +68,7 @@ impl App {
                 if ui.add(egui::Label::new(RichText::new(self.net.name(*id)).strong()).sense(Sense::click())).on_hover_text(tr("Select it")).clicked() {
                     pick = Some(*id);
                 }
-                ui.label(RichText::new(format!("— if it fails, {n} device{} lose the network", if *n == 1 { "" } else { "s" })).color(col));
+                ui.label(RichText::new(trf("— if it fails, {} device{} lose the network", &[&n, &(if *n == 1 { "" } else { "s" })])).color(col));
             });
         }
         if let Some(id) = pick {
@@ -83,12 +83,12 @@ impl App {
         let cur = self.net.currency.clone();
         egui::Grid::new("power").num_columns(2).show(ui, |ui| {
             ui.label(RichText::new(tr("Power use")).color(pal().dim));
-            ui.label(format!("≈ {w:.0} W around the clock · {kwh:.0} kWh a year"));
+            ui.label(trf("≈ {} W around the clock · {} kWh a year", &[&format!("{:.0}", w), &format!("{:.0}", kwh)]));
             ui.end_row();
             ui.label(RichText::new(tr("Electricity")).color(pal().dim));
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut self.net.kwh_price).range(0.0..=2.0).speed(0.01).prefix(cur.clone()).suffix(" /kWh"));
-                ui.label(RichText::new(format!("≈ {cur}{:.0} a year", kwh * self.net.kwh_price)).strong());
+                ui.label(RichText::new(trf("≈ {}{} a year", &[&cur, &format!("{:.0}", kwh * self.net.kwh_price)])).strong());
             });
             ui.end_row();
             ui.label(RichText::new(tr("Traffic at")).color(pal().dim));
@@ -230,22 +230,21 @@ impl App {
         if !self.cov_cache.as_ref().is_some_and(|c| c.0 == self.floor && now - c.1 < 1.0) {
             self.cov_cache = Some((self.floor, now, self.net.coverage(self.floor)));
         }
-        self.outdoor_rows(ui);
         let Some(Some(c)) = self.cov_cache.as_ref().map(|c| c.2.as_ref()) else { return };
         let (good, usable, area) = (c.good, c.usable, c.area_m2);
         let col = if good >= 0.9 { pal().green } else if good >= 0.7 { pal().amber } else { pal().red };
-        ui.label(RichText::new(format!("{:.0}% of this storey (≈ {area:.0} m²) has good Wi-Fi, {:.0}% at least usable.", good * 100.0, usable * 100.0)).color(col))
-            .on_hover_text(format!("Good: {:.0} dBm or better. Usable: {:.0} dBm or better. Measured inside the outline of the walls on this storey.", plan::GOOD, plan::USABLE));
+        ui.label(RichText::new(trf("{}% of this storey (≈ {} m²) has good Wi-Fi, {}% at least usable.", &[&format!("{:.0}", good * 100.0), &format!("{:.0}", area), &format!("{:.0}", usable * 100.0)])).color(col))
+            .on_hover_text(trf("Good: {} dBm or better. Usable: {} dBm or better. Measured inside the outline of the walls on this storey.", &[&format!("{:.0}", plan::GOOD), &format!("{:.0}", plan::USABLE)]));
         ui.horizontal_wrapped(|ui| {
             if good < 0.98 && ui.small_button(format!("{} {}", ic::MAGNIFYING_GLASS, tr("Where would another access point help?"))).clicked() {
                 self.ap_hint = self.net.suggest_ap(self.floor).map(|(p, a, b)| (self.floor, p, a, b));
                 if self.ap_hint.is_none() {
                     let ctx = ui.ctx().clone();
-                    self.say(&ctx, "No spot found where one more access point adds good coverage.");
+                    self.say(&ctx, tr("No spot found where one more access point adds good coverage."));
                 }
             }
             if let Some((f, p, a, b)) = self.ap_hint.filter(|h| h.0 == self.floor) {
-                ui.label(RichText::new(format!("Marked on the map: {:.0}% → {:.0}%", a * 100.0, b * 100.0)).color(pal().green));
+                ui.label(RichText::new(trf("Marked on the map: {}% → {}%", &[&format!("{:.0}", a * 100.0), &format!("{:.0}", b * 100.0)])).color(pal().green));
                 if ui.small_button(format!("{} {}", ic::PLUS, tr("Put one there"))).on_hover_text(tr("Adds an access point at the mark; connect it by cable to a switch or the router")).clicked() {
                     self.snapshot();
                     let id = self.net.add_device(Kind::AccessPoint, p);
@@ -260,6 +259,7 @@ impl App {
                 }
             }
         });
+        self.outdoor_rows(ui);
     }
 }
 
@@ -296,7 +296,7 @@ impl App {
                 ui.label(RichText::new(ic::TREE).color(pal().green));
                 ui.add(TextEdit::singleline(&mut o.name).desired_width(110.0));
                 let col = if c.good > 0.8 { pal().green } else if c.usable > 0.5 { pal().amber } else { pal().red };
-                ui.label(RichText::new(format!("{:.0}% good, {:.0}% usable · {:.0} m²", c.good * 100.0, c.usable * 100.0, c.area_m2)).color(col));
+                ui.label(RichText::new(trf("{}% good, {}% usable · {} m²", &[&format!("{:.0}", c.good * 100.0), &format!("{:.0}", c.usable * 100.0), &format!("{:.0}", c.area_m2)])).color(col));
                 if ui.small_button(ic::TRASH).on_hover_text(tr("Remove this outdoor area")).clicked() {
                     remove = Some(id);
                 }
@@ -326,7 +326,7 @@ impl App {
                         let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                         self.compare = Some((name, other, vec![]));
                     }
-                    Err(e) => self.say(&ctx, format!("Couldn't open that plan: {e}")),
+                    Err(e) => self.say(&ctx, trf("Couldn't open that plan: {}", &[&e])),
                 }
             }
         }

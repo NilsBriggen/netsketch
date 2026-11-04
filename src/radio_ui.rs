@@ -91,7 +91,7 @@ pub fn issue_row(ui: &mut egui::Ui, i: &Issue) -> (bool, Option<Fix>) {
 pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut String) -> Option<Device> {
     const SHOWN: usize = 8;
     if let Some(p) = crate::catalog::find(&d.model) {
-        ui.label(RichText::new(format!("{} {}", p.year, p.note)).small().color(pal().dim)).on_hover_text(format!("{}\nSpecs from {}", p.summary(), p.source));
+        ui.label(RichText::new(format!("{} {}", p.year, p.note)).small().color(pal().dim)).on_hover_text(trf("{}\nSpecs from {}", &[&(p.summary()), &p.source]));
     }
     let total = crate::catalog::search(d.kind, "").len();
     ui.add(TextEdit::singleline(query).hint_text(format!("{}  Find a real model ({total} in the catalog)", ic::MAGNIFYING_GLASS)).desired_width(ui.available_width() - 8.0))
@@ -116,7 +116,7 @@ pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut Stri
         }
     }
     if hits.len() > SHOWN {
-        ui.label(RichText::new(format!("…and {} more: type more of the name.", hits.len() - SHOWN)).small().color(pal().dim));
+        ui.label(RichText::new(trf("…and {} more: type more of the name.", &[&(hits.len() - SHOWN)])).small().color(pal().dim));
     }
     ui.add_space(4.0);
     applied
@@ -317,7 +317,7 @@ impl App {
             ui.end_row();
             let (l24, l5) = w.kind.loss();
             ui.label(RichText::new(tr("Signal loss")).color(pal().dim)).on_hover_text(tr("Every 10 dB lost leaves a tenth of the signal; 3 dB is half."));
-            ui.label(format!("−{l24:.0} dB at 2.4 GHz · −{l5:.0} dB at 5 GHz")).on_hover_text(w.kind.note());
+            ui.label(trf("−{} dB at 2.4 GHz · −{} dB at 5 GHz", &[&format!("{:.0}", l24), &format!("{:.0}", l5)])).on_hover_text(w.kind.note());
             ui.end_row();
             ui.label(RichText::new(tr("Storey")).color(pal().dim));
             ui.add(egui::DragValue::new(&mut w.floor).range(-3..=20).custom_formatter(|v, _| crate::net::floor_name(v as i8)));
@@ -338,7 +338,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(tr("Put in")).color(pal().dim));
             for (label, kind, width) in [("Door", Some(WallKind::Wood), 0.9), ("Window", Some(WallKind::Glass), 1.2), ("Opening", None, 0.9)] {
-                if ui.small_button(label).on_hover_text(format!("A {width} m {} in the middle of this wall", label.to_lowercase())).clicked() {
+                if ui.small_button(label).on_hover_text(trf("A {} m {} in the middle of this wall", &[&width, &(label.to_lowercase())])).clicked() {
                     self.snapshot();
                     let msg = insert_opening(&mut self.net, id, kind, width);
                     let ctx = ui.ctx().clone();
@@ -501,7 +501,7 @@ impl App {
                     });
                     let limit = b.eirp_limit(d.ch[i]);
                     let over = d.tx[i] > limit;
-                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(format!("EU limit on {} channel {}: {:.0} dBm{}", b.label(), d.ch[i], limit, if over { " — above it!" } else { "" }));
+                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(trf("EU limit on {} channel {}: {} dBm{}", &[&(b.label()), &(d.ch[i]), &format!("{:.0}", limit), &(if over { " — above it!" } else { "" })]));
                 } else {
                     ui.label(RichText::new(if allowed == 0 { "not with this standard" } else { "off" }).small().color(pal().dim));
                     ui.label("");
@@ -515,7 +515,7 @@ impl App {
             .filter(|b| d.bands[b.i()] && d.wifi.max_width(b.i()) > 0)
             .map(|b| format!("{} {:.0}", b.label(), d.wifi.stream20(b.i()) * width_factor(d.width[b.i()].min(d.wifi.max_width(b.i()))) * d.streams as f32))
             .collect();
-        ui.label(RichText::new(format!("Top rate {} Mbit/s", top.join(" · "))).small().color(pal().dim)).on_hover_text(tr("Link rate on paper; real throughput is about 60% of it, shared by everyone on the channel."));
+        ui.label(RichText::new(trf("Top rate {} Mbit/s", &[&(top.join(" · "))])).small().color(pal().dim)).on_hover_text(tr("Link rate on paper; real throughput is about 60% of it, shared by everyone on the channel."));
         }
         if kind == Kind::Neighbor {
             ui.add(egui::Slider::new(&mut d.busy, 0.0..=1.0).text("of the airtime they use").custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
@@ -549,7 +549,7 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new(format!("≈ +{:.0} dB towards where it points", (10.0 * (360.0 / d.beam).log10()).min(24.0))).small().color(pal().dim));
+            ui.label(RichText::new(trf("≈ +{} dB towards where it points", &[&format!("{:.0}", (10.0 * (360.0 / d.beam).log10()).min(24.0))])).small().color(pal().dim));
         }
         if let Some(t) = aim_target {
             self.net.aim_at(id, t);
@@ -632,12 +632,12 @@ impl App {
             });
             ui.checkbox(&mut d.stp_short, tr("Old short path-cost scale (802.1D-1998)")).on_hover_text(tr("1 Gbit/s costs 4 instead of 20000. Mixed with modern switches, paths through this device look far too cheap."));
             let mac = d.ifaces.first().map(|f| f.mac.clone()).unwrap_or_default();
-            ui.label(RichText::new(format!("Bridge ID {}.{mac}", d.priority)).small().color(pal().dim)).on_hover_text(tr("Lowest wins the root election"));
+            ui.label(RichText::new(trf("Bridge ID {}.{}", &[&d.priority, &mac])).small().color(pal().dim)).on_hover_text(tr("Lowest wins the root election"));
         }
         if root == Some(id) {
             ui.label(RichText::new(format!("{}  {}", ic::CROWN, tr("Root bridge: every path is measured from here."))).color(pal().amber));
         } else if let Some(c) = cost {
-            ui.label(RichText::new(format!("Path cost to the root: {c}")).small().color(pal().dim));
+            ui.label(RichText::new(trf("Path cost to the root: {}", &[&c])).small().color(pal().dim));
         }
     }
 
@@ -751,7 +751,7 @@ impl App {
             }
             if done {
                 self.walks.remove(&id);
-                self.say(ctx, format!("{} is back where it started.", self.net.name(id)));
+                self.say(ctx, trf("{} is back where it started.", &[&(self.net.name(id))]));
             }
             self.after_move(ctx, id);
         }
@@ -793,7 +793,7 @@ impl App {
         self.push_logs(logs);
         self.terms.entry(id).or_default().lines.push(format!("[Wi-Fi] {info}"));
         self.sample(id, now, true);
-        self.say(ctx, format!("{name} roamed to {to} ({:.0} ms)", r.ms));
+        self.say(ctx, trf("{} roamed to {} ({} ms)", &[&name, &to, &format!("{:.0}", r.ms)]));
     }
 
     fn sample(&mut self, id: u32, now: f64, roam: bool) {
@@ -809,7 +809,7 @@ impl App {
         if let Some(l) = self.net.wifi_link_of(id).cloned() {
             let (ap, _) = self.net.wifi_ends(&l).map(|(a, c)| (a.clone(), c.clone())).unwrap();
             let Some(s) = self.net.link_signal(&l) else {
-                ui.label(RichText::new(format!("{} and {} have no Wi-Fi band in common (check both sides' bands), so they can't talk.", d.name, ap.name)).color(pal().red));
+                ui.label(RichText::new(trf("{} and {} have no Wi-Fi band in common (check both sides' bands), so they can't talk.", &[&d.name, &ap.name])).color(pal().red));
                 return;
             };
             ui.horizontal(|ui| {
@@ -821,10 +821,10 @@ impl App {
                 };
                 ui.label(RichText::new(bars).size(34.0).color(quality_color(s.rssi)));
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(format!("{:.0} dBm · {}", s.rssi, s.quality())).size(20.0).strong().color(quality_color(s.rssi)));
+                    ui.label(RichText::new(trf("{} dBm · {}", &[&format!("{:.0}", s.rssi), &(s.quality())])).size(20.0).strong().color(quality_color(s.rssi)));
                     let on_guest = d.ifaces.first().is_some_and(|f| f.vlan == crate::extras::GUEST_VLAN);
                     let ssid = if on_guest && !ap.guest_ssid.is_empty() { &ap.guest_ssid } else { &ap.ssid };
-                    ui.label(RichText::new(format!("via {} · '{ssid}'", ap.name)).color(pal().dim));
+                    ui.label(RichText::new(trf("via {} · '{}'", &[&ap.name, &ssid])).color(pal().dim));
                 });
             });
             egui::Grid::new(("wifi_tab", id)).num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
@@ -837,9 +837,9 @@ impl App {
                 if let Some((e, why)) = self.e2e.get(&id).filter(|_| s.alive()) {
                     let real = e.min(s.mbps);
                     ui.label(RichText::new(tr("To the internet")).color(pal().dim));
-                    let r = ui.label(RichText::new(format!("≈ {real:.0} Mbit/s")).strong());
+                    let r = ui.label(RichText::new(trf("≈ {} Mbit/s", &[&format!("{:.0}", real)])).strong());
                     if real < s.mbps * 0.95 {
-                        r.on_hover_text(format!("Limited by {why}"));
+                        r.on_hover_text(trf("Limited by {}", &[&why]));
                     }
                     ui.end_row();
                 }
@@ -868,8 +868,8 @@ impl App {
                 }
                 for (n, r, m) in clients {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{r:>4.0} dBm")).monospace().color(quality_color(r)));
-                        ui.label(format!("{n} — ≈ {m:.0} Mbit/s"));
+                        ui.label(RichText::new(trf("{} dBm", &[&format!("{:>4.0}", r)])).monospace().color(quality_color(r)));
+                        ui.label(trf("{} — ≈ {} Mbit/s", &[&n, &format!("{:.0}", m)]));
                     });
                 }
             }
@@ -884,11 +884,11 @@ impl App {
                 } else {
                     format!("shared ×{c:.1} with {}", names.join(", "))
                 };
-                ui.label(format!("{} ch {} ({} MHz): {with}", b.label(), self.net.channel(&d, b), d.width[b.i()]));
+                ui.label(trf("{} ch {} ({} MHz): {}", &[&(b.label()), &(self.net.channel(&d, b)), &(d.width[b.i()]), &with]));
             }
             }
         } else {
-            ui.label(RichText::new(format!("{} is on a cable, not on Wi-Fi.", d.name)).color(pal().dim));
+            ui.label(RichText::new(trf("{} is on a cable, not on Wi-Fi.", &[&d.name])).color(pal().dim));
             return;
         }
         // Only devices that connect to Wi-Fi can walk around and roam.
@@ -929,7 +929,7 @@ impl App {
                 };
                 ui.label(format!("{label}{tag}"));
                 if t.ifaces.iter().any(|f| f.vlan == crate::extras::GUEST_VLAN) && !t.guest_ssid.is_empty() {
-                    ui.label(RichText::new(format!("+ '{}' (guest)", t.guest_ssid)).small().color(pal().dim));
+                    ui.label(RichText::new(trf("+ '{}' (guest)", &[&t.guest_ssid])).small().color(pal().dim));
                 }
                 if t.kind != Kind::Neighbor {
                     ui.label(RichText::new(format!("({})", t.name)).small().color(pal().dim));
@@ -973,12 +973,12 @@ impl App {
         }
         let subs = d.ifaces.iter().filter(|f| f.parent.is_some()).count();
         if subs > 4 {
-            ui.label(RichText::new(format!("… and {subs} VLAN interfaces")).small().color(pal().dim));
+            ui.label(RichText::new(trf("… and {} VLAN interfaces", &[&subs])).small().color(pal().dim));
         }
         if let Some(s) = self.net.wifi_link_of(id).and_then(|l| self.net.link_signal(l)) {
-            ui.label(RichText::new(format!("{:.0} dBm on {} · Wi-Fi link ≈ {:.0} Mbit/s", s.rssi, s.band.label(), s.mbps)).color(quality_color(s.rssi)));
+            ui.label(RichText::new(trf("{} dBm on {} · Wi-Fi link ≈ {} Mbit/s", &[&format!("{:.0}", s.rssi), &(s.band.label()), &format!("{:.0}", s.mbps)])).color(quality_color(s.rssi)));
             if let Some((e, why)) = self.e2e.get(&id).filter(|e| e.0 < s.mbps * 0.95) {
-                ui.label(RichText::new(format!("To the internet ≈ {e:.0} Mbit/s — {why}")).small().color(pal().dim));
+                ui.label(RichText::new(trf("To the internet ≈ {} Mbit/s — {}", &[&format!("{:.0}", e), &why])).small().color(pal().dim));
             }
         }
         if d.kind.transmits() {
