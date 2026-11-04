@@ -1,5 +1,5 @@
 //! Window parts for: failures and weak spots, power use, time of day, extra Wi-Fi names, joining a name,
-//! the internet-port choice, searching devices and exporting the map as a picture.
+//! the internet-port choice, searching devices, exporting the map as a picture and comparing two options.
 use super::*;
 
 impl App {
@@ -55,6 +55,7 @@ impl App {
     /// Overview: what breaks the most if it fails, power use and the hour traffic is looked at.
     pub(crate) fn resilience_and_power(&mut self, ui: &mut egui::Ui) {
         self.coverage_section(ui);
+        self.compare_section(ui);
         if Self::section_hint(ui, "Weak spots", "Devices whose failure cuts others off. A second path (cable or mesh), a spare switch on the shelf, or a mobile backup line takes the sting out.") {
         let spots = self.net.weak_spots();
         if spots.is_empty() {
@@ -256,6 +257,66 @@ impl App {
                 if ui.small_button(ic::X).on_hover_text("Hide the mark").clicked() {
                     self.ap_hint = None;
                 }
+            }
+        });
+    }
+}
+
+/// What two options are compared on: cost, cable, power, Wi-Fi and problems.
+fn summary(n: &Network) -> Vec<(&'static str, String)> {
+    let (_, cost) = crate::shopping(n);
+    let cable: f32 = n.links.iter().filter(|l| !l.medium.wireless() && l.medium != Medium::Powerline).map(|l| n.link_len(l)).sum();
+    let mut floors: Vec<i8> = n.walls.iter().map(|w| w.floor).collect();
+    floors.sort();
+    floors.dedup();
+    let cov: Vec<f32> = floors.iter().filter_map(|f| n.coverage(*f)).map(|c| c.good).collect();
+    let good = if cov.is_empty() { "—".to_string() } else { format!("{:.0}%", cov.iter().sum::<f32>() / cov.len() as f32 * 100.0) };
+    let issues = n.check();
+    let count = |l: Level| issues.iter().filter(|i| i.level == l).count();
+    vec![
+        ("Hardware and cable", format!("{}{cost:.0}", n.currency)),
+        ("Cable to lay", format!("{cable:.0} m")),
+        ("Power a year", format!("{:.0} kWh ({}{:.0})", n.yearly_kwh(), n.currency, n.yearly_kwh() * n.kwh_price)),
+        ("Good Wi-Fi (storeys with walls)", good),
+        ("Devices", n.devices.iter().filter(|d| !d.kind.foreign()).count().to_string()),
+        ("Problems (red / amber)", format!("{} / {}", count(Level::Error), count(Level::Warning))),
+    ]
+}
+
+impl App {
+    /// Side by side with another saved plan: is option B worth what it costs?
+    fn compare_section(&mut self, ui: &mut egui::Ui) {
+        if !Self::section_hint(ui, "Compare options", "Save each idea as its own plan (for example 'mesh' and 'cabled access points'), then compare this one with another: cost, cable, power, Wi-Fi coverage and problems.") {
+            return;
+        }
+        let pick = ui.button(format!("{}  Compare with another plan…", ic::SCALES)).clicked();
+        if pick {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Network plan", &["netplan", "json"]).pick_file() {
+                let ctx = ui.ctx().clone();
+                match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Network>(&t).map_err(|e| e.to_string())) {
+                    Ok(mut other) => {
+                        other.sanitize();
+                        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.compare = Some((name, other, vec![]));
+                    }
+                    Err(e) => self.say(&ctx, format!("Couldn't open that plan: {e}")),
+                }
+            }
+        }
+        let Some((name, other, rows)) = self.compare.as_mut() else { return };
+        if rows.is_empty() || ui.small_button(format!("{}  Compare again", ic::ARROWS_CLOCKWISE)).clicked() {
+            *rows = summary(&self.net).into_iter().zip(summary(other)).map(|((k, a), (_, b))| (k, a, b)).collect();
+        }
+        egui::Grid::new("compare").num_columns(3).striped(true).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
+            ui.label("");
+            ui.label(RichText::new("This plan").strong());
+            ui.label(RichText::new(name.as_str()).strong());
+            ui.end_row();
+            for (k, a, b) in rows.iter() {
+                ui.label(RichText::new(*k).color(pal().dim));
+                ui.label(a);
+                ui.label(b);
+                ui.end_row();
             }
         });
     }

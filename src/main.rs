@@ -368,6 +368,8 @@ struct App {
     tab: Option<i32>,
     /// The answer picked for this lesson's question: (lesson, answer).
     quiz_pick: Option<(usize, usize)>,
+    /// Another option to compare with: its name, the plan, and both summaries as worked out last.
+    compare: Option<(String, Network, Vec<(&'static str, String, String)>)>,
     reading: f32,
     issues: Option<Vec<Issue>>,
     undo: Vec<Network>,
@@ -454,6 +456,7 @@ impl App {
             settings,
             tab: None,
             quiz_pick: None,
+            compare: None,
             reading: -65.0,
             issues: None,
             undo: vec![],
