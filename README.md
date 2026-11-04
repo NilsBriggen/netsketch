@@ -12,7 +12,8 @@ NetSketch started as a modern successor to [Filius](https://www.lernsoftware-fil
 - Drag routers, switches, access points, extenders, mesh speakers, PCs, phones, TVs, NAS boxes, cameras and more onto the map, and connect them with Cat 5/5e/6/6A, fibre, powerline, Wi-Fi or a 5G backup line.
 - Draw walls by material (drywall, brick, concrete, glass, metal…). Work across several storeys, and put a picture of your floor plan underneath to trace over.
 - Model **ports properly**: a router can have "1 × 10G SFP+ WAN, 1 × 2.5G, 4 × 1G". Every cable plugs into a specific port, and its speed comes from the ports at both ends.
-- Plan VLANs, guest Wi-Fi, firewall rules, IPv6, Power over Ethernet budgets and spanning tree.
+- Plan VLANs, guest Wi-Fi, firewall rules (port ranges, TCP/UDP, time schedules for parental control), UPnP, ad blocking, IPv6 with prefix delegation, Power over Ethernet budgets, spanning tree and LACP bundles.
+- Storey heights and mounting heights, cable routes drawn along the walls, Thread and Zigbee gadgets with their hub, VPN remote access (it tells you when carrier-grade NAT gets in the way), per-device priority (QoS), Wi-Fi 7 multi-link and UPS runtime.
 
 ### Pick real hardware instead of typing specs
 A built-in catalog fills in the radio, ports, power draw and price in one click:
@@ -39,6 +40,8 @@ Each entry links to the page its specs come from. Values that had to be estimate
 - Every device has a terminal: `ipconfig`, `ping`, `traceroute`, `nslookup`, `speedtest` (real speed and the bottleneck on the way), `wifi`, `stp`, `vlan`, `arp`, `route` and more.
 - A built-in browser opens pages hosted on your simulated servers, or real websites.
 - Watch packets travel along the cables in the packet log, try "what if this cable breaks?", and see traffic at the evening busy hour.
+- Click any packet to see its layers (Ethernet, IP with TTL, TCP/UDP with sequence numbers, the application), or step through a packet's journey hop by hop.
+- Mail between servers (`mail`, `inbox`), ARP and switch MAC tables, and RIP dynamic routing for the classic routing lessons.
 
 ### Plan the practical side
 - A shopping list with prices, the cable you'll need to lay, and yearly power use and running cost (TVs and PCs count their typical hours, not 24/7).
