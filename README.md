@@ -28,9 +28,10 @@ A built-in catalog fills in the radio, ports, power draw and price in one click:
 Each entry links to the page its specs come from. Values that had to be estimated (often power draw, price or launch year) say so in the entry's note.
 
 ### See the Wi-Fi
-- A coverage heat map per storey and band (2.4, 5 and 6 GHz), based on an indoor path-loss model with per-wall losses.
+- A coverage heat map per storey and band (2.4, 5 and 6 GHz), from a multi-wall path-loss model: free-space distance plus each wall's material (hit at an angle costs more) and the floors in between.
+- European rules built in: 5 GHz channels 36–64 and 100–140 (30 dBm on the upper ones), 6 GHz up to 6425 MHz, radar (DFS) channel checks, and the 1/5/9/13 plan on 2.4 GHz.
 - Channel planning, neighbours' networks and interference, roaming and band steering. You can take a phone for a walk through the house and watch it hand over.
-- "Where would another access point help most?" and a coverage score for every storey.
+- "Where would another access point help most?", a coverage score for every storey, and outdoor areas (garden, terrace) with their own score.
 - Calibrate the model with real measurements: import survey files, or use the companion phone app (below).
 
 ### Simulate
@@ -40,7 +41,8 @@ Each entry links to the page its specs come from. Values that had to be estimate
 - Watch packets travel along the cables in the packet log, try "what if this cable breaks?", and see traffic at the evening busy hour.
 
 ### Plan the practical side
-- A shopping list with prices, the cable you'll need to lay, and yearly power use and running cost.
+- A shopping list with prices, the cable you'll need to lay, and yearly power use and running cost (TVs and PCs count their typical hours, not 24/7).
+- Compare two saved options side by side: cost, cable, power, Wi-Fi coverage and open problems.
 - Export the plan, its addresses and the shopping list as a document, or the map as a picture.
 - Undo and redo, autosave, and "Recover last session".
 
@@ -49,7 +51,13 @@ Each entry links to the page its specs come from. Values that had to be estimate
 
 *Small flat · Typical home · Walk & roam · Range-extender trouble · Crowded apartment block · The speaker that ate the network · The nightmare home · University campus · Office with 100 VLANs · Two networks and a router (the classic first lesson)*
 
+Every lesson ends with a check-yourself question (progress is remembered), and five scenarios are "find the fault" exercises with a **Check my work** button.
+
 Old Filius projects (`.fls`) can be opened too.
+
+### Comfort
+- English or German (settings menu, top right), dark, light or high-contrast colours, and a text-size slider.
+- Keyboard: Tab walks through the devices on the map, the arrow keys nudge them, and the keyboard button lists every shortcut.
 
 ## Getting started
 
@@ -72,6 +80,8 @@ cargo test                                  # all tests, no GUI needed
 cargo test ports                            # tests whose name contains "ports"
 cargo run -- --screenshot shots/now.png     # render the app to a PNG and exit
 ```
+
+GitHub Actions builds and tests every push on Linux, Windows and macOS; tagging a version (`v0.2.0`) attaches release builds for all three. German text lives in `data/de.json` (interface) and `data/lessons_de.json` (lessons): English text is the key, and anything missing stays English.
 
 `CLAUDE.md` describes the architecture in more detail.
 
