@@ -97,7 +97,7 @@ GitHub Actions builds and tests every push on Linux, Windows and macOS; tagging 
 
 Measured networks named like yours are matched to your access points. The others can be added as neighbours, positioned where their signal fits your readings. If the phone can't connect, allow TCP 47878 and UDP 47879 through the computer's firewall.
 
-A ready-built `NetSketch-Survey.apk` is attached to each [GitHub release](https://github.com/NilsBriggen/netsketch/releases), and [`INSTALL.txt`](companion-android/INSTALL.txt) walks through installing and linking it. To build it yourself, run `./build.sh`. It needs JDK 17+ and the Android SDK, but no Gradle.
+Build the app with `./build.sh` (JDK 17+ and the Android SDK, no Gradle). CI builds it on every push, and from the first tagged release on, a ready-built `NetSketch-Survey.apk` is attached to each [GitHub release](https://github.com/NilsBriggen/netsketch/releases). [`INSTALL.txt`](companion-android/INSTALL.txt) walks through installing and linking it.
 
 ## Adding hardware to the catalog
 
