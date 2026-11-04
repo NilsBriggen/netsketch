@@ -8,6 +8,7 @@ import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.ViewConfiguration;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -72,12 +73,15 @@ final class PlanView extends View {
     /** The person's zoom and pan on top of the fitted view. */
     private float zoom = 1, panX, panY;
     private boolean moved;
-    private float lastX, lastY;
+    private float lastX, lastY, downX, downY;
+    /** How far a finger may wander and still count as a tap (Android's own threshold). */
+    private final int slop;
     private final ScaleGestureDetector pinch;
     private final GestureDetector taps;
 
     PlanView(Context c) {
         super(c);
+        slop = ViewConfiguration.get(c).getScaledTouchSlop();
         setBackground(Ui.round(c, Ui.BG, 14, Ui.LINE));
         pinch = new ScaleGestureDetector(c, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
@@ -245,8 +249,8 @@ final class PlanView extends View {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 moved = false;
-                lastX = e.getX();
-                lastY = e.getY();
+                lastX = downX = e.getX();
+                lastY = downY = e.getY();
                 getParent().requestDisallowInterceptTouchEvent(true);
                 break;
             case MotionEvent.ACTION_POINTER_DOWN:
@@ -260,7 +264,7 @@ final class PlanView extends View {
                 if (e.getPointerCount() > 1 || zoom > 1.01f) {
                     panX += x - lastX;
                     panY += y - lastY;
-                    if (Math.hypot(x - lastX, y - lastY) > 1) moved = true;
+                    if (Math.hypot(x - downX, y - downY) > slop) moved = true;
                     invalidate();
                 } else if (Math.hypot(e.getX() - lastX, e.getY() - lastY) > Ui.dp(getContext(), 12)) {
                     getParent().requestDisallowInterceptTouchEvent(false);
@@ -297,7 +301,8 @@ final class PlanView extends View {
     private void tap(float x, float y) {
         if (moved || scale <= 0) return;
         Pin hit = null;
-        double hd = Ui.dp(getContext(), 16);
+        // Only right on a pin: a tap next to one still picks that spot.
+        double hd = Ui.dp(getContext(), 10);
         for (Pin q : pins) {
             if (q.floor != floor || q.fromComputer) continue;
             double d = Math.hypot(sx(q.x) - x, sy(q.y) - y);

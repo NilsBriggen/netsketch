@@ -23,7 +23,8 @@ public final class T {
 
     /** A translated template with %s / %d / %.0f placeholders, filled in. */
     public static String f(String en, Object... args) {
-        return String.format(Locale.ROOT, t(en), args);
+        // German numbers the way the phone writes them ("3,2 m"; Swiss German keeps "3.2").
+        return String.format(german ? Locale.getDefault() : Locale.ROOT, t(en), args);
     }
 
     public static final Map<String, String> DE = new HashMap<>();
@@ -90,6 +91,10 @@ public final class T {
         de("OK", "OK");
         de("Measure anyway", "Trotzdem messen");
         de("The speed test couldn't reach the internet.", "Der Geschwindigkeitstest hat das Internet nicht erreicht.");
+        de("No Wi-Fi connection for the speed test, so it was skipped (it never uses mobile data).", "Keine WLAN-Verbindung für den Geschwindigkeitstest, deshalb ausgelassen (er nutzt nie mobile Daten).");
+        de("No networks heard here. Try again.", "Hier war kein Netzwerk zu hören. Versuchen Sie es noch einmal.");
+        de("Seeing nearby networks needs your precise location: choose \"Precise\" when Android asks.", "Für Netzwerke in der Nähe braucht es Ihren genauen Standort: wählen Sie \"Genau\", wenn Android fragt.");
+        de("Open app settings", "App-Einstellungen öffnen");
         // Results
         de("Networks here", "Netzwerke hier");
         de("Networks at %s · %d", "Netzwerke bei %s · %d");
@@ -101,6 +106,7 @@ public final class T {
         de(" · %.0f%% busy", " · %.0f%% belegt");
         de(" · %d devices", " · %d Geräte");
         de("%s ch %d · %d MHz · %s", "%s Kanal %d · %d MHz · %s");
+        de("Open (no password)", "Offen (ohne Passwort)");
         de("Channels", "Kanäle");
         de("What this spot shows", "Was dieser Punkt zeigt");
         de("All networks", "Alle Netzwerke");
@@ -149,6 +155,8 @@ public final class T {
         de("Found NetSketch with '%s'. Enter the code it shows.", "NetSketch mit '%s' gefunden. Geben Sie den angezeigten Code ein.");
         de("Found NetSketch. Enter the code it shows.", "NetSketch gefunden. Geben Sie den angezeigten Code ein.");
         de("Didn't find it automatically (some routers block that). Type the address NetSketch shows.", "Nicht automatisch gefunden (manche Router blockieren das). Geben Sie die Adresse ein, die NetSketch zeigt.");
+        de("Enter the 4-digit code NetSketch shows.", "Geben Sie den 4-stelligen Code ein, den NetSketch zeigt.");
+        de("unknown error", "unbekannter Fehler");
         de("Linked — tap where you're standing.", "Verbunden — tippen Sie, wo Sie stehen.");
         de("NetSketch says the code is wrong — check the code it shows.", "NetSketch sagt, der Code ist falsch — prüfen Sie den angezeigten Code.");
         de("Couldn't reach NetSketch (%s). Is the computer on the same Wi-Fi and the link switched on?", "NetSketch nicht erreichbar (%s). Ist der Computer im selben WLAN und die Verbindung eingeschaltet?");
@@ -159,6 +167,7 @@ public final class T {
         de("Sent %d points to NetSketch.", "%d Punkte an NetSketch gesendet.");
         // Files
         de("Couldn't keep the points: %s", "Die Punkte konnten nicht gespeichert werden: %s");
+        de("The saved points couldn't be read. The damaged file was kept as survey.json.bad.", "Die gespeicherten Punkte konnten nicht gelesen werden. Die beschädigte Datei wurde als survey.json.bad behalten.");
         de("Measure at least one spot first.", "Messen Sie zuerst mindestens einen Punkt.");
         de("Couldn't save to Downloads.", "Konnte nicht in Downloads speichern.");
         de("Couldn't save: %s", "Konnte nicht speichern: %s");

@@ -11,7 +11,11 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.location.LocationManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiInfo;
@@ -66,6 +70,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * NetSketch Survey. Link it to NetSketch on your computer (it finds it on the Wi-Fi), tap where you stand
@@ -102,7 +107,7 @@ public class MainActivity extends Activity {
     private Ui.Spark spark;
     private EditText nameField, floorField;
     private Switch speedSwitch;
-    private Button measureButton, sendButton, clearButton, linkButton;
+    private Button measureButton, sendButton, clearButton, linkButton, settingsButton;
     private LinearLayout planCard, storeyRow, results, resultsCard, pointList, floorRow, throttleTip, measureCard;
     private PlanView plan;
     private boolean nameTyped, settingName;
@@ -111,10 +116,31 @@ public class MainActivity extends Activity {
     private Survey.Point current;
     private Map<String, Survey.Seen> heard;
     private int round, failedStarts;
-    private long roundStart;
+    private long roundStart, waitUntil;
     private boolean measuring, limited;
+    /** A scan this app started is still out: only then does a "results ready" broadcast count (Android sends them for its own scans too). */
+    private boolean scanPending;
     private BroadcastReceiver receiver;
-    private final Runnable roundTimeout = this::collectRound;
+    private final Runnable roundTimeout = this::collectRound, nextRound = this::scanRound;
+    /** Counts down until Android allows a fresh scan, then carries on; the person stays where they are. */
+    private final Runnable countdown = new Runnable() {
+        @Override
+        public void run() {
+            if (!measuring) return;
+            long left = waitUntil - SystemClock.elapsedRealtime();
+            if (left <= 0) {
+                scanRound();
+                return;
+            }
+            int s = (int) Math.ceil(left / 1000.0);
+            measureButton.setText(T.f("Waiting for Android… %d s", s));
+            measureStatus.setText(T.f("Android allows 4 Wi-Fi scans every 2 minutes. Fresh scan in %d s — stay where you are.", s));
+            measureStatus.setTextColor(Ui.AMBER);
+            ui.postDelayed(this, 1000);
+        }
+    };
+    /** One send at a time: after a point, from the Send button and from the plan refresh. */
+    private final AtomicBoolean sending = new AtomicBoolean();
     private int ticks;
     private final Runnable live = new Runnable() {
         @Override
@@ -142,8 +168,9 @@ public class MainActivity extends Activity {
             WindowInsetsController c = getWindow().getInsetsController();
             int light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
             if (c != null) c.setSystemBarsAppearance(light, light);
+        } else if (!Ui.dark) {
+            lightBarsAndroid10();
         }
-        askPermissions(2);
         refreshPoints();
         // Reconnect to the computer used last time, quietly.
         String host = prefs.getString("host", null);
@@ -154,10 +181,27 @@ public class MainActivity extends Activity {
         showLink();
     }
 
+    /** Dark status and navigation bar icons on the light background (Android 10 has no insets controller yet). */
+    @SuppressWarnings("deprecation")
+    private void lightBarsAndroid10() {
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         ui.post(live);
+        // Back from the app settings with the permission given.
+        if (missingPermissions().isEmpty()) settingsButton.setVisibility(View.GONE);
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        // The colours are picked in onCreate, so dark/light mode builds the screen again (the points are
+        // saved, the link comes back by itself). Not in the middle of a measurement: the next start picks it up.
+        boolean night = (c.uiMode & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
+        if (night != Ui.dark && !measuring && !sending.get()) recreate();
     }
 
     @Override
@@ -314,6 +358,13 @@ public class MainActivity extends Activity {
         measureStatus = Ui.text(this, T.t("Stand still for about 10 seconds while it listens."), 13, Ui.DIM);
         measureStatus.setPadding(0, dp(8), 0, 0);
         m.addView(measureStatus);
+        // Shown once Android no longer asks for the permission itself ("Don't ask again").
+        settingsButton = Ui.button(this, T.t("Open app settings"), false);
+        settingsButton.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", getPackageName(), null))));
+        settingsButton.setVisibility(View.GONE);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = dp(8);
+        m.addView(settingsButton, slp);
         // Shown once Android's scan limit got in the way.
         throttleTip = new LinearLayout(this);
         throttleTip.setGravity(Gravity.CENTER_VERTICAL);
@@ -420,6 +471,7 @@ public class MainActivity extends Activity {
             liveWord.setText(T.t("Not on Wi-Fi"));
             liveName.setText(T.t("Connect to your Wi-Fi to see its strength here."));
             liveBars.set(-100);
+            liveRange.setText("");
             return;
         }
         liveDbm.setText(String.format(Locale.ROOT, "%.0f", c.rssi));
@@ -683,7 +735,8 @@ public class MainActivity extends Activity {
             t.addView(name);
             String busy = s.utilization == null ? "" : T.f(" · %.0f%% busy", s.utilization * 100);
             String devs = s.stations == null ? "" : T.f(" · %d devices", s.stations);
-            t.addView(Ui.text(this, T.f("%s ch %d · %d MHz · %s", Survey.bandOf(s.freq), s.channel, s.width, s.security) + (s.standard.isEmpty() ? "" : " · " + s.standard) + busy + devs, 12, Ui.DIM));
+            String security = s.security.equals("Open") ? T.t("Open (no password)") : s.security;
+            t.addView(Ui.text(this, T.f("%s ch %d · %d MHz · %s", Survey.bandOf(s.freq), s.channel, s.width, security) + (s.standard.isEmpty() ? "" : " · " + s.standard) + busy + devs, 12, Ui.DIM));
             row.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             TextView dbm = Ui.title(this, String.format(Locale.ROOT, "%.0f", s.rssi), 16);
             dbm.setTextColor(Ui.quality(s.rssi));
@@ -737,8 +790,15 @@ public class MainActivity extends Activity {
                 info.setTextColor(Ui.AMBER);
                 return;
             }
+            String typed = code.getText().toString().trim();
+            if (!typed.matches("[0-9]{4}")) {
+                info.setText(T.t("Enter the 4-digit code NetSketch shows."));
+                info.setTextColor(Ui.AMBER);
+                code.requestFocus();
+                return;
+            }
             String title = addr.getTag() instanceof String ? (String) addr.getTag() : "";
-            link = new Link(l.host, l.port, code.getText().toString().trim(), title);
+            link = new Link(l.host, l.port, typed, title);
             d.dismiss();
             fetchPlan(true);
         }));
@@ -790,6 +850,7 @@ public class MainActivity extends Activity {
                     if (link != l) return;
                     link = l.withCode("");
                     linkOk = false;
+                    prefs.edit().remove("code").apply();
                     Toast.makeText(this, T.t("NetSketch says the code is wrong — check the code it shows."), Toast.LENGTH_LONG).show();
                     showLink();
                 });
@@ -797,7 +858,7 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     if (link != l) return;
                     linkOk = false;
-                    if (loud) Toast.makeText(this, T.f("Couldn't reach NetSketch (%s). Is the computer on the same Wi-Fi and the link switched on?", e.getMessage()), Toast.LENGTH_LONG).show();
+                    if (loud) Toast.makeText(this, T.f("Couldn't reach NetSketch (%s). Is the computer on the same Wi-Fi and the link switched on?", why(e)), Toast.LENGTH_LONG).show();
                     showLink();
                 });
             }
@@ -891,8 +952,14 @@ public class MainActivity extends Activity {
             if (plan.selX == null) planHint.setText(storeys != null && storeys.length() > 1 ? T.t("Pick the storey, then tap where you're standing.") : T.t("Tap where you're standing."));
             refreshPoints();
         } catch (Exception e) {
-            Toast.makeText(this, T.f("The floor plan couldn't be read: %s", e.getMessage()), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, T.f("The floor plan couldn't be read: %s", why(e)), Toast.LENGTH_LONG).show();
         }
+    }
+
+    /** An error's own words, or a translated stand-in when it has none. */
+    private static String why(Exception e) {
+        String m = e.getMessage();
+        return m == null || m.isEmpty() ? T.t("unknown error") : m;
     }
 
     /** Sends every point NetSketch doesn't have yet, one by one. */
@@ -905,22 +972,25 @@ public class MainActivity extends Activity {
             if (loud) Toast.makeText(this, T.t("NetSketch already has every point."), Toast.LENGTH_SHORT).show();
             return;
         }
+        // Already sending: that run takes these points too, or the next one does.
+        if (!sending.compareAndSet(false, true)) return;
         new Thread(() -> {
-            int ok = 0;
+            List<Survey.Point> ok = new ArrayList<>();
             String err = null;
             for (Survey.Point p : todo) {
                 try {
                     l.send(survey.toJson(p));
-                    p.sent = true;
-                    ok++;
+                    ok.add(p);
                 } catch (Exception e) {
-                    err = e.getMessage();
+                    err = why(e);
                     break;
                 }
             }
-            final int n = ok;
+            final int n = ok.size();
             final String why = err;
             ui.post(() -> {
+                for (Survey.Point p : ok) p.sent = true;
+                sending.set(false);
                 save();
                 refreshPoints();
                 if (why != null) Toast.makeText(this, T.f("Kept on the phone for now: %s", why), Toast.LENGTH_LONG).show();
@@ -936,13 +1006,20 @@ public class MainActivity extends Activity {
 
     // ---------- measuring ----------
 
-    /** Asks for what seeing nearby networks needs; true if it's all there already. Code 1 = then measure. */
-    private boolean askPermissions(int code) {
+    /** What seeing nearby networks needs and isn't allowed yet. Android 12+ only asks for precise location together with coarse. */
+    private List<String> missingPermissions() {
         List<String> need = new ArrayList<>();
         need.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        need.add(Manifest.permission.ACCESS_COARSE_LOCATION);
         if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.NEARBY_WIFI_DEVICES);
         List<String> missing = new ArrayList<>();
         for (String n : need) if (checkSelfPermission(n) != PackageManager.PERMISSION_GRANTED) missing.add(n);
+        return missing;
+    }
+
+    /** Asks for what seeing nearby networks needs; true if it's all there already. Code 1 = then measure. */
+    private boolean askPermissions(int code) {
+        List<String> missing = missingPermissions();
         if (missing.isEmpty()) return true;
         requestPermissions(missing.toArray(new String[0]), code);
         return false;
@@ -976,6 +1053,7 @@ public class MainActivity extends Activity {
     }
 
     private void begin() {
+        if (measuring) return;
         measuring = true;
         limited = false;
         failedStarts = 0;
@@ -1002,10 +1080,12 @@ public class MainActivity extends Activity {
         current.connected = connected();
         heard = new LinkedHashMap<>();
         round = 0;
+        roundStart = 0;
+        scanPending = false;
         receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context c, Intent i) {
-                collectRound();
+                if (scanPending) collectRound();
             }
         };
         IntentFilter f = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
@@ -1016,13 +1096,20 @@ public class MainActivity extends Activity {
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
-        for (int r : results) {
-            if (r != PackageManager.PERMISSION_GRANTED) {
-                measureStatus.setText(T.t("Without permission to see nearby networks, the phone can't measure anything."));
-                measureStatus.setTextColor(Ui.AMBER);
-                return;
-            }
+        if (results.length == 0) return; // the question was interrupted
+        if (!missingPermissions().isEmpty()) {
+            boolean coarseOnly = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED;
+            measureStatus.setText(coarseOnly ? T.t("Seeing nearby networks needs your precise location: choose \"Precise\" when Android asks.")
+                    : T.t("Without permission to see nearby networks, the phone can't measure anything."));
+            measureStatus.setTextColor(Ui.AMBER);
+            // After "Don't ask again" Android answers no by itself: only the app settings can change that.
+            boolean never = false;
+            for (String n : missingPermissions()) if (!shouldShowRequestPermissionRationale(n)) never = true;
+            settingsButton.setVisibility(never ? View.VISIBLE : View.GONE);
+            return;
         }
+        settingsButton.setVisibility(View.GONE);
         showLive();
         if (code == 1) startMeasuring();
     }
@@ -1036,31 +1123,17 @@ public class MainActivity extends Activity {
         return SCAN_WINDOW_MS - (now - scanTimes.get(0)) + 500;
     }
 
-    /** Counts down until Android allows a fresh scan, then carries on; the person stays where they are. */
     private void waitForScan(long ms) {
         limited = true;
         throttleTip.setVisibility(View.VISIBLE);
-        final long until = SystemClock.elapsedRealtime() + ms;
-        ui.post(new Runnable() {
-            @Override
-            public void run() {
-                if (!measuring) return;
-                long left = until - SystemClock.elapsedRealtime();
-                if (left <= 0) {
-                    scanRound();
-                    return;
-                }
-                int s = (int) Math.ceil(left / 1000.0);
-                measureButton.setText(T.f("Waiting for Android… %d s", s));
-                measureStatus.setText(T.f("Android allows 4 Wi-Fi scans every 2 minutes. Fresh scan in %d s — stay where you are.", s));
-                measureStatus.setTextColor(Ui.AMBER);
-                ui.postDelayed(this, 1000);
-            }
-        });
+        waitUntil = SystemClock.elapsedRealtime() + ms;
+        ui.removeCallbacks(countdown);
+        ui.post(countdown);
     }
 
     @SuppressWarnings("deprecation")
     private void scanRound() {
+        if (!measuring) return;
         long wait = scanWaitMs();
         if (wait > 0) {
             // One round is enough for a point; only the first one is worth waiting for.
@@ -1078,6 +1151,7 @@ public class MainActivity extends Activity {
         roundStart = SystemClock.elapsedRealtime();
         if (wifi.startScan()) {
             scanTimes.add(roundStart);
+            scanPending = true;
             ui.postDelayed(roundTimeout, 12000);
         } else if (round > 0) {
             limited = true;
@@ -1087,13 +1161,14 @@ public class MainActivity extends Activity {
         } else {
             // Android keeps refusing: use what the phone heard in the last half minute.
             roundStart -= 30_000;
-            ui.postDelayed(this::collectRound, 400);
+            ui.postDelayed(roundTimeout, 400);
         }
     }
 
     @SuppressWarnings("deprecation")
     private void collectRound() {
         if (!measuring) return;
+        scanPending = false;
         ui.removeCallbacks(roundTimeout);
         // Only results from this round's scan: older ones may come from where the person stood before.
         long sinceUs = (roundStart - 2000) * 1000;
@@ -1129,7 +1204,7 @@ public class MainActivity extends Activity {
             s.count++;
         }
         round++;
-        if (round < ROUNDS) ui.postDelayed(this::scanRound, 2500);
+        if (round < ROUNDS) ui.postDelayed(nextRound, 2500);
         else finishScans();
     }
 
@@ -1142,7 +1217,10 @@ public class MainActivity extends Activity {
             }
             receiver = null;
         }
+        scanPending = false;
         ui.removeCallbacks(roundTimeout);
+        ui.removeCallbacks(nextRound);
+        ui.removeCallbacks(countdown);
     }
 
     private void finishScans() {
@@ -1153,11 +1231,15 @@ public class MainActivity extends Activity {
         }
         Collections.sort(current.networks, (a, b) -> Double.compare(b.rssi, a.rssi));
         current.scans = round;
-        if (speedSwitch.isChecked() && current.connected != null) {
+        // The speed test only over Wi-Fi: on mobile data it would measure the wrong thing and cost data.
+        boolean speed = speedSwitch.isChecked() && current.connected != null && !current.networks.isEmpty();
+        final Network net = speed ? wifiNetwork() : null;
+        if (speed && net == null) Toast.makeText(this, T.t("No Wi-Fi connection for the speed test, so it was skipped (it never uses mobile data)."), Toast.LENGTH_LONG).show();
+        if (net != null) {
             measureButton.setText(T.t("Testing the download…"));
             final Survey.Point p = current;
             new Thread(() -> {
-                Survey.Speed sp = speedTest();
+                Survey.Speed sp = speedTest(net);
                 ui.post(() -> {
                     p.speed = sp;
                     if (sp == null) Toast.makeText(this, T.t("The speed test couldn't reach the internet."), Toast.LENGTH_LONG).show();
@@ -1169,14 +1251,30 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** The phone's Wi-Fi network (not mobile data), or null. */
+    @SuppressWarnings("deprecation")
+    private Network wifiNetwork() {
+        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        if (cm == null) return null;
+        for (Network n : cm.getAllNetworks()) {
+            NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+            if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return n;
+        }
+        return null;
+    }
+
     private void done(Survey.Point p) {
-        survey.points.add(p);
-        save();
         measuring = false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         measureButton.setEnabled(true);
         measureButton.setAlpha(1f);
         measureButton.setText(T.t("Measure here"));
+        if (!survey.add(p)) {
+            measureStatus.setText(T.t("No networks heard here. Try again."));
+            measureStatus.setTextColor(Ui.AMBER);
+            return;
+        }
+        save();
         measureButton.performHapticFeedback(Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.LONG_PRESS);
         String msg = T.f("'%s': %d networks. Walk to the next spot.", p.name, p.networks.size());
         if (limited && p.scans < ROUNDS) msg += " " + T.f("Android limits scans: this spot used %d of %d rounds.", p.scans, ROUNDS);
@@ -1209,19 +1307,19 @@ public class MainActivity extends Activity {
      * Delay and its variation (ten tiny requests: the best one, and the average jump between them), then
      * a 25 MB download and a 10 MB upload, each stopped after at most 12 s.
      */
-    private Survey.Speed speedTest() {
+    private Survey.Speed speedTest(Network net) {
         try {
             double best = Double.MAX_VALUE, jumps = 0, last = -1;
             for (int i = 0; i < 10; i++) {
                 long t0 = System.nanoTime();
-                fetch("https://speed.cloudflare.com/__down?bytes=0", 0);
+                fetch(net, "https://speed.cloudflare.com/__down?bytes=0", 0);
                 double ms = (System.nanoTime() - t0) / 1e6;
                 best = Math.min(best, ms);
                 if (last >= 0) jumps += Math.abs(ms - last);
                 last = ms;
             }
             long t0 = System.nanoTime();
-            long bytes = fetch("https://speed.cloudflare.com/__down?bytes=25000000", 12_000);
+            long bytes = fetch(net, "https://speed.cloudflare.com/__down?bytes=25000000", 12_000);
             double secs = (System.nanoTime() - t0) / 1e9;
             Survey.Speed s = new Survey.Speed();
             s.latencyMs = best;
@@ -1229,7 +1327,7 @@ public class MainActivity extends Activity {
             s.downMbps = bytes * 8 / secs / 1e6;
             ui.post(() -> measureButton.setText(T.t("Testing the upload…")));
             try {
-                s.upMbps = upload("https://speed.cloudflare.com/__up", 10_000_000, 12_000);
+                s.upMbps = upload(net, "https://speed.cloudflare.com/__up", 10_000_000, 12_000);
             } catch (Exception e) {
                 s.upMbps = 0; // the download still counts
             }
@@ -1239,8 +1337,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static long fetch(String url, long maxMs) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+    private static long fetch(Network net, String url, long maxMs) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) net.openConnection(new URL(url));
         c.setConnectTimeout(8000);
         c.setReadTimeout(8000);
         c.setRequestProperty("User-Agent", "NetSketch-Survey/0.1");
@@ -1260,8 +1358,8 @@ public class MainActivity extends Activity {
     }
 
     /** Sends up to maxBytes (or for maxMs) and returns the rate in Mbit/s, counted until the server answers. */
-    private static double upload(String url, long maxBytes, long maxMs) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+    private static double upload(Network net, String url, long maxBytes, long maxMs) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) net.openConnection(new URL(url));
         c.setConnectTimeout(8000);
         c.setReadTimeout(15000);
         c.setRequestMethod("POST");
@@ -1301,7 +1399,7 @@ public class MainActivity extends Activity {
             Files.write(tmp.toPath(), survey.toJson().getBytes(StandardCharsets.UTF_8));
             Files.move(tmp.toPath(), store().toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
         } catch (Exception e) {
-            Toast.makeText(this, T.f("Couldn't keep the points: %s", e.getMessage()), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, T.f("Couldn't keep the points: %s", why(e)), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -1359,7 +1457,14 @@ public class MainActivity extends Activity {
                 survey.points.add(p);
             }
         } catch (Exception e) {
+            // Keep the damaged file for a look later instead of overwriting it with the next point.
             survey = new Survey();
+            try {
+                Files.move(store().toPath(), new File(getFilesDir(), "survey.json.bad").toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception ignored) {
+                // then the next save replaces it
+            }
+            Toast.makeText(this, T.t("The saved points couldn't be read. The damaged file was kept as survey.json.bad."), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -1383,7 +1488,7 @@ public class MainActivity extends Activity {
         try (OutputStream out = getContentResolver().openOutputStream(uri)) {
             out.write(survey.toJson().getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
-            Toast.makeText(this, T.f("Couldn't save: %s", e.getMessage()), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, T.f("Couldn't save: %s", why(e)), Toast.LENGTH_LONG).show();
             return;
         }
         Toast.makeText(this, T.f("Saved %s in Downloads.", name), Toast.LENGTH_LONG).show();

@@ -105,7 +105,9 @@ final class Ui {
         b.setTextColor(primary ? BG : TEXT);
         b.setStateListAnimator(null);
         GradientDrawable shape = round(c, primary ? ACCENT : CARD, 14, primary ? 0 : LINE);
-        b.setBackground(new RippleDrawable(ColorStateList.valueOf(primary ? Color.argb(70, 0, 0, 0) : Color.argb(50, 255, 255, 255)), shape, null));
+        // The press ripple: dark on the teal and on light cards, light on dark ones.
+        int ripple = primary || !dark ? Color.argb(primary ? 70 : 40, 0, 0, 0) : Color.argb(50, 255, 255, 255);
+        b.setBackground(new RippleDrawable(ColorStateList.valueOf(ripple), shape, null));
         b.setPadding(dp(c, 16), dp(c, 10), dp(c, 16), dp(c, 10));
         return b;
     }
@@ -269,15 +271,12 @@ final class Ui {
             Context c = getContext();
             float w = getWidth(), h = getHeight(), bottom = h - dp(c, 18), top = dp(c, 14);
             // MHz span of the band, and the channel numbers to label.
-            float f0, f1;
+            int[] span = Survey.chartSpan(band);
+            float f0 = span[0], f1 = span[1];
             int[] ticks;
-            if (band.equals("2.4 GHz")) {
-                f0 = 2400; f1 = 2496; ticks = new int[] {1, 6, 11, 13};
-            } else if (band.equals("5 GHz")) {
-                f0 = 5160; f1 = 5730; ticks = new int[] {36, 52, 100, 116, 132};
-            } else {
-                f0 = 5935; f1 = 6435; ticks = new int[] {1, 33, 65, 93};
-            }
+            if (band.equals("2.4 GHz")) ticks = new int[] {1, 6, 11, 13};
+            else if (band.equals("5 GHz")) ticks = new int[] {36, 52, 100, 116, 132, 149, 165};
+            else ticks = new int[] {1, 33, 65, 97, 129, 161, 193, 225};
             p.setTextSize(dp(c, 10));
             p.setTextAlign(Paint.Align.CENTER);
             p.setStyle(Paint.Style.FILL);
