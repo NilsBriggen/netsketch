@@ -40,7 +40,7 @@ impl App {
             let c = self.to_screen(vec2(s.pos[0], s.pos[1]));
             let pred = self.net.predict(s).unwrap_or(s.rssi);
             let off = (pred - s.rssi).abs();
-            let ring = if off < 3.0 { GREEN } else if off < 8.0 { AMBER } else { RED };
+            let ring = if off < 3.0 { pal().green } else if off < 8.0 { pal().amber } else { pal().red };
             painter.circle_filled(c, 6.0, quality_color(s.rssi));
             painter.circle_stroke(c, 8.0, Stroke::new(2.0, ring));
             if pointer.is_some_and(|p| p.distance(c) < 9.0) {
@@ -81,7 +81,7 @@ impl App {
             }
         });
         if let Some(Some(Err(e))) = self.net.plans.iter().find(|p| p.floor == self.floor).map(|p| self.textures.get(&p.path)) {
-            ui.label(RichText::new(format!("{} The picture can't be shown ({e}). Was it moved? Use Replace… to pick it again.", ic::WARNING)).color(AMBER));
+            ui.label(RichText::new(format!("{} The picture can't be shown ({e}). Was it moved? Use Replace… to pick it again.", ic::WARNING)).color(pal().amber));
         }
         if let Some(p) = self.net.plans.iter_mut().find(|p| p.floor == self.floor) {
             egui::Grid::new("planpic").num_columns(2).show(ui, |ui| {
@@ -191,10 +191,10 @@ impl App {
                 ui.checkbox(&mut d.sqm, "Smart queueing (SQM)").on_hover_text("Keeps calls and games smooth when the line is full; costs about 8% top speed");
             }
             let d = self.net.dev_mut(id).unwrap();
-            ui.label(RichText::new("Firewall rules").color(DIM));
+            ui.label(RichText::new("Firewall rules").color(pal().dim));
             ui.add(TextEdit::multiline(&mut d.rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("deny guest lan\nallow internet 192.168.1.10 443\nforward 443 192.168.1.10"))
                 .on_hover_text("First match wins: allow|deny <from> <to> [port] — from/to: any, lan, guest, internet, an address or network/prefix. Port forwarding: forward <port> <address>.");
-            ui.label(RichText::new("One rule per line, the first match wins: allow|deny <from> <to> [port] (any, lan, guest, internet, an address or network/prefix) · forward <port> <address> opens a port from the internet.").small().color(DIM));
+            ui.label(RichText::new("One rule per line, the first match wins: allow|deny <from> <to> [port] (any, lan, guest, internet, an address or network/prefix) · forward <port> <address> opens a port from the internet.").small().color(pal().dim));
         }
 
         // Power over Ethernet.
@@ -238,7 +238,7 @@ impl App {
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("model", id)).selected_text("Apply a saved model…").width(200.0).show_ui(ui, |ui| {
                 if models.is_empty() {
-                    ui.label(RichText::new("No saved models for this kind yet").color(DIM));
+                    ui.label(RichText::new("No saved models for this kind yet").color(pal().dim));
                 }
                 for m in &models {
                     if ui.selectable_label(false, &m.name).clicked() {
@@ -298,9 +298,9 @@ impl App {
         let d = self.net.dev(id).unwrap();
         let links: Vec<&net::Link> = self.net.links.iter().filter(|l| l.a == id || l.b == id).collect();
         let wired = links.iter().filter(|l| !l.medium.wireless()).count();
-        ui.label(RichText::new(format!("{wired} of {} ports in use{}", d.port_count(), if d.poe_class > 0 { format!(" · {}", POE[d.poe_class as usize].0) } else { String::new() })).color(DIM));
+        ui.label(RichText::new(format!("{wired} of {} ports in use{}", d.port_count(), if d.poe_class > 0 { format!(" · {}", POE[d.poe_class as usize].0) } else { String::new() })).color(pal().dim));
         if links.is_empty() {
-            ui.label(RichText::new("Nothing plugged in.").color(DIM));
+            ui.label(RichText::new("Nothing plugged in.").color(pal().dim));
             return;
         }
         let mut poe_total = 0.0;
@@ -316,15 +316,15 @@ impl App {
                 }
             };
             let (role, col) = if stp.storm.contains(&l.id) {
-                ("LOOP", RED)
+                ("LOOP", pal().red)
             } else if stp.blocked.contains(&l.id) {
-                ("standby", AMBER)
+                ("standby", pal().amber)
             } else if stp.root_port.get(&id) == Some(&l.id) {
-                ("towards the root", ACCENT)
+                ("towards the root", pal().accent)
             } else if d.kind.bridges() || d.kind == Kind::HomeRouter {
-                ("forwarding", DIM)
+                ("forwarding", pal().dim)
             } else {
-                ("routed", DIM)
+                ("routed", pal().dim)
             };
             let u = self.net.utilisation(&load, l.id);
             let mut state = format!("{role} · {:.0}% busy", u * 100.0);
@@ -332,12 +332,12 @@ impl App {
                 poe_total += other.poe_draw;
                 state += &format!(" · powers it ({:.1} W)", other.poe_draw);
             }
-            egui::Frame::new().fill(CARD).corner_radius(6).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
+            egui::Frame::new().fill(pal().card).corner_radius(6).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(&other.name).strong());
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(link).small());
-                    ui.label(RichText::new(state).small().color(if u > 1.0 { RED } else if u > 0.8 { AMBER } else { col }));
+                    ui.label(RichText::new(state).small().color(if u > 1.0 { pal().red } else if u > 0.8 { pal().amber } else { col }));
                 });
             });
         }
@@ -356,7 +356,7 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
     }
     if let Some(p) = crate::catalog::plans().iter().find(|p| p.title() == d.model) {
         let router = if p.router.is_empty() { String::new() } else { format!(" · comes with {}", p.router) };
-        ui.label(RichText::new(format!("{}{router}", p.summary())).small().color(DIM)).on_hover_text(format!("{}\n{}", p.note, p.source));
+        ui.label(RichText::new(format!("{}{router}", p.summary())).small().color(pal().dim)).on_hover_text(format!("{}\n{}", p.note, p.source));
     }
     ui.add(TextEdit::singleline(query).hint_text(format!("{}  Find your plan (Swisscom, Init7, Sunrise…)", ic::MAGNIFYING_GLASS)).desired_width(ui.available_width() - 8.0));
     if query.trim().is_empty() {
@@ -365,8 +365,8 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
     let hits = crate::catalog::search_plans(query);
     for p in hits.iter().take(8) {
         let mut job = egui::text::LayoutJob::default();
-        job.append(&p.title(), 0.0, egui::TextFormat { font_id: FontId::proportional(14.0), color: TEXT, ..Default::default() });
-        job.append(&format!("\n{}", p.summary()), 0.0, egui::TextFormat { font_id: FontId::proportional(11.5), color: DIM, ..Default::default() });
+        job.append(&p.title(), 0.0, egui::TextFormat { font_id: FontId::proportional(14.0), color: pal().text, ..Default::default() });
+        job.append(&format!("\n{}", p.summary()), 0.0, egui::TextFormat { font_id: FontId::proportional(11.5), color: pal().dim, ..Default::default() });
         if ui.selectable_label(d.model == p.title(), job).on_hover_text(&p.note).clicked() {
             d.plan_mbps = p.down_mbps;
             d.model = p.title();
@@ -374,9 +374,9 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
         }
     }
     if hits.is_empty() {
-        ui.label(RichText::new("No plan matches. Try the provider's name, or set the speed below.").small().color(DIM));
+        ui.label(RichText::new("No plan matches. Try the provider's name, or set the speed below.").small().color(pal().dim));
     } else if hits.len() > 8 {
-        ui.label(RichText::new(format!("…and {} more: type more of the name.", hits.len() - 8)).small().color(DIM));
+        ui.label(RichText::new(format!("…and {} more: type more of the name.", hits.len() - 8)).small().color(pal().dim));
     }
 }
 
@@ -421,7 +421,7 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
             let end = first + g.n as u16;
             let users: Vec<String> = plugged.iter().filter(|(p, _)| (first..end).contains(p)).map(|(p, who)| format!("{} {who}", *p + 1)).collect();
             if !users.is_empty() {
-                ui.label(RichText::new(format!("{} {}", ic::PLUGS_CONNECTED, users.join(" · "))).small().color(DIM));
+                ui.label(RichText::new(format!("{} {}", ic::PLUGS_CONNECTED, users.join(" · "))).small().color(pal().dim));
             }
             first = end;
         }
@@ -450,7 +450,7 @@ impl App {
             for e in ends {
                 let users = self.net.port_users(e);
                 let now = l.port_at(e);
-                ui.label(RichText::new(self.net.name(e)).color(DIM));
+                ui.label(RichText::new(self.net.name(e)).color(pal().dim));
                 egui::ComboBox::from_id_salt(("lport", id, e)).selected_text(now.map_or("no port free".into(), |p| self.net.port_name(e, p))).width(210.0).show_ui(ui, |ui| {
                     let count = self.net.dev(e).map_or(0, |d| d.port_count()).min(256);
                     for p in (0..count as u16).filter(|p| self.net.fits_port(&l, e, *p)) {

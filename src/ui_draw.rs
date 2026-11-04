@@ -11,12 +11,12 @@ impl App {
             let l = self.net.labels.iter().find(|l| l.id == id).unwrap();
             let c = self.to_screen(vec2(l.pos[0], l.pos[1]));
             let selected = self.sel == Sel::Label(id);
-            let g = painter.layout_no_wrap(if l.text.is_empty() { "Room".into() } else { l.text.clone() }, FontId::proportional(size), if selected { ACCENT } else { DIM.gamma_multiply(1.3) });
+            let g = painter.layout_no_wrap(if l.text.is_empty() { "Room".into() } else { l.text.clone() }, FontId::proportional(size), if selected { pal().accent } else { pal().dim.gamma_multiply(1.3) });
             let r = Rect::from_center_size(c, g.size() + vec2(8.0, 4.0));
             if selected {
-                painter.rect_stroke(r, 4, Stroke::new(1.0, ACCENT), StrokeKind::Outside);
+                painter.rect_stroke(r, 4, Stroke::new(1.0, pal().accent), StrokeKind::Outside);
             }
-            painter.galley(r.min + vec2(4.0, 2.0), g, TEXT);
+            painter.galley(r.min + vec2(4.0, 2.0), g, pal().text);
             if self.mode != Mode::Design || self.tool != Tool::Select {
                 continue;
             }
@@ -41,18 +41,18 @@ impl App {
 
     pub(crate) fn label_editor(&mut self, ui: &mut egui::Ui, id: u32) {
         let Some(l) = self.net.labels.iter_mut().find(|l| l.id == id) else { return };
-        Self::header(ui, ic::TEXT_T, ACCENT, "Room label", "Drag it on the map to move it");
+        Self::header(ui, ic::TEXT_T, pal().accent, "Room label", "Drag it on the map to move it");
         ui.add_space(4.0);
         egui::Grid::new(("lbl", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(RichText::new("Text").color(DIM));
+            ui.label(RichText::new("Text").color(pal().dim));
             ui.add(TextEdit::singleline(&mut l.text).hint_text("e.g. Living room"));
             ui.end_row();
-            ui.label(RichText::new("Storey").color(DIM));
+            ui.label(RichText::new("Storey").color(pal().dim));
             ui.add(egui::DragValue::new(&mut l.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
             ui.end_row();
         });
         ui.add_space(6.0);
-        if ui.small_button(RichText::new(format!("{}  Remove label", ic::TRASH)).color(RED)).clicked() {
+        if ui.small_button(RichText::new(format!("{}  Remove label", ic::TRASH)).color(pal().red)).clicked() {
             self.snapshot();
             self.net.labels.retain(|l| l.id != id);
             self.sel = Sel::None;
@@ -85,7 +85,7 @@ impl App {
             self.issues = None;
             ui.close();
         }
-        if design && ui.button(RichText::new(format!("{}  Delete", ic::TRASH)).color(RED)).clicked() {
+        if design && ui.button(RichText::new(format!("{}  Delete", ic::TRASH)).color(pal().red)).clicked() {
             self.snapshot();
             self.net.remove_device(id);
             self.sel = Sel::None;
@@ -120,7 +120,7 @@ impl App {
                     ui.close();
                 }
             }
-            if ui.button(RichText::new(format!("{}  Remove wall", ic::TRASH)).color(RED)).clicked() {
+            if ui.button(RichText::new(format!("{}  Remove wall", ic::TRASH)).color(pal().red)).clicked() {
                 self.snapshot();
                 self.net.walls.retain(|x| x.id != w);
                 self.sel = Sel::None;
@@ -137,7 +137,7 @@ impl App {
                 self.issues = None;
                 ui.close();
             }
-            if design && ui.button(RichText::new(format!("{}  Remove connection", ic::TRASH)).color(RED)).clicked() {
+            if design && ui.button(RichText::new(format!("{}  Remove connection", ic::TRASH)).color(pal().red)).clicked() {
                 self.snapshot();
                 self.net.remove_link(l);
                 self.sel = Sel::None;
@@ -186,33 +186,33 @@ impl App {
         }
         let Some((a, b)) = self.measure else {
             if let Some(p) = pointer {
-                painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, "click where the measurement starts", FontId::proportional(11.5), DIM);
+                painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, "click where the measurement starts", FontId::proportional(11.5), pal().dim);
             }
             return;
         };
         let Some(b) = b.or_else(|| pointer.map(|p| world(self, p))) else { return };
         let (sa, sb) = (self.to_screen(vec2(a[0], a[1])), self.to_screen(vec2(b[0], b[1])));
-        painter.line_segment([sa, sb], Stroke::new(2.0, AMBER));
+        painter.line_segment([sa, sb], Stroke::new(2.0, pal().amber));
         for p in [sa, sb] {
-            painter.circle_filled(p, 4.0, AMBER);
+            painter.circle_filled(p, 4.0, pal().amber);
         }
         let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / net::PX_PER_M;
-        let g = painter.layout_no_wrap(format!("{len:.2} m"), FontId::proportional(13.0), BG);
+        let g = painter.layout_no_wrap(format!("{len:.2} m"), FontId::proportional(13.0), pal().bg);
         let r = Rect::from_center_size(sa.lerp(sb, 0.5) - vec2(0.0, 14.0), g.size() + vec2(10.0, 4.0));
-        painter.rect_filled(r, 5, AMBER);
-        painter.galley(r.min + vec2(5.0, 2.0), g, BG);
+        painter.rect_filled(r, 5, pal().amber);
+        painter.galley(r.min + vec2(5.0, 2.0), g, pal().bg);
     }
 
     /// Left panel under the Measure tool: the distance, and fixing a floor-plan picture's scale from it.
     pub(crate) fn measure_panel(&mut self, ui: &mut egui::Ui) {
         let Some((a, Some(b))) = self.measure else {
-            ui.label(RichText::new("Click two points to measure. Esc clears.").small().color(DIM));
+            ui.label(RichText::new("Click two points to measure. Esc clears.").small().color(pal().dim));
             return;
         };
         let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / net::PX_PER_M;
         ui.label(RichText::new(format!("{len:.2} m on the map")).strong());
         let Some(i) = self.net.plans.iter().position(|p| p.floor == self.floor) else { return };
-        ui.label(RichText::new("Measured a wall you know on the floor-plan picture? Type its real length:").small().color(DIM));
+        ui.label(RichText::new("Measured a wall you know on the floor-plan picture? Type its real length:").small().color(pal().dim));
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut self.measure_real).range(0.1..=500.0).speed(0.05).suffix(" m"));
             if ui.button("Scale the picture").on_hover_text("Stretches the floor-plan picture so this distance comes out at its real length").clicked() && len > 0.0 {

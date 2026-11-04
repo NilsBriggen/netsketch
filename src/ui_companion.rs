@@ -10,10 +10,10 @@ impl App {
         for id in ids {
             let p = self.net.points.iter().find(|p| p.id == id).unwrap();
             let c = self.to_screen(vec2(p.pos[0], p.pos[1]));
-            let col = if p.placed { ACCENT } else { AMBER };
+            let col = if p.placed { pal().accent } else { pal().amber };
             let selected = self.sel == Sel::Point(id);
             let r = Rect::from_center_size(c, Vec2::splat(26.0));
-            painter.circle_filled(c, 13.0, BG.gamma_multiply(0.9));
+            painter.circle_filled(c, 13.0, pal().bg.gamma_multiply(0.9));
             painter.circle_stroke(c, 13.0, Stroke::new(if selected { 3.0 } else { 2.0 }, col));
             painter.text(c, Align2::CENTER_CENTER, ic::MAP_PIN, FontId::proportional(15.0), col);
             // Placed pins keep quiet (their name shows on hover); unplaced ones ask to be moved.
@@ -97,22 +97,22 @@ impl App {
             Some(l) => {
                 let heard = l.last_seen.lock().unwrap().map(|t| t.elapsed().as_secs());
                 let mut stop = false;
-                egui::Frame::new().fill(CARD).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+                egui::Frame::new().fill(pal().card).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(ic::DEVICE_MOBILE).size(20.0).color(ACCENT));
+                        ui.label(RichText::new(ic::DEVICE_MOBILE).size(20.0).color(pal().accent));
                         ui.vertical(|ui| {
-                            ui.label(RichText::new(format!("Code {}", l.code)).size(18.0).strong().color(ACCENT));
-                            ui.label(RichText::new(format!("{}:{}", l.addr, l.port)).small().monospace().color(DIM));
+                            ui.label(RichText::new(format!("Code {}", l.code)).size(18.0).strong().color(pal().accent));
+                            ui.label(RichText::new(format!("{}:{}", l.addr, l.port)).small().monospace().color(pal().dim));
                         });
                     });
-                    ui.label(RichText::new("In NetSketch Survey tap Link: it finds this computer on your Wi-Fi. Enter the code, tap where you stand on the plan, measure.").small().color(DIM));
-                    ui.label(RichText::new("Phone doesn't find it? Type the address above on the phone. Still nothing: this computer's firewall blocks it — allow ports 47878 (TCP) and 47879 (UDP).").small().color(DIM))
+                    ui.label(RichText::new("In NetSketch Survey tap Link: it finds this computer on your Wi-Fi. Enter the code, tap where you stand on the plan, measure.").small().color(pal().dim));
+                    ui.label(RichText::new("Phone doesn't find it? Type the address above on the phone. Still nothing: this computer's firewall blocks it — allow ports 47878 (TCP) and 47879 (UDP).").small().color(pal().dim))
                         .on_hover_text("Linux with ufw: sudo ufw allow 47878/tcp && sudo ufw allow 47879/udp\nWindows asks the first time — allow access on private networks.\nmacOS: allow incoming connections when asked.");
                     ui.horizontal(|ui| {
                         let (txt, col) = match heard {
-                            Some(s) if s < 30 => ("Phone connected".to_string(), GREEN),
-                            Some(s) => (format!("Phone last seen {} min ago", s / 60 + 1), AMBER),
-                            None => ("Waiting for the phone…".to_string(), DIM),
+                            Some(s) if s < 30 => ("Phone connected".to_string(), pal().green),
+                            Some(s) => (format!("Phone last seen {} min ago", s / 60 + 1), pal().amber),
+                            None => ("Waiting for the phone…".to_string(), pal().dim),
                         };
                         ui.label(RichText::new(txt).color(col));
                         if ui.small_button("Stop").on_hover_text("Close the link").clicked() {
@@ -138,7 +138,7 @@ impl App {
             ui.label(format!("{pts} measuring points from the companion app"));
             if unplaced > 0 {
                 let what = if unplaced == 1 { "1 pin still needs its place: drag the orange pin".to_string() } else { format!("{unplaced} pins still need their place: drag the orange pins") };
-                ui.label(RichText::new(format!("{} {what} to where you stood.", ic::MAP_PIN)).color(AMBER));
+                ui.label(RichText::new(format!("{} {what} to where you stood.", ic::MAP_PIN)).color(pal().amber));
             }
         }
         let found = self.net.measured_networks();
@@ -159,7 +159,7 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_width((ui.available_width() - 170.0).max(90.0));
                         ui.label(if m.ssid.is_empty() { "(hidden)" } else { &m.ssid });
-                        ui.label(RichText::new(format!("{}{busy}", chans.join(" · "))).small().color(DIM));
+                        ui.label(RichText::new(format!("{}{busy}", chans.join(" · "))).small().color(pal().dim));
                     });
                     let current = m.dev.and_then(|d| targets.iter().find(|t| t.0 == d)).map(|t| t.1.clone()).unwrap_or_else(|| "Not in the plan".into());
                     egui::ComboBox::from_id_salt(("belongs", &m.key)).selected_text(current).width(150.0).show_ui(ui, |ui| {
@@ -203,7 +203,7 @@ impl App {
             self.net.link_measured(&k, d);
         }
         if let Some(e) = self.net.measured_error() {
-            ui.label(RichText::new(format!("Model vs. measurement: off by {e:.1} dB on average")).color(if e < 4.0 { GREEN } else if e < 8.0 { AMBER } else { RED }));
+            ui.label(RichText::new(format!("Model vs. measurement: off by {e:.1} dB on average")).color(if e < 4.0 { pal().green } else if e < 8.0 { pal().amber } else { pal().red }));
         }
     }
 
@@ -213,25 +213,25 @@ impl App {
         let models: Vec<(String, u32)> = self.net.measured.clone();
         let Some(p) = self.net.points.iter_mut().find(|p| p.id == id) else { return };
         let sub = if p.phone.is_empty() { "Measuring point".to_string() } else { format!("Measured with {}", p.phone) };
-        Self::header(ui, ic::MAP_PIN, if p.placed { ACCENT } else { AMBER }, "Measuring point", &sub);
+        Self::header(ui, ic::MAP_PIN, if p.placed { pal().accent } else { pal().amber }, "Measuring point", &sub);
         ui.add_space(4.0);
         egui::Grid::new(("pt", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(RichText::new("Name").color(DIM));
+            ui.label(RichText::new("Name").color(pal().dim));
             ui.text_edit_singleline(&mut p.name);
             ui.end_row();
-            ui.label(RichText::new("Storey").color(DIM));
+            ui.label(RichText::new("Storey").color(pal().dim));
             ui.add(egui::DragValue::new(&mut p.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
             ui.end_row();
-            ui.label(RichText::new("Place").color(DIM));
-            ui.label(if p.placed { RichText::new("on the map").color(GREEN) } else { RichText::new("not yet — drag the pin").color(AMBER) });
+            ui.label(RichText::new("Place").color(pal().dim));
+            ui.label(if p.placed { RichText::new("on the map").color(pal().green) } else { RichText::new("not yet — drag the pin").color(pal().amber) });
             ui.end_row();
             if let Some(c) = &p.connected {
-                ui.label(RichText::new("Phone was on").color(DIM));
+                ui.label(RichText::new("Phone was on").color(pal().dim));
                 ui.label(format!("{} · {:.0} dBm · {:.0} Mbit/s link", c.ssid, c.rssi, c.link_mbps));
                 ui.end_row();
             }
             if let Some(s) = &p.speed {
-                ui.label(RichText::new("Speed test").color(DIM));
+                ui.label(RichText::new("Speed test").color(pal().dim));
                 ui.label(RichText::new(format!("{:.0} Mbit/s · {:.0} ms", s.down_mbps, s.latency_ms)).strong());
                 ui.end_row();
             }
@@ -245,14 +245,14 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_width((ui.available_width() - 110.0).max(90.0));
                         ui.label(if s.ssid.is_empty() { "(hidden)" } else { &s.ssid });
-                        ui.label(RichText::new(format!("{} ch {} · {} MHz", band_of(s.freq).label(), s.channel, s.width)).small().color(DIM));
+                        ui.label(RichText::new(format!("{} ch {} · {} MHz", band_of(s.freq).label(), s.channel, s.width)).small().color(pal().dim));
                     });
                     let key = crate::companion::key_of(s);
                     let model = models.iter().find(|m| m.0 == key).and_then(|m| self.net.dev(m.1)).filter(|_| p.placed).map(|d| self.net.rssi_at(d, p.pos, p.floor, band_of(s.freq)));
                     match model {
                         Some(v) => {
                             let off = v - s.rssi;
-                            ui.label(RichText::new(if off.abs() < 0.5 { format!("model {v:.0} (same)") } else { format!("model {v:.0} ({off:+.0})") }).small().color(if off.abs() < 4.0 { GREEN } else if off.abs() < 8.0 { AMBER } else { RED }));
+                            ui.label(RichText::new(if off.abs() < 0.5 { format!("model {v:.0} (same)") } else { format!("model {v:.0} ({off:+.0})") }).small().color(if off.abs() < 4.0 { pal().green } else if off.abs() < 8.0 { pal().amber } else { pal().red }));
                         }
                         None => {}
                     }
@@ -262,7 +262,7 @@ impl App {
             }
         }
         ui.add_space(6.0);
-        if ui.small_button(RichText::new(format!("{}  Remove point", ic::TRASH)).color(RED)).clicked() {
+        if ui.small_button(RichText::new(format!("{}  Remove point", ic::TRASH)).color(pal().red)).clicked() {
             delete = true;
         }
         if delete {

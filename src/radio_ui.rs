@@ -52,10 +52,10 @@ pub fn heat_color(rssi: f32) -> Option<Color32> {
 
 pub fn quality_color(rssi: f32) -> Color32 {
     match rssi {
-        r if r >= -60.0 => GREEN,
+        r if r >= -60.0 => pal().green,
         r if r >= -70.0 => Color32::from_rgb(163, 230, 53),
-        r if r >= -77.0 => AMBER,
-        _ => RED,
+        r if r >= -77.0 => pal().amber,
+        _ => pal().red,
     }
 }
 
@@ -67,9 +67,9 @@ pub fn snap(v: Vec2) -> [f32; 2] {
 /// One row in a problem list: click the text to select, or press the fix. Returns (selected, fix).
 pub fn issue_row(ui: &mut egui::Ui, i: &Issue) -> (bool, Option<Fix>) {
     let (icon, col) = match i.level {
-        Level::Error => (ic::WARNING, RED),
-        Level::Warning => (ic::WARNING, AMBER),
-        Level::Tip => (ic::INFO, ACCENT),
+        Level::Error => (ic::WARNING, pal().red),
+        Level::Warning => (ic::WARNING, pal().amber),
+        Level::Tip => (ic::INFO, pal().accent),
     };
     let mut fix = None;
     let clicked = ui
@@ -77,7 +77,7 @@ pub fn issue_row(ui: &mut egui::Ui, i: &Issue) -> (bool, Option<Fix>) {
             ui.label(RichText::new(icon).color(col));
             let r = ui.add(egui::Label::new(&i.text).sense(Sense::click()));
             if let Some(f) = &i.fix {
-                if ui.small_button(RichText::new(format!("{} {}", ic::WRENCH, f.label())).color(ACCENT)).clicked() {
+                if ui.small_button(RichText::new(format!("{} {}", ic::WRENCH, f.label())).color(pal().accent)).clicked() {
                     fix = Some(f.clone());
                 }
             }
@@ -91,7 +91,7 @@ pub fn issue_row(ui: &mut egui::Ui, i: &Issue) -> (bool, Option<Fix>) {
 pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut String) -> Option<Device> {
     const SHOWN: usize = 8;
     if let Some(p) = crate::catalog::find(&d.model) {
-        ui.label(RichText::new(format!("{} {}", p.year, p.note)).small().color(DIM)).on_hover_text(format!("{}\nSpecs from {}", p.summary(), p.source));
+        ui.label(RichText::new(format!("{} {}", p.year, p.note)).small().color(pal().dim)).on_hover_text(format!("{}\nSpecs from {}", p.summary(), p.source));
     }
     let total = crate::catalog::search(d.kind, "").len();
     ui.add(TextEdit::singleline(query).hint_text(format!("{}  Find a real model ({total} in the catalog)", ic::MAGNIFYING_GLASS)).desired_width(ui.available_width() - 8.0))
@@ -102,12 +102,12 @@ pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut Stri
     let mut applied = None;
     let hits = crate::catalog::search(d.kind, query);
     if hits.is_empty() {
-        ui.label(RichText::new("No model matches. Try just the brand, or pick a generic type below.").small().color(DIM));
+        ui.label(RichText::new("No model matches. Try just the brand, or pick a generic type below.").small().color(pal().dim));
     }
     for p in hits.iter().take(SHOWN) {
         let mut job = egui::text::LayoutJob::default();
-        job.append(&p.title(), 0.0, egui::TextFormat { font_id: FontId::proportional(14.0), color: TEXT, ..Default::default() });
-        job.append(&format!("\n{}", p.summary()), 0.0, egui::TextFormat { font_id: FontId::proportional(11.5), color: DIM, ..Default::default() });
+        job.append(&p.title(), 0.0, egui::TextFormat { font_id: FontId::proportional(14.0), color: pal().text, ..Default::default() });
+        job.append(&format!("\n{}", p.summary()), 0.0, egui::TextFormat { font_id: FontId::proportional(11.5), color: pal().dim, ..Default::default() });
         let r = ui.selectable_label(d.model == p.title(), job).on_hover_text(&p.note);
         if r.clicked() {
             applied = Some(d.clone());
@@ -116,7 +116,7 @@ pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut Stri
         }
     }
     if hits.len() > SHOWN {
-        ui.label(RichText::new(format!("…and {} more: type more of the name.", hits.len() - SHOWN)).small().color(DIM));
+        ui.label(RichText::new(format!("…and {} more: type more of the name.", hits.len() - SHOWN)).small().color(pal().dim));
     }
     ui.add_space(4.0);
     applied
@@ -203,19 +203,19 @@ impl App {
         // Narrow canvas: lift the legend above the zoom buttons so they don't collide.
         let lift = if rect.width() < 810.0 { 44.0 } else { 0.0 };
         let r = Rect::from_min_size(rect.left_bottom() + vec2(12.0, -40.0 - lift), vec2(if rect.width() < 810.0 { 330.0f32 } else { 470.0 }.min(rect.width() - 24.0), 28.0));
-        painter.rect_filled(r, 8, CARD.gamma_multiply(0.92));
+        painter.rect_filled(r, 8, pal().card.gamma_multiply(0.92));
         let mut x = r.left() + 10.0;
         // Narrow canvas: a short caption so the colours still fit.
         let caption = if rect.width() < 810.0 { "Signal:" } else { ["Wi-Fi map (best band):", "Wi-Fi map (2.4 GHz):", "Wi-Fi map (5 GHz):", "Wi-Fi map (6 GHz):"][self.heat_band.min(3)] };
-        let g = painter.layout_no_wrap(caption.into(), FontId::proportional(11.5), DIM);
+        let g = painter.layout_no_wrap(caption.into(), FontId::proportional(11.5), pal().dim);
         let w = g.size().x;
-        painter.galley(pos2(x, r.center().y - g.size().y / 2.0), g, DIM);
+        painter.galley(pos2(x, r.center().y - g.size().y / 2.0), g, pal().dim);
         x += w + 12.0;
         for (v, t) in items {
             painter.rect_filled(Rect::from_center_size(pos2(x + 5.0, r.center().y), Vec2::splat(10.0)), 2, heat_color(v).unwrap().gamma_multiply(2.5));
-            let g = painter.layout_no_wrap(t.into(), FontId::proportional(11.0), TEXT);
+            let g = painter.layout_no_wrap(t.into(), FontId::proportional(11.0), pal().text);
             let w = g.size().x;
-            painter.galley(pos2(x + 14.0, r.center().y - g.size().y / 2.0), g, TEXT);
+            painter.galley(pos2(x + 14.0, r.center().y - g.size().y / 2.0), g, pal().text);
             x += 14.0 + w + 12.0;
         }
         }
@@ -233,7 +233,7 @@ impl App {
                 hovered = Some(w.id);
             }
             if sel || (near && self.mode == Mode::Design) {
-                painter.line_segment([a, b], Stroke::new(width + 6.0, ACCENT.gamma_multiply(if sel { 0.4 } else { 0.18 })));
+                painter.line_segment([a, b], Stroke::new(width + 6.0, pal().accent.gamma_multiply(if sel { 0.4 } else { 0.18 })));
             }
             painter.line_segment([a, b], Stroke::new(width, wall_color(w.kind)));
             if matches!(w.kind, WallKind::Glass | WallKind::LowE) {
@@ -255,13 +255,13 @@ impl App {
         let sp = self.to_screen(vec2(pt[0], pt[1]));
         match kind {
             Snap::Corner => {
-                painter.circle_stroke(sp, 8.0, Stroke::new(2.0, GREEN));
+                painter.circle_stroke(sp, 8.0, Stroke::new(2.0, pal().green));
             }
             Snap::OnWall => {
-                painter.rect_stroke(Rect::from_center_size(sp, Vec2::splat(12.0)), 2, Stroke::new(2.0, AMBER), StrokeKind::Middle);
+                painter.rect_stroke(Rect::from_center_size(sp, Vec2::splat(12.0)), 2, Stroke::new(2.0, pal().amber), StrokeKind::Middle);
             }
             Snap::Grid => {
-                painter.circle_filled(sp, 3.0, TEXT);
+                painter.circle_filled(sp, 3.0, pal().text);
             }
         }
         if let Some(a) = self.wall_start {
@@ -270,12 +270,12 @@ impl App {
             painter.circle_filled(sa, 4.0, wall_color(self.wall_kind));
             let len = ((pt[0] - a[0]).powi(2) + (pt[1] - a[1]).powi(2)).sqrt() / PX_PER_M;
             let ang = (pt[1] - a[1]).atan2(pt[0] - a[0]).to_degrees().rem_euclid(180.0);
-            let g = painter.layout_no_wrap(format!("{len:.1} m · {ang:.0}°"), FontId::proportional(12.0), TEXT);
+            let g = painter.layout_no_wrap(format!("{len:.1} m · {ang:.0}°"), FontId::proportional(12.0), pal().text);
             let r = Rect::from_min_size(sp + vec2(12.0, -28.0), g.size() + vec2(10.0, 4.0));
-            painter.rect_filled(r, 5, CARD);
-            painter.galley(r.min + vec2(5.0, 2.0), g, TEXT);
+            painter.rect_filled(r, 5, pal().card);
+            painter.galley(r.min + vec2(5.0, 2.0), g, pal().text);
         } else {
-            painter.text(sp + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, "click to start a wall", FontId::proportional(11.5), DIM);
+            painter.text(sp + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, "click to start a wall", FontId::proportional(11.5), pal().dim);
         }
         if ended || resp.double_clicked() {
             self.wall_start = None;
@@ -308,7 +308,7 @@ impl App {
         Self::header(ui, ic::WALL, wall_color(w.kind), "Wall", &format!("{} · {len:.1} m", w.kind.label()));
         ui.add_space(4.0);
         egui::Grid::new(("wall", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(RichText::new("Material").color(DIM));
+            ui.label(RichText::new("Material").color(pal().dim));
             egui::ComboBox::from_id_salt(("wk", id)).selected_text(w.kind.label()).width(200.0).show_ui(ui, |ui| {
                 for k in WallKind::ALL {
                     ui.selectable_value(&mut w.kind, k, k.label()).on_hover_text(k.note());
@@ -316,10 +316,10 @@ impl App {
             });
             ui.end_row();
             let (l24, l5) = w.kind.loss();
-            ui.label(RichText::new("Signal loss").color(DIM)).on_hover_text("Every 10 dB lost leaves a tenth of the signal; 3 dB is half.");
+            ui.label(RichText::new("Signal loss").color(pal().dim)).on_hover_text("Every 10 dB lost leaves a tenth of the signal; 3 dB is half.");
             ui.label(format!("−{l24:.0} dB at 2.4 GHz · −{l5:.0} dB at 5 GHz")).on_hover_text(w.kind.note());
             ui.end_row();
-            ui.label(RichText::new("Storey").color(DIM));
+            ui.label(RichText::new("Storey").color(pal().dim));
             ui.add(egui::DragValue::new(&mut w.floor).range(-3..=20).custom_formatter(|v, _| crate::net::floor_name(v as i8)));
             ui.end_row();
         });
@@ -327,7 +327,7 @@ impl App {
         let (a, b, floor) = (w.a, w.b, w.floor);
         let mut want = len;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Length").color(DIM));
+            ui.label(RichText::new("Length").color(pal().dim));
             if ui.add(egui::DragValue::new(&mut want).range(0.2..=200.0).speed(0.05).suffix(" m")).on_hover_text("Type the measured length; the end you drew last moves").changed() && len > 0.0 {
                 let f = want / len;
                 let to = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
@@ -336,7 +336,7 @@ impl App {
         });
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Put in").color(DIM));
+            ui.label(RichText::new("Put in").color(pal().dim));
             for (label, kind, width) in [("Door", Some(WallKind::Wood), 0.9), ("Window", Some(WallKind::Glass), 1.2), ("Opening", None, 0.9)] {
                 if ui.small_button(label).on_hover_text(format!("A {width} m {} in the middle of this wall", label.to_lowercase())).clicked() {
                     self.snapshot();
@@ -348,10 +348,10 @@ impl App {
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.small_button(RichText::new(format!("{}  Remove wall", ic::TRASH)).color(RED)).clicked() {
+            if ui.small_button(RichText::new(format!("{}  Remove wall", ic::TRASH)).color(pal().red)).clicked() {
                 delete = true;
             }
-            if ui.small_button(RichText::new(format!("{}  Remove joined walls", ic::TRASH)).color(RED)).on_hover_text("This wall and every wall connected to it at a corner").clicked() {
+            if ui.small_button(RichText::new(format!("{}  Remove joined walls", ic::TRASH)).color(pal().red)).on_hover_text("This wall and every wall connected to it at a corner").clicked() {
                 self.snapshot();
                 let chain = joined_walls(&self.net.walls, id);
                 self.net.walls.retain(|w| !chain.contains(&w.id));
@@ -372,8 +372,8 @@ impl App {
         let Some(w) = self.net.walls.iter().find(|w| w.id == id).cloned() else { return };
         for (i, end) in [w.a, w.b].into_iter().enumerate() {
             let c = self.to_screen(vec2(end[0], end[1]));
-            painter.circle_filled(c, 6.0, BG);
-            painter.circle_stroke(c, 6.0, Stroke::new(2.0, ACCENT));
+            painter.circle_filled(c, 6.0, pal().bg);
+            painter.circle_stroke(c, 6.0, Stroke::new(2.0, pal().accent));
             let resp = ui.interact(Rect::from_center_size(c, Vec2::splat(16.0)), Id::new(("wall_end", id, i)), Sense::drag());
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
@@ -474,7 +474,7 @@ impl App {
         if Self::section_hint(ui, "Bands", if speaker { "All speakers of one system share the mesh channel. On 2.4 GHz it competes with your Wi-Fi." } else { "Width: wider is faster but collides with more neighbours. Power: the EU limit is shown when you hover the value. Radar (DFS) channels on 5 GHz may have to be left when radar shows up." }) {
         egui::Grid::new(("bands", id)).num_columns(4).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
             for h in ["", "Width", "Channel", "Power"] {
-                ui.label(RichText::new(h).small().color(DIM));
+                ui.label(RichText::new(h).small().color(pal().dim));
             }
             ui.end_row();
             for b in Band::ALL {
@@ -502,7 +502,7 @@ impl App {
                     let over = d.tx[i] > b.eu_limit();
                     ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(format!("EU limit on {}: {:.0} dBm{}", b.label(), b.eu_limit(), if over { " — above it!" } else { "" }));
                 } else {
-                    ui.label(RichText::new(if allowed == 0 { "not with this standard" } else { "off" }).small().color(DIM));
+                    ui.label(RichText::new(if allowed == 0 { "not with this standard" } else { "off" }).small().color(pal().dim));
                     ui.label("");
                     ui.label("");
                 }
@@ -514,7 +514,7 @@ impl App {
             .filter(|b| d.bands[b.i()] && d.wifi.max_width(b.i()) > 0)
             .map(|b| format!("{} {:.0}", b.label(), d.wifi.stream20(b.i()) * width_factor(d.width[b.i()].min(d.wifi.max_width(b.i()))) * d.streams as f32))
             .collect();
-        ui.label(RichText::new(format!("Top rate {} Mbit/s", top.join(" · "))).small().color(DIM)).on_hover_text("Link rate on paper; real throughput is about 60% of it, shared by everyone on the channel.");
+        ui.label(RichText::new(format!("Top rate {} Mbit/s", top.join(" · "))).small().color(pal().dim)).on_hover_text("Link rate on paper; real throughput is about 60% of it, shared by everyone on the channel.");
         }
         if kind == Kind::Neighbor {
             ui.add(egui::Slider::new(&mut d.busy, 0.0..=1.0).text("of the airtime they use").custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
@@ -548,7 +548,7 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new(format!("≈ +{:.0} dB towards where it points", (10.0 * (360.0 / d.beam).log10()).min(24.0))).small().color(DIM));
+            ui.label(RichText::new(format!("≈ +{:.0} dB towards where it points", (10.0 * (360.0 / d.beam).log10()).min(24.0))).small().color(pal().dim));
         }
         if let Some(t) = aim_target {
             self.net.aim_at(id, t);
@@ -631,12 +631,12 @@ impl App {
             });
             ui.checkbox(&mut d.stp_short, "Old short path-cost scale (802.1D-1998)").on_hover_text("1 Gbit/s costs 4 instead of 20000. Mixed with modern switches, paths through this device look far too cheap.");
             let mac = d.ifaces.first().map(|f| f.mac.clone()).unwrap_or_default();
-            ui.label(RichText::new(format!("Bridge ID {}.{mac}", d.priority)).small().color(DIM)).on_hover_text("Lowest wins the root election");
+            ui.label(RichText::new(format!("Bridge ID {}.{mac}", d.priority)).small().color(pal().dim)).on_hover_text("Lowest wins the root election");
         }
         if root == Some(id) {
-            ui.label(RichText::new(format!("{}  Root bridge: every path is measured from here.", ic::CROWN)).color(AMBER));
+            ui.label(RichText::new(format!("{}  Root bridge: every path is measured from here.", ic::CROWN)).color(pal().amber));
         } else if let Some(c) = cost {
-            ui.label(RichText::new(format!("Path cost to the root: {c}")).small().color(DIM));
+            ui.label(RichText::new(format!("Path cost to the root: {c}")).small().color(pal().dim));
         }
     }
 
@@ -656,7 +656,7 @@ impl App {
                     egui::Grid::new(("vg", id)).num_columns(4).spacing(vec2(6.0, 4.0)).striped(true).show(ui, |ui| {
                         for i in subs {
                             let f = &mut d.ifaces[i];
-                            ui.label(RichText::new(&f.name).monospace().small().color(DIM));
+                            ui.label(RichText::new(&f.name).monospace().small().color(pal().dim));
                             ui.add(egui::DragValue::new(&mut f.vlan).range(1..=4094).prefix("VLAN "));
                             ui.horizontal(|ui| {
                                 ui.add(TextEdit::singleline(&mut f.ip).desired_width(100.0).font(egui::TextStyle::Monospace));
@@ -808,7 +808,7 @@ impl App {
         if let Some(l) = self.net.wifi_link_of(id).cloned() {
             let (ap, _) = self.net.wifi_ends(&l).map(|(a, c)| (a.clone(), c.clone())).unwrap();
             let Some(s) = self.net.link_signal(&l) else {
-                ui.label(RichText::new(format!("{} and {} have no Wi-Fi band in common (check both sides' bands), so they can't talk.", d.name, ap.name)).color(RED));
+                ui.label(RichText::new(format!("{} and {} have no Wi-Fi band in common (check both sides' bands), so they can't talk.", d.name, ap.name)).color(pal().red));
                 return;
             };
             ui.horizontal(|ui| {
@@ -823,19 +823,19 @@ impl App {
                     ui.label(RichText::new(format!("{:.0} dBm · {}", s.rssi, s.quality())).size(20.0).strong().color(quality_color(s.rssi)));
                     let on_guest = d.ifaces.first().is_some_and(|f| f.vlan == crate::extras::GUEST_VLAN);
                     let ssid = if on_guest && !ap.guest_ssid.is_empty() { &ap.guest_ssid } else { &ap.ssid };
-                    ui.label(RichText::new(format!("via {} · '{ssid}'", ap.name)).color(DIM));
+                    ui.label(RichText::new(format!("via {} · '{ssid}'", ap.name)).color(pal().dim));
                 });
             });
             egui::Grid::new(("wifi_tab", id)).num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
                 let row = |ui: &mut egui::Ui, k: &str, v: String| {
-                    ui.label(RichText::new(k).color(DIM));
+                    ui.label(RichText::new(k).color(pal().dim));
                     ui.label(v);
                     ui.end_row();
                 };
                 row(ui, "Wi-Fi link", if s.alive() { format!("≈ {:.0} Mbit/s", s.mbps) } else { "no connection".into() });
                 if let Some((e, why)) = self.e2e.get(&id).filter(|_| s.alive()) {
                     let real = e.min(s.mbps);
-                    ui.label(RichText::new("To the internet").color(DIM));
+                    ui.label(RichText::new("To the internet").color(pal().dim));
                     let r = ui.label(RichText::new(format!("≈ {real:.0} Mbit/s")).strong());
                     if real < s.mbps * 0.95 {
                         r.on_hover_text(format!("Limited by {why}"));
@@ -863,7 +863,7 @@ impl App {
                 .collect();
             if !d.kind.foreign() && Self::section(ui, "Connected devices") {
                 if clients.is_empty() {
-                    ui.label(RichText::new("Nobody connected.").color(DIM));
+                    ui.label(RichText::new("Nobody connected.").color(pal().dim));
                 }
                 for (n, r, m) in clients {
                     ui.horizontal(|ui| {
@@ -887,7 +887,7 @@ impl App {
             }
             }
         } else {
-            ui.label(RichText::new(format!("{} is on a cable, not on Wi-Fi.", d.name)).color(DIM));
+            ui.label(RichText::new(format!("{} is on a cable, not on Wi-Fi.", d.name)).color(pal().dim));
             return;
         }
         // Only devices that connect to Wi-Fi can walk around and roam.
@@ -928,13 +928,13 @@ impl App {
                 };
                 ui.label(format!("{label}{tag}"));
                 if t.ifaces.iter().any(|f| f.vlan == crate::extras::GUEST_VLAN) && !t.guest_ssid.is_empty() {
-                    ui.label(RichText::new(format!("+ '{}' (guest)", t.guest_ssid)).small().color(DIM));
+                    ui.label(RichText::new(format!("+ '{}' (guest)", t.guest_ssid)).small().color(pal().dim));
                 }
                 if t.kind != Kind::Neighbor {
-                    ui.label(RichText::new(format!("({})", t.name)).small().color(DIM));
+                    ui.label(RichText::new(format!("({})", t.name)).small().color(pal().dim));
                 }
                 let chans: Vec<String> = Band::ALL.iter().filter(|b| t.bands[b.i()]).map(|b| self.net.channel(t, *b).to_string()).collect();
-                ui.label(RichText::new(format!("ch {}", chans.join("/"))).small().color(DIM));
+                ui.label(RichText::new(format!("ch {}", chans.join("/"))).small().color(pal().dim));
             });
         }
     }
@@ -943,21 +943,21 @@ impl App {
         let Some(h) = self.hist.get(&id).filter(|h| h.len() > 1) else { return };
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 120.0), Sense::hover());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 8, BG);
+        p.rect_filled(rect, 8, pal().bg);
         let y = |r: f32| rect.bottom() - (r.clamp(-95.0, -30.0) + 95.0) / 65.0 * rect.height();
         let x = |t: f64| rect.right() - ((now - t) as f32 / 45.0) * rect.width();
         let th = self.net.wifi_link_of(id).and_then(|l| self.net.wifi_ends(l)).map(|(ap, cl)| crate::wifi::roam_threshold(ap, cl)).unwrap_or(-75.0);
         for (lvl, txt) in [(-67.0, "good"), (th, "starts looking for another access point")] {
-            p.extend(Shape::dashed_line(&[pos2(rect.left(), y(lvl)), pos2(rect.right(), y(lvl))], Stroke::new(1.0, DIM.gamma_multiply(0.6)), 4.0, 4.0));
-            p.text(pos2(rect.left() + 4.0, y(lvl) - 2.0), Align2::LEFT_BOTTOM, format!("{lvl:.0} {txt}"), FontId::proportional(10.0), DIM);
+            p.extend(Shape::dashed_line(&[pos2(rect.left(), y(lvl)), pos2(rect.right(), y(lvl))], Stroke::new(1.0, pal().dim.gamma_multiply(0.6)), 4.0, 4.0));
+            p.text(pos2(rect.left() + 4.0, y(lvl) - 2.0), Align2::LEFT_BOTTOM, format!("{lvl:.0} {txt}"), FontId::proportional(10.0), pal().dim);
         }
         let pts: Vec<Pos2> = h.iter().map(|s| pos2(x(s.0), y(s.1))).collect();
-        p.add(Shape::line(pts, Stroke::new(2.0, ACCENT)));
+        p.add(Shape::line(pts, Stroke::new(2.0, pal().accent)));
         for s in h.iter().filter(|s| s.2) {
-            p.line_segment([pos2(x(s.0), rect.top()), pos2(x(s.0), rect.bottom())], Stroke::new(1.5, AMBER));
-            p.text(pos2(x(s.0) + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, "hand-over", FontId::proportional(10.0), AMBER);
+            p.line_segment([pos2(x(s.0), rect.top()), pos2(x(s.0), rect.bottom())], Stroke::new(1.5, pal().amber));
+            p.text(pos2(x(s.0) + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, "hand-over", FontId::proportional(10.0), pal().amber);
         }
-        p.text(rect.right_top() + vec2(-6.0, 4.0), Align2::RIGHT_TOP, "signal, last 45 s", FontId::proportional(10.0), DIM);
+        p.text(rect.right_top() + vec2(-6.0, 4.0), Align2::RIGHT_TOP, "signal, last 45 s", FontId::proportional(10.0), pal().dim);
     }
 }
 
@@ -966,18 +966,18 @@ impl App {
     pub(crate) fn device_tooltip(&self, ui: &mut egui::Ui, id: u32, stp: &crate::stp::Stp) {
         let Some(d) = self.net.dev(id) else { return };
         ui.label(RichText::new(&d.name).strong());
-        ui.label(RichText::new(if d.model.is_empty() { d.kind.label().to_string() } else { format!("{} · {}", d.kind.label(), d.model) }).small().color(DIM));
+        ui.label(RichText::new(if d.model.is_empty() { d.kind.label().to_string() } else { format!("{} · {}", d.kind.label(), d.model) }).small().color(pal().dim));
         for f in d.ifaces.iter().filter(|f| !f.ip.is_empty()).take(4) {
             ui.label(RichText::new(format!("{} {}/{}{}", f.name, f.ip, f.prefix, if f.vlan != 1 { format!("  VLAN {}", f.vlan) } else { String::new() })).monospace().small());
         }
         let subs = d.ifaces.iter().filter(|f| f.parent.is_some()).count();
         if subs > 4 {
-            ui.label(RichText::new(format!("… and {subs} VLAN interfaces")).small().color(DIM));
+            ui.label(RichText::new(format!("… and {subs} VLAN interfaces")).small().color(pal().dim));
         }
         if let Some(s) = self.net.wifi_link_of(id).and_then(|l| self.net.link_signal(l)) {
             ui.label(RichText::new(format!("{:.0} dBm on {} · Wi-Fi link ≈ {:.0} Mbit/s", s.rssi, s.band.label(), s.mbps)).color(quality_color(s.rssi)));
             if let Some((e, why)) = self.e2e.get(&id).filter(|e| e.0 < s.mbps * 0.95) {
-                ui.label(RichText::new(format!("To the internet ≈ {e:.0} Mbit/s — {why}")).small().color(DIM));
+                ui.label(RichText::new(format!("To the internet ≈ {e:.0} Mbit/s — {why}")).small().color(pal().dim));
             }
         }
         if d.kind.transmits() {
@@ -987,7 +987,7 @@ impl App {
             }
         }
         if stp.root == Some(id) {
-            ui.label(RichText::new(format!("{} spanning-tree root", ic::CROWN)).color(AMBER));
+            ui.label(RichText::new(format!("{} spanning-tree root", ic::CROWN)).color(pal().amber));
         }
     }
 }

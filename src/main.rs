@@ -34,16 +34,39 @@ use wifi::WallKind;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-const BG: Color32 = Color32::from_rgb(13, 17, 23);
-const PANEL: Color32 = Color32::from_rgb(20, 26, 34);
-const CARD: Color32 = Color32::from_rgb(28, 35, 46);
-const LINE: Color32 = Color32::from_rgb(44, 54, 68);
-const TEXT: Color32 = Color32::from_rgb(220, 227, 236);
-const DIM: Color32 = Color32::from_rgb(132, 146, 164);
-const ACCENT: Color32 = Color32::from_rgb(45, 212, 191);
-const RED: Color32 = Color32::from_rgb(248, 113, 113);
-const AMBER: Color32 = Color32::from_rgb(251, 191, 36);
-const GREEN: Color32 = Color32::from_rgb(74, 222, 128);
+/// The colours of one theme.
+struct Palette {
+    bg: Color32,
+    panel: Color32,
+    card: Color32,
+    line: Color32,
+    text: Color32,
+    dim: Color32,
+    accent: Color32,
+    red: Color32,
+    amber: Color32,
+    green: Color32,
+    hover: Color32,
+    press: Color32,
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
+    Color32::from_rgb(r, g, b)
+}
+
+/// Dark (the default), light, and high contrast for low vision or bright rooms.
+const PALETTES: [Palette; 3] = [
+    Palette { bg: rgb(13, 17, 23), panel: rgb(20, 26, 34), card: rgb(28, 35, 46), line: rgb(44, 54, 68), text: rgb(220, 227, 236), dim: rgb(132, 146, 164), accent: rgb(45, 212, 191), red: rgb(248, 113, 113), amber: rgb(251, 191, 36), green: rgb(74, 222, 128), hover: rgb(38, 48, 62), press: rgb(48, 60, 76) },
+    Palette { bg: rgb(246, 248, 250), panel: rgb(234, 238, 243), card: rgb(255, 255, 255), line: rgb(200, 208, 218), text: rgb(24, 31, 41), dim: rgb(84, 96, 112), accent: rgb(13, 128, 116), red: rgb(196, 38, 38), amber: rgb(161, 98, 7), green: rgb(21, 128, 61), hover: rgb(222, 228, 236), press: rgb(208, 216, 226) },
+    Palette { bg: rgb(0, 0, 0), panel: rgb(10, 10, 10), card: rgb(26, 26, 26), line: rgb(160, 160, 160), text: rgb(255, 255, 255), dim: rgb(214, 214, 214), accent: rgb(0, 255, 230), red: rgb(255, 92, 92), amber: rgb(255, 214, 10), green: rgb(80, 255, 120), hover: rgb(50, 50, 50), press: rgb(70, 70, 70) },
+];
+
+/// Which of PALETTES is in use (saved in the settings file).
+static THEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn pal() -> &'static Palette {
+    &PALETTES[THEME.load(std::sync::atomic::Ordering::Relaxed).min(PALETTES.len() - 1)]
+}
 
 fn kind_color(k: Kind) -> Color32 {
     use Kind::*;
@@ -102,9 +125,9 @@ fn medium_color(m: Medium) -> Color32 {
 
 fn level_color(l: Level) -> Color32 {
     match l {
-        Level::Error => RED,
-        Level::Warning => AMBER,
-        Level::Tip => ACCENT,
+        Level::Error => pal().red,
+        Level::Warning => pal().amber,
+        Level::Tip => pal().accent,
     }
 }
 
@@ -141,12 +164,81 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("W", "Draw walls"),
     ("M", "Measure a distance"),
     ("F", "Fit the plan to the window"),
+    ("Tab / Shift+Tab", "Pick the next or previous device"),
+    ("Arrow keys", "Nudge the picked device by 25 cm"),
     ("Delete", "Remove what's selected"),
     ("Esc", "Deselect, end a wall"),
     ("Ctrl+Z / Ctrl+Y", "Undo, redo"),
     ("Ctrl+D", "Duplicate"),
     ("Ctrl+S / Ctrl+O", "Save, open"),
 ];
+
+/// Look and text size, kept in the config folder next to the device library.
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Settings {
+    /// Index into PALETTES.
+    theme: usize,
+    /// Everything drawn bigger or smaller (1 = normal).
+    zoom: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { theme: 0, zoom: 1.0 }
+    }
+}
+
+impl Settings {
+    fn path() -> PathBuf {
+        extras::library_path().with_file_name("settings.json")
+    }
+    fn load() -> Self {
+        std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+    fn save(&self) {
+        let p = Self::path();
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, serde_json::to_string(self).unwrap_or_default());
+    }
+    /// Colours, spacing and text sizes for the whole app.
+    fn apply(&self, ctx: &egui::Context) {
+        THEME.store(self.theme.min(PALETTES.len() - 1), std::sync::atomic::Ordering::Relaxed);
+        ctx.set_zoom_factor(self.zoom.clamp(0.7, 2.0));
+        ctx.set_theme(if self.theme == 1 { egui::Theme::Light } else { egui::Theme::Dark });
+        ctx.all_styles_mut(|s| {
+        let v = &mut s.visuals;
+        v.panel_fill = pal().panel;
+        v.window_fill = pal().panel;
+        v.extreme_bg_color = pal().bg;
+        v.faint_bg_color = pal().card;
+        v.override_text_color = Some(pal().text);
+        v.selection.bg_fill = pal().accent.gamma_multiply(0.35);
+        v.selection.stroke = Stroke::new(1.0, pal().accent);
+        v.hyperlink_color = pal().accent;
+        v.window_stroke = Stroke::new(1.0, pal().line);
+        for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive, &mut v.widgets.open] {
+            w.corner_radius = CornerRadius::same(8);
+        }
+        v.widgets.inactive.weak_bg_fill = pal().card;
+        v.widgets.inactive.bg_fill = pal().card;
+        v.widgets.hovered.weak_bg_fill = pal().hover;
+        v.widgets.active.weak_bg_fill = pal().press;
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, pal().line);
+        s.spacing.item_spacing = vec2(8.0, 7.0);
+        s.spacing.button_padding = vec2(10.0, 5.0);
+        s.spacing.interact_size.y = 26.0;
+        use egui::TextStyle as T;
+        s.text_styles.insert(T::Body, FontId::proportional(14.0));
+        s.text_styles.insert(T::Button, FontId::proportional(14.0));
+        s.text_styles.insert(T::Heading, FontId::proportional(20.0));
+        s.text_styles.insert(T::Small, FontId::proportional(12.0));
+        s.text_styles.insert(T::Monospace, FontId::monospace(13.0));
+        });
+    }
+}
 
 /// What an in-place edit replaced, for its undo step (App::snapshot_before).
 enum Before {
@@ -269,6 +361,9 @@ struct App {
     replug: Option<u32>,
     /// A device or cable as it was before an edit rewrote it in place (new hardware, cable type, ports); next frame makes it an undo step.
     before: Option<Before>,
+    settings: Settings,
+    /// Tab (+1) or Shift+Tab (−1) pressed on the map: select the next or previous device.
+    tab: Option<i32>,
     reading: f32,
     issues: Option<Vec<Issue>>,
     undo: Vec<Network>,
@@ -314,36 +409,9 @@ impl App {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
-        cc.egui_ctx.all_styles_mut(|s| {
-            let v = &mut s.visuals;
-            v.panel_fill = PANEL;
-            v.window_fill = PANEL;
-            v.extreme_bg_color = BG;
-            v.faint_bg_color = CARD;
-            v.override_text_color = Some(TEXT);
-            v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-            v.selection.stroke = Stroke::new(1.0, ACCENT);
-            v.hyperlink_color = ACCENT;
-            v.window_stroke = Stroke::new(1.0, LINE);
-            for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive, &mut v.widgets.open] {
-                w.corner_radius = CornerRadius::same(8);
-            }
-            v.widgets.inactive.weak_bg_fill = CARD;
-            v.widgets.inactive.bg_fill = CARD;
-            v.widgets.hovered.weak_bg_fill = Color32::from_rgb(38, 48, 62);
-            v.widgets.active.weak_bg_fill = Color32::from_rgb(48, 60, 76);
-            v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
-            s.spacing.item_spacing = vec2(8.0, 7.0);
-            s.spacing.button_padding = vec2(10.0, 5.0);
-            s.spacing.interact_size.y = 26.0;
-            use egui::TextStyle as T;
-            s.text_styles.insert(T::Body, FontId::proportional(14.0));
-            s.text_styles.insert(T::Button, FontId::proportional(14.0));
-            s.text_styles.insert(T::Heading, FontId::proportional(20.0));
-            s.text_styles.insert(T::Small, FontId::proportional(12.0));
-            s.text_styles.insert(T::Monospace, FontId::monospace(13.0));
-        });
+        // Screenshots always look the same, whatever this computer's settings are.
+        let settings = if screenshot.is_some() { Settings::default() } else { Settings::load() };
+        settings.apply(&cc.egui_ctx);
         let mut app = App {
             net: Network::default(),
             mode: Mode::Design,
@@ -379,6 +447,8 @@ impl App {
             catalog_query: String::new(),
             replug: None,
             before: None,
+            settings,
+            tab: None,
             reading: -65.0,
             issues: None,
             undo: vec![],
@@ -633,18 +703,18 @@ impl App {
         let tiny = ui.available_width() < 1150.0;
         let lab = |icon: &str, text: &str| if compact { icon.to_string() } else { format!("{icon}  {text}") };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(ic::SHARE_NETWORK).size(22.0).color(ACCENT));
+            ui.label(RichText::new(ic::SHARE_NETWORK).size(22.0).color(pal().accent));
             if !tiny {
                 ui.label(RichText::new("NetSketch").size(18.0).strong());
             }
-            ui.add(TextEdit::singleline(&mut self.net.title).desired_width(if compact { 130.0 } else { 180.0 }).frame(egui::Frame::NONE).text_color(DIM));
+            ui.add(TextEdit::singleline(&mut self.net.title).desired_width(if compact { 130.0 } else { 180.0 }).frame(egui::Frame::NONE).text_color(pal().dim));
             ui.add_space(if compact { 6.0 } else { 16.0 });
             let before = self.mode;
             for (m, icon, label) in [(Mode::Design, ic::PENCIL_SIMPLE, "Design"), (Mode::Simulate, ic::PLAY, "Simulate"), (Mode::Learn, ic::BOOK_OPEN, "Learn")] {
                 let on = self.mode == m;
                 let text = if tiny && !on { icon.to_string() } else { format!("{icon}  {label}") };
-                let b = egui::Button::new(RichText::new(text).color(if on { BG } else { TEXT }))
-                    .fill(if on { ACCENT } else { CARD })
+                let b = egui::Button::new(RichText::new(text).color(if on { pal().bg } else { pal().text }))
+                    .fill(if on { pal().accent } else { pal().card })
                     .corner_radius(14);
                 if ui.add(b).clicked() {
                     self.mode = m;
@@ -654,17 +724,35 @@ impl App {
                 self.start_sim(&ctx);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let was = self.settings;
+                ui.menu_button(ic::GEAR, |ui| {
+                    ui.set_min_width(240.0);
+                    ui.label(RichText::new("Look").strong());
+                    for (i, name) in ["Dark", "Light", "High contrast"].into_iter().enumerate() {
+                        ui.radio_value(&mut self.settings.theme, i, name);
+                    }
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Text and buttons").strong());
+                    ui.add(egui::Slider::new(&mut self.settings.zoom, 0.8..=1.8).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                    ui.label(RichText::new("Ctrl + and Ctrl − change the size too.").small().color(pal().dim));
+                })
+                .response
+                .on_hover_text("Settings: colours and text size");
+                if self.settings != was {
+                    self.settings.apply(ui.ctx());
+                    self.settings.save();
+                }
                 ui.menu_button(ic::KEYBOARD, |ui| {
                     ui.set_min_width(300.0);
                     ui.label(RichText::new("Keyboard shortcuts").strong());
                     egui::Grid::new("keys").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
                         for (k, what) in SHORTCUTS {
-                            ui.label(RichText::new(*k).monospace().color(ACCENT));
+                            ui.label(RichText::new(*k).monospace().color(pal().accent));
                             ui.label(*what);
                             ui.end_row();
                         }
                     });
-                    ui.label(RichText::new("Right-click anything on the map for more. Hold Shift while connecting to cable a laptop.").small().color(DIM));
+                    ui.label(RichText::new("Right-click anything on the map for more. Hold Shift while connecting to cable a laptop.").small().color(pal().dim));
                 })
                 .response
                 .on_hover_text("Keyboard shortcuts");
@@ -748,7 +836,7 @@ impl App {
 
     fn shelf(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(RichText::new("TOOLS").small().color(DIM));
+        ui.label(RichText::new("TOOLS").small().color(pal().dim));
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.tool, Tool::Select, format!("{} Move", ic::CURSOR));
             ui.selectable_value(&mut self.tool, Tool::Connect, format!("{} Connect", ic::PLUGS_CONNECTED));
@@ -765,7 +853,7 @@ impl App {
                     ui.selectable_value(&mut self.wall_kind, k, k.label());
                 }
             });
-            ui.label(RichText::new("Click to start, click again to place — each click continues the wall. Right-click, double-click or Esc to stop. Points lock onto corners (green) and walls (amber); Shift keeps it straight.").small().color(DIM));
+            ui.label(RichText::new("Click to start, click again to place — each click continues the wall. Right-click, double-click or Esc to stop. Points lock onto corners (green) and walls (amber); Shift keeps it straight.").small().color(pal().dim));
             ui.add_space(8.0);
         }
         if self.tool == Tool::Connect {
@@ -777,13 +865,13 @@ impl App {
                         ui.selectable_value(&mut self.medium, m, m.label());
                     }
                 });
-            ui.label(RichText::new("Drag from one device to another — or click one, then the other. Laptops join by Wi-Fi; hold Shift to cable one.").small().color(DIM));
+            ui.label(RichText::new("Drag from one device to another — or click one, then the other. Laptops join by Wi-Fi; hold Shift to cable one.").small().color(pal().dim));
         }
         if self.tool == Tool::Select {
-            ui.label(RichText::new("Drag devices, pins and wall ends. Right-click anything for more.").small().color(DIM));
+            ui.label(RichText::new("Drag devices, pins and wall ends. Right-click anything for more.").small().color(pal().dim));
         }
         ui.add_space(8.0);
-        ui.label(RichText::new("ADD DEVICES").small().color(DIM));
+        ui.label(RichText::new("ADD DEVICES").small().color(pal().dim));
         egui::Grid::new("shelf").num_columns(2).spacing(vec2(6.0, 6.0)).show(ui, |ui| {
             for (i, k) in Kind::SHELF.iter().enumerate() {
                 // Smaller cards in narrow windows so the map keeps its room.
@@ -791,12 +879,12 @@ impl App {
                 let (rect, resp) = ui.allocate_exact_size(if narrow { vec2(78.0, 54.0) } else { vec2(96.0, 62.0) }, Sense::click_and_drag());
                 let hovered = resp.hovered();
                 let p = ui.painter();
-                p.rect_filled(rect, 10, if hovered { Color32::from_rgb(36, 45, 58) } else { CARD });
+                p.rect_filled(rect, 10, if hovered { Color32::from_rgb(36, 45, 58) } else { pal().card });
                 if hovered {
                     p.rect_stroke(rect, 10, Stroke::new(1.0, kind_color(*k)), StrokeKind::Inside);
                 }
                 p.text(rect.center() - vec2(0.0, 9.0), Align2::CENTER_CENTER, kind_icon(*k), FontId::proportional(22.0), kind_color(*k));
-                p.text(rect.center() + vec2(0.0, if narrow { 15.0 } else { 17.0 }), Align2::CENTER_CENTER, k.label(), FontId::proportional(if narrow { 10.0 } else { 11.5 }), TEXT);
+                p.text(rect.center() + vec2(0.0, if narrow { 15.0 } else { 17.0 }), Align2::CENTER_CENTER, k.label(), FontId::proportional(if narrow { 10.0 } else { 11.5 }), pal().text);
                 let resp = resp.on_hover_text(k.blurb());
                 if resp.drag_started() {
                     self.drag_kind = Some(*k);
@@ -815,7 +903,7 @@ impl App {
             }
         });
         ui.add_space(10.0);
-        ui.label(RichText::new("PLAN").small().color(DIM));
+        ui.label(RichText::new("PLAN").small().color(pal().dim));
         if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  Plan addresses for me", ic::MAGIC_WAND))).on_hover_text("Gives every network a sensible address range, turns on DHCP and fills in routes").clicked() {
             self.snapshot();
             let logs = self.net.auto_address();
@@ -865,7 +953,7 @@ impl App {
         // a switch and the router. Zoomed out it stays big enough to see and click (24 px), zoomed in
         // it stops growing at 58 px. Overviews of whole sites (below 42%) shrink them like before.
         let z = (self.zoom * 0.6 * PX_PER_M / 58.0).max(self.zoom.min(0.42)).min(1.0);
-        painter.rect_filled(rect, 0, BG);
+        painter.rect_filled(rect, 0, pal().bg);
         let ctx = ui.ctx().clone();
         self.draw_plan(&ctx, &painter);
         // Dot grid; its spacing is shown next to the zoom level.
@@ -915,9 +1003,9 @@ impl App {
         if let Some((_, p, ..)) = self.ap_hint.filter(|h| h.0 == self.floor) {
             let c = self.to_screen(vec2(p[0], p[1]));
             let pulse = 1.0 + 0.15 * (now * 3.0).sin() as f32;
-            painter.circle_stroke(c, 22.0 * z.max(0.6) * pulse, Stroke::new(2.5, GREEN));
-            painter.text(c, Align2::CENTER_CENTER, ic::PLUS, FontId::proportional(20.0 * z.max(0.6)), GREEN);
-            painter.text(c + vec2(0.0, 28.0 * z.max(0.6)), Align2::CENTER_TOP, "new access point here?", FontId::proportional(11.5), GREEN);
+            painter.circle_stroke(c, 22.0 * z.max(0.6) * pulse, Stroke::new(2.5, pal().green));
+            painter.text(c, Align2::CENTER_CENTER, ic::PLUS, FontId::proportional(20.0 * z.max(0.6)), pal().green);
+            painter.text(c + vec2(0.0, 28.0 * z.max(0.6)), Align2::CENTER_TOP, "new access point here?", FontId::proportional(11.5), pal().green);
             ui.ctx().request_repaint();
         }
         let over_device = pointer.is_some_and(|p| self.net.devices.iter().any(|d| Rect::from_center_size(self.dev_pos(d.id), Vec2::splat(58.0 * z)).contains(p)));
@@ -954,17 +1042,17 @@ impl App {
                 col = level_color(*lv);
             }
             if standby {
-                col = DIM.gamma_multiply(0.6);
+                col = pal().dim.gamma_multiply(0.6);
             }
             if storm {
-                col = RED;
+                col = pal().red;
             }
             let w = if selected { 3.5 } else if near { 2.8 } else { 2.0 } * z.max(0.6) + if storm { 2.0 } else { 0.0 };
             if selected {
-                painter.line_segment([a, b], Stroke::new(w + 6.0, ACCENT.gamma_multiply(0.2)));
+                painter.line_segment([a, b], Stroke::new(w + 6.0, pal().accent.gamma_multiply(0.2)));
             }
             if sig.is_some_and(|s| !s.alive()) {
-                painter.extend(Shape::dashed_line(&[a, b], Stroke::new(w, RED.gamma_multiply(0.7)), 2.0 * z, 6.0 * z));
+                painter.extend(Shape::dashed_line(&[a, b], Stroke::new(w, pal().red.gamma_multiply(0.7)), 2.0 * z, 6.0 * z));
             } else if l.medium.wireless() || standby {
                 painter.extend(Shape::dashed_line(&[a, b], Stroke::new(w, col.gamma_multiply(0.85)), 6.0 * z, 5.0 * z));
             } else {
@@ -973,20 +1061,20 @@ impl App {
             let m = a + (b - a) * 0.5;
             if standby || storm {
                 let (t, c) = if storm {
-                    (format!("{} loop!", ic::FIRE), RED)
+                    (format!("{} loop!", ic::FIRE), pal().red)
                 } else if l.unplugged {
-                    (format!("{} unplugged", ic::PLUGS), AMBER)
+                    (format!("{} unplugged", ic::PLUGS), pal().amber)
                 } else if dead {
-                    ("no power".to_string(), DIM)
+                    ("no power".to_string(), pal().dim)
                 } else {
-                    ("standby".to_string(), DIM)
+                    ("standby".to_string(), pal().dim)
                 };
                 let g = painter.layout_no_wrap(t, FontId::proportional(10.5 * z.max(0.7)), c);
                 let r = Rect::from_center_size(m, g.size() + vec2(10.0, 4.0));
-                painter.rect_filled(r, 6, BG);
+                painter.rect_filled(r, 6, pal().bg);
                 painter.galley(r.min + vec2(5.0, 2.0), g, c);
             } else if let Some(u) = load.as_ref().map(|ld| self.net.utilisation(ld, l.id)).filter(|u| *u > 0.5 && sig.is_none() && !(selected || near)) {
-                let c = if u > 1.0 { RED } else if u > 0.8 { AMBER } else { DIM };
+                let c = if u > 1.0 { pal().red } else if u > 0.8 { pal().amber } else { pal().dim };
                 painter.text(m, Align2::CENTER_CENTER, format!("{:.0}% busy", u * 100.0), FontId::proportional(10.0 * z.max(0.8)), c);
             }
             if selected || near {
@@ -994,10 +1082,10 @@ impl App {
                 if let Some(s) = sig {
                     txt = format!("Wi-Fi {:.0} dBm on {} · {} wall(s) · ≈ {:.0} Mbit/s", s.rssi, s.band.label(), s.walls, s.mbps);
                 }
-                let g = painter.layout_no_wrap(txt, FontId::proportional(11.5), TEXT);
+                let g = painter.layout_no_wrap(txt, FontId::proportional(11.5), pal().text);
                 let r = Rect::from_center_size(m, g.size() + vec2(12.0, 6.0));
-                painter.rect_filled(r, 6, CARD);
-                painter.galley(r.min + vec2(6.0, 3.0), g, TEXT);
+                painter.rect_filled(r, 6, pal().card);
+                painter.galley(r.min + vec2(6.0, 3.0), g, pal().text);
             }
         }
 
@@ -1011,7 +1099,7 @@ impl App {
                     c + vec2(a.cos(), a.sin()) * len
                 }))
                 .collect();
-            painter.add(Shape::convex_polygon(pts, ACCENT.gamma_multiply(0.06), Stroke::new(1.0, ACCENT.gamma_multiply(0.3))));
+            painter.add(Shape::convex_polygon(pts, pal().accent.gamma_multiply(0.06), Stroke::new(1.0, pal().accent.gamma_multiply(0.3))));
         }
         // Rubber band while connecting.
         if let (Some(from), Some(p)) = (self.connect_from, pointer) {
@@ -1103,14 +1191,14 @@ impl App {
             let r = Rect::from_center_size(c, Vec2::splat(size));
             let col = kind_color(d.kind);
             if d.floor != self.floor {
-                painter.text(r.center_top() + vec2(0.0, -2.0 * z), Align2::CENTER_BOTTOM, net::floor_name(d.floor), FontId::proportional(10.0 * z), TEXT);
+                painter.text(r.center_top() + vec2(0.0, -2.0 * z), Align2::CENTER_BOTTOM, net::floor_name(d.floor), FontId::proportional(10.0 * z), pal().text);
             }
             let selected = self.sel == Sel::Dev(d.id);
             let hovered = pointer.is_some_and(|p| r.contains(p));
             if selected {
-                painter.rect_filled(r.expand(6.0 * z), 18.0 * z, ACCENT.gamma_multiply(0.18));
+                painter.rect_filled(r.expand(6.0 * z), 18.0 * z, pal().accent.gamma_multiply(0.18));
             }
-            painter.rect_filled(r, 14.0 * z, if d.kind == Kind::Neighbor { CARD.gamma_multiply(0.6) } else { CARD });
+            painter.rect_filled(r, 14.0 * z, if d.kind == Kind::Neighbor { pal().card.gamma_multiply(0.6) } else { pal().card });
             let painter = {
                 let mut p = painter.clone();
                 if d.off {
@@ -1119,49 +1207,49 @@ impl App {
                 p
             };
             if d.off {
-                painter.text(r.right_bottom() - vec2(4.0, 4.0) * z, Align2::RIGHT_BOTTOM, ic::POWER, FontId::proportional(13.0 * z.max(0.7)), RED);
+                painter.text(r.right_bottom() - vec2(4.0, 4.0) * z, Align2::RIGHT_BOTTOM, ic::POWER, FontId::proportional(13.0 * z.max(0.7)), pal().red);
             }
             painter.rect_stroke(r, 14.0 * z, Stroke::new(if selected { 2.0 } else { 1.2 }, if selected || hovered { col } else { col.gamma_multiply(0.45) }), StrokeKind::Inside);
             if self.walks.contains_key(&d.id) {
-                painter.text(r.left_top() + vec2(2.0, 2.0) * z, Align2::LEFT_TOP, ic::PERSON_SIMPLE_WALK, FontId::proportional(14.0 * z), ACCENT);
+                painter.text(r.left_top() + vec2(2.0, 2.0) * z, Align2::LEFT_TOP, ic::PERSON_SIMPLE_WALK, FontId::proportional(14.0 * z), pal().accent);
             }
             painter.text(c, Align2::CENTER_CENTER, kind_icon(d.kind), FontId::proportional(28.0 * z), col);
             let status = match worst.get(&d.id) {
-                Some(Level::Error) => RED,
-                Some(Level::Warning) => AMBER,
-                _ => GREEN,
+                Some(Level::Error) => pal().red,
+                Some(Level::Warning) => pal().amber,
+                _ => pal().green,
             };
             if d.kind != Kind::Neighbor {
                 painter.circle_filled(r.right_top() + vec2(-6.0, 6.0) * z, 4.5 * z, status);
             }
             if stp.root == Some(d.id) {
-                painter.text(r.center_top() + vec2(0.0, -2.0 * z), Align2::CENTER_BOTTOM, ic::CROWN, FontId::proportional(16.0 * z), AMBER);
+                painter.text(r.center_top() + vec2(0.0, -2.0 * z), Align2::CENTER_BOTTOM, ic::CROWN, FontId::proportional(16.0 * z), pal().amber);
             }
             if let Some(v) = d.ifaces.first().map(|f| f.vlan).filter(|v| *v != 1 && d.kind.is_host()) {
                 let hue = Color32::from(egui::ecolor::Hsva::new((v as f32 * 0.137).fract(), 0.6, 0.9, 1.0));
                 let chip = Rect::from_min_size(r.left_bottom() + vec2(-6.0, -14.0) * z, vec2(30.0, 14.0) * z);
                 painter.rect_filled(chip, 4.0 * z, hue);
-                painter.text(chip.center(), Align2::CENTER_CENTER, format!("V{v}"), FontId::proportional(9.5 * z), BG);
+                painter.text(chip.center(), Align2::CENTER_CENTER, format!("V{v}"), FontId::proportional(9.5 * z), pal().bg);
             }
             // Zoomed out, labels would pile on top of each other: show them for the device in focus only.
             let focus = selected || hovered;
             let names = self.zoom >= 0.45 || focus;
             let subs = self.zoom >= 0.65 || focus;
             if names {
-                place(&painter, c + vec2(0.0, size * 0.5 + 9.0 * z.max(0.7)), d.name.clone(), FontId::proportional((12.5 * z).max(10.0)), TEXT, focus);
+                place(&painter, c + vec2(0.0, size * 0.5 + 9.0 * z.max(0.7)), d.name.clone(), FontId::proportional((12.5 * z).max(10.0)), pal().text, focus);
             }
             let ip = d.ifaces.get(if d.kind == Kind::HomeRouter { 0 } else { d.dhcp_iface() }).map(|f| f.ip.clone()).unwrap_or_default();
             let chans = |d: &net::Device| wifi::Band::ALL.iter().filter(|b| d.bands[b.i()]).map(|b| self.net.channel(d, *b).to_string()).collect::<Vec<_>>().join("/");
             let wifi_sig = self.net.wifi_link_of(d.id).and_then(|l| self.net.link_signal(l));
             let (sub, font, sub_col) = if d.kind.transmits() && (self.mode == Mode::Design || d.kind == Kind::Neighbor) {
                 let what = if d.kind == Kind::Interference { format!("{} ch {}", ic::LIGHTNING, d.ch[0]) } else { format!("{} {} · ch {}", ic::WIFI_HIGH, d.ssid, chans(d)) };
-                (what, FontId::proportional(11.0 * z), DIM)
+                (what, FontId::proportional(11.0 * z), pal().dim)
             } else if let (Mode::Simulate, Some(s)) = (self.mode, wifi_sig.filter(|_| !d.kind.radio())) {
                 // The speed it really gets (the whole way to the internet), not just its own Wi-Fi link.
                 let mbps = self.e2e.get(&d.id).map_or(s.mbps, |e| e.0.min(s.mbps));
                 (format!("{} {:.0} dBm · {:.0} Mbit/s", ic::WIFI_HIGH, s.rssi, mbps), FontId::proportional(11.0 * z), quality_color(s.rssi))
             } else {
-                (ip, FontId::monospace(10.5 * z), DIM)
+                (ip, FontId::monospace(10.5 * z), pal().dim)
             };
             if !sub.is_empty() && subs {
                 place(&painter, c + vec2(0.0, size * 0.5 + 24.0 * z.max(0.7)), sub, FontId::new(font.size.max(9.5), font.family), sub_col, focus);
@@ -1181,12 +1269,12 @@ impl App {
             if i + 1 < a.path.len() {
                 let (p, q) = (self.dev_pos(a.path[i]), self.dev_pos(a.path[i + 1]));
                 let pos = p + (q - p) * (t.fract() as f32);
-                let col = if a.ok || i + 2 < a.path.len() { ACCENT } else { RED };
+                let col = if a.ok || i + 2 < a.path.len() { pal().accent } else { pal().red };
                 painter.circle_filled(pos, 9.0 * z, col.gamma_multiply(0.25));
                 painter.circle_filled(pos, 5.0 * z, col);
             } else if let Some(last) = a.path.last() {
                 let p = self.dev_pos(*last);
-                let (icon, col) = if a.ok { (ic::CHECK_CIRCLE, GREEN) } else { (ic::X, RED) };
+                let (icon, col) = if a.ok { (ic::CHECK_CIRCLE, pal().green) } else { (ic::X, pal().red) };
                 painter.text(p - vec2(0.0, size * 0.5 + 12.0 * z), Align2::CENTER_CENTER, icon, FontId::proportional(18.0 * z), col);
             }
         }
@@ -1233,7 +1321,7 @@ impl App {
             if let Some(p) = pointer {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 let lp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("ghost")));
-                lp.rect_filled(Rect::from_center_size(p, Vec2::splat(52.0)), 12, CARD.gamma_multiply(0.9));
+                lp.rect_filled(Rect::from_center_size(p, Vec2::splat(52.0)), 12, pal().card.gamma_multiply(0.9));
                 lp.text(p, Align2::CENTER_CENTER, kind_icon(k), FontId::proportional(26.0), kind_color(k));
             }
             if ui.input(|i| i.pointer.any_released()) {
@@ -1253,7 +1341,7 @@ impl App {
             // Which band the map shows.
             let lift = if rect.width() < 810.0 { 44.0 } else { 0.0 };
             let r = Rect::from_min_size(rect.left_bottom() + vec2(12.0, -74.0 - lift), vec2(250.0, 28.0));
-            painter.rect_filled(r.expand(2.0), 8, CARD.gamma_multiply(0.92));
+            painter.rect_filled(r.expand(2.0), 8, pal().card.gamma_multiply(0.92));
             ui.put(r.shrink2(vec2(6.0, 0.0)), |ui: &mut egui::Ui| {
                 ui.horizontal(|ui| {
                     for (i, t) in ["Best band", "2.4", "5", "6 GHz"].iter().enumerate() {
@@ -1265,14 +1353,14 @@ impl App {
         }
         // Zoom controls.
         let zr = Rect::from_min_size(rect.right_bottom() - vec2(312.0, 44.0), vec2(300.0, 32.0));
-        painter.rect_filled(zr.expand2(vec2(4.0, 0.0)), 8, CARD.gamma_multiply(0.92));
+        painter.rect_filled(zr.expand2(vec2(4.0, 0.0)), 8, pal().card.gamma_multiply(0.92));
         ui.put(zr, |ui: &mut egui::Ui| {
             ui.horizontal(|ui| {
                 if ui.small_button(ic::MAGNIFYING_GLASS_MINUS).clicked() {
                     self.zoom = (self.zoom / 1.2).max(0.1);
                 }
-                ui.label(RichText::new(format!("{:.0}%", self.zoom * 100.0)).small().color(DIM)).on_hover_text("Zoom level");
-                ui.label(RichText::new(format!("· dots {} m", self.grid_m())).small().color(DIM)).on_hover_text("Distance between two dots of the grid");
+                ui.label(RichText::new(format!("{:.0}%", self.zoom * 100.0)).small().color(pal().dim)).on_hover_text("Zoom level");
+                ui.label(RichText::new(format!("· dots {} m", self.grid_m())).small().color(pal().dim)).on_hover_text("Distance between two dots of the grid");
                 if ui.small_button(ic::MAGNIFYING_GLASS_PLUS).clicked() {
                     self.zoom = (self.zoom * 1.2).min(MAX_ZOOM);
                 }
@@ -1428,7 +1516,7 @@ impl App {
             ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, FontId::proportional(22.0), col);
             ui.vertical(|ui| {
                 ui.label(RichText::new(title).size(16.0).strong());
-                ui.label(RichText::new(sub).small().color(DIM));
+                ui.label(RichText::new(sub).small().color(pal().dim));
             });
         });
     }
@@ -1449,9 +1537,9 @@ impl App {
         let clicked = ui
             .horizontal(|ui| {
                 let caret = if open { ic::CARET_DOWN } else { ic::CARET_RIGHT };
-                let r = ui.add(egui::Label::new(RichText::new(format!("{caret}  {title}")).strong().color(if open { TEXT } else { DIM })).sense(Sense::click()));
+                let r = ui.add(egui::Label::new(RichText::new(format!("{caret}  {title}")).strong().color(if open { pal().text } else { pal().dim })).sense(Sense::click()));
                 if !hint.is_empty() {
-                    ui.label(RichText::new(ic::INFO).color(DIM)).on_hover_text(hint);
+                    ui.label(RichText::new(ic::INFO).color(pal().dim)).on_hover_text(hint);
                 }
                 // The rest of the row is clickable too.
                 let rest = ui.allocate_response(vec2(ui.available_width(), r.rect.height()), Sense::click());
@@ -1487,7 +1575,7 @@ impl App {
                     if let Some(h) = &host {
                         name.on_hover_text(h);
                     }
-                    ui.label(RichText::new(d.kind.label()).small().color(DIM));
+                    ui.label(RichText::new(d.kind.label()).small().color(pal().dim));
                 });
             });
         }
@@ -1505,7 +1593,7 @@ impl App {
                 }
             }
             self.power_toggle(ui, id);
-            if ui.small_button(RichText::new(format!("{}  Delete", ic::TRASH)).color(RED)).on_hover_text("Remove this device (Delete key)").clicked() {
+            if ui.small_button(RichText::new(format!("{}  Delete", ic::TRASH)).color(pal().red)).on_hover_text("Remove this device (Delete key)").clicked() {
                 delete = true;
             }
         });
@@ -1536,7 +1624,7 @@ impl App {
                 let auto = d.dhcp_client;
                 egui::Grid::new("ifaces").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
                     for (i, f) in d.ifaces.iter_mut().enumerate().filter(|(_, f)| f.parent.is_none()) {
-                        ui.label(RichText::new(&f.name).monospace().color(DIM));
+                        ui.label(RichText::new(&f.name).monospace().color(pal().dim));
                         ui.horizontal(|ui| {
                             let locked = auto && i == dhcp_if;
                             ui.add_enabled(!locked, TextEdit::singleline(&mut f.ip).desired_width(118.0).hint_text("e.g. 192.168.1.20").font(egui::TextStyle::Monospace));
@@ -1562,7 +1650,7 @@ impl App {
                 });
             }
             if kind == Kind::Router && d.ifaces.is_empty() && Self::section(ui, "Addresses") {
-                ui.label(RichText::new("Connect cables first: each cable uses one of the router's ports, which then gets its own address.").small().color(DIM));
+                ui.label(RichText::new("Connect cables first: each cable uses one of the router's ports, which then gets its own address.").small().color(pal().dim));
             }
             if kind == Kind::Internet && Self::section(ui, "Internet plan") {
                 ui_extras::plan_picker(ui, d, &mut self.catalog_query);
@@ -1643,7 +1731,7 @@ impl App {
             });
             if !kind.foreign() && !kind.is_host() {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Ports").color(DIM));
+                ui.label(RichText::new("Ports").color(pal().dim));
                 let old = d.clone();
                 if ui_extras::port_editor(ui, id, &mut d.ports, &plugged) {
                     self.before = Some(Before::Device(old));
@@ -1713,7 +1801,7 @@ impl App {
         let wifi_only = [ka, kb].iter().any(|k| matches!(k, Kind::Phone | Kind::SmartHome));
         ui.add_space(4.0);
         egui::Grid::new(("link", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(RichText::new("Type").color(DIM));
+            ui.label(RichText::new("Type").color(pal().dim));
             egui::ComboBox::from_id_salt(("medium", id)).selected_text(l.medium.label()).width(200.0).show_ui(ui, |ui| {
                 for m in Medium::ALL.into_iter().filter(|m| match m {
                     Medium::Mesh => ka == Kind::Speaker && kb == Kind::Speaker,
@@ -1729,7 +1817,7 @@ impl App {
             }
             ui.end_row();
             if l.medium == Medium::Powerline && !catalog::powerline().is_empty() {
-                ui.label(RichText::new("Kit").color(DIM));
+                ui.label(RichText::new("Kit").color(pal().dim));
                 let shown = if l.kit.is_empty() { "A typical kit (≈ 300 Mbit/s up close)".to_string() } else { l.kit.clone() };
                 egui::ComboBox::from_id_salt(("kit", id)).selected_text(shown).width(200.0).show_ui(ui, |ui| {
                     ui.selectable_value(&mut l.kit, String::new(), "A typical kit (≈ 300 Mbit/s up close)");
@@ -1739,7 +1827,7 @@ impl App {
                 });
                 ui.end_row();
             }
-            ui.label(RichText::new("Length").color(DIM));
+            ui.label(RichText::new("Length").color(pal().dim));
             ui.horizontal(|ui| {
                 let mut manual = l.length_m.is_some();
                 if let Some(m) = &mut l.length_m {
@@ -1758,20 +1846,20 @@ impl App {
         if Self::section_hint(ui, "How it performs", mesh_hint) {
             if let Some(s) = self.net.link_signal(&l) {
                 ui.label(RichText::new(format!("{:.0} dBm ({}) on {} {} MHz · {}×{} streams", s.rssi, s.quality(), s.band.label(), s.width, s.streams, s.streams)).color(quality_color(s.rssi)));
-                ui.label(RichText::new(format!("Answer back {:.0} dBm · {} wall(s) · airtime ×{:.1}", s.up, s.walls, s.contention)).color(DIM));
+                ui.label(RichText::new(format!("Answer back {:.0} dBm · {} wall(s) · airtime ×{:.1}", s.up, s.walls, s.contention)).color(pal().dim));
             }
             ui.label(format!("≈ {:.0} Mbit/s real throughput", self.net.link_rate(&l)));
             let stp = self.stp();
             if stp.blocked.contains(&id) {
-                ui.label(RichText::new("Spanning tree keeps this link on standby (backup path).").color(AMBER));
+                ui.label(RichText::new("Spanning tree keeps this link on standby (backup path).").color(pal().amber));
             } else if stp.storm.contains(&id) {
-                ui.label(RichText::new("This link closes a loop nobody blocks: broadcast storm!").color(RED));
+                ui.label(RichText::new("This link closes a loop nobody blocks: broadcast storm!").color(pal().red));
             }
         }
         self.link_ports(ui, id);
         self.link_extras(ui, id);
         ui.add_space(6.0);
-        if ui.small_button(RichText::new(format!("{}  Remove connection", ic::TRASH)).color(RED)).clicked() {
+        if ui.small_button(RichText::new(format!("{}  Remove connection", ic::TRASH)).color(pal().red)).clicked() {
             self.snapshot();
             self.net.remove_link(id);
             self.sel = Sel::None;
@@ -1779,20 +1867,20 @@ impl App {
     }
 
     fn overview(&mut self, ui: &mut egui::Ui, issues: &[Issue]) {
-        Self::header(ui, ic::HOUSE_LINE, ACCENT, &self.net.title.clone(), "Plan overview");
+        Self::header(ui, ic::HOUSE_LINE, pal().accent, &self.net.title.clone(), "Plan overview");
         let stp = self.stp();
         let n = &self.net;
         let errors = issues.iter().filter(|i| i.level == Level::Error).count();
         let warns = issues.iter().filter(|i| i.level == Level::Warning).count();
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            stat(ui, &n.devices.len().to_string(), "devices", ACCENT);
+            stat(ui, &n.devices.len().to_string(), "devices", pal().accent);
             stat(ui, &n.links.len().to_string(), "connections", Color32::from_rgb(96, 165, 250));
-            stat(ui, &errors.to_string(), "errors", if errors > 0 { RED } else { GREEN });
-            stat(ui, &warns.to_string(), "warnings", if warns > 0 { AMBER } else { GREEN });
+            stat(ui, &errors.to_string(), "errors", if errors > 0 { pal().red } else { pal().green });
+            stat(ui, &warns.to_string(), "warnings", if warns > 0 { pal().amber } else { pal().green });
         });
         if !self.net.story.is_empty() && Self::section(ui, "About this setup") {
-            ui.label(RichText::new(&self.net.story).color(DIM));
+            ui.label(RichText::new(&self.net.story).color(pal().dim));
         }
         let n = &self.net;
         let (_, total) = shopping(n);
@@ -1805,7 +1893,7 @@ impl App {
         if Self::section(ui, "At a glance") {
             egui::Grid::new("glance").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
                 for (k, v) in [("Estimated cost", format!("{cur}{total:.0}")), ("Cable to lay", format!("{cable:.0} m")), ("Wi-Fi devices", wifi.to_string()), ("Spanning-tree root", root), ("VLANs in use", vlans)] {
-                    ui.label(RichText::new(k).color(DIM));
+                    ui.label(RichText::new(k).color(pal().dim));
                     ui.label(v);
                     ui.end_row();
                 }
@@ -1814,23 +1902,23 @@ impl App {
         self.resilience_and_power(ui);
         if Self::section(ui, "Settings") {
             egui::Grid::new("settings").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                ui.label(RichText::new("Floors made of").color(DIM)).on_hover_text("What the floors between storeys are built from: it decides how much Wi-Fi gets through to the next storey");
+                ui.label(RichText::new("Floors made of").color(pal().dim)).on_hover_text("What the floors between storeys are built from: it decides how much Wi-Fi gets through to the next storey");
                 egui::ComboBox::from_id_salt("slab").selected_text(self.net.slab.label()).width(170.0).show_ui(ui, |ui| {
                     for k in WallKind::ALL {
                         ui.selectable_value(&mut self.net.slab, k, k.label());
                     }
                 });
                 ui.end_row();
-                ui.label(RichText::new("Hardware").color(DIM)).on_hover_text("Real devices differ: MAC addresses, how sticky each phone is, how busy the neighbours are, how good the house wiring is. A fixed seed makes the same plan always behave the same.");
+                ui.label(RichText::new("Hardware").color(pal().dim)).on_hover_text("Real devices differ: MAC addresses, how sticky each phone is, how busy the neighbours are, how good the house wiring is. A fixed seed makes the same plan always behave the same.");
                 if ui.small_button(format!("{} Shuffle  ·  {:08x}", ic::SHUFFLE, self.net.seed as u32)).on_hover_text("Same plan, other physical devices: new MAC addresses, different neighbours' habits and wiring quality").clicked() {
                     self.snapshot();
                     self.net.shuffle_hardware(sim::new_seed());
                 }
                 ui.end_row();
-                ui.label(RichText::new("Live variation").color(DIM));
+                ui.label(RichText::new("Live variation").color(pal().dim));
                 ui.checkbox(&mut self.live_var, "in Simulate").on_hover_text("Fading and changing traffic while simulating. Off: Simulate uses the same steady averages as planning.");
                 ui.end_row();
-                ui.label(RichText::new("Currency").color(DIM));
+                ui.label(RichText::new("Currency").color(pal().dim));
                 ui.add(TextEdit::singleline(&mut self.net.currency).desired_width(40.0));
                 ui.end_row();
             });
@@ -1846,8 +1934,8 @@ impl App {
                 (ic::KEYBOARD, "Keyboard shortcuts: the keyboard button at the top right lists them all."),
             ] {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(icon).color(ACCENT));
-                    ui.label(RichText::new(t).color(DIM));
+                    ui.label(RichText::new(icon).color(pal().accent));
+                    ui.label(RichText::new(t).color(pal().dim));
                 });
             }
         }
@@ -1899,18 +1987,18 @@ impl App {
                 let ips: Vec<String> = d.ifaces.iter().filter(|f| !f.ip.is_empty()).map(|f| f.ip.clone()).collect();
                 let me = |a: &str| a == d.name || ips.iter().any(|ip| a == ip || a.strip_prefix(ip.as_str()).is_some_and(|r| r.starts_with(':')));
                 let rows: Vec<&Row> = self.rows.iter().filter(|r| r.log.dev == id || me(&r.log.src) || me(&r.log.dst)).collect();
-                ui.label(RichText::new(format!("Everything {} sent, received or handled — like a packet capture.", d.name)).small().color(DIM));
+                ui.label(RichText::new(format!("Everything {} sent, received or handled — like a packet capture.", d.name)).small().color(pal().dim));
                 egui::ScrollArea::vertical().id_salt("traffic").stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                     if rows.is_empty() {
-                        ui.label(RichText::new("Nothing yet. Open a page or ping from any device.").color(DIM));
+                        ui.label(RichText::new("Nothing yet. Open a page or ping from any device.").color(pal().dim));
                     }
                     for r in rows {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(format!("{:.2}s", r.t)).monospace().color(DIM));
+                            ui.label(RichText::new(format!("{:.2}s", r.t)).monospace().color(pal().dim));
                             ui.label(RichText::new(r.log.proto).strong().color(proto_color(r.log.proto)));
                             ui.label(RichText::new(format!("{} {} {}", r.log.src, ic::ARROW_RIGHT, r.log.dst)).monospace());
                         });
-                        ui.label(RichText::new(&r.log.info).small().color(DIM));
+                        ui.label(RichText::new(&r.log.info).small().color(pal().dim));
                         ui.add_space(2.0);
                     }
                 });
@@ -1936,17 +2024,17 @@ impl App {
         });
         let mut follow = None;
         if let Some(err) = &b.error {
-            ui.label(RichText::new(format!("{}  {err}", ic::WARNING)).color(RED));
+            ui.label(RichText::new(format!("{}  {err}", ic::WARNING)).color(pal().red));
         } else if let Some(f) = &b.pending {
             ui.horizontal(|ui| {
                 ui.spinner();
                 let what = if f.fixed.is_some() { format!("Testing this network's speed on {} …", f.shown) } else { format!("Loading {} …", f.shown) };
-                ui.label(RichText::new(what).color(DIM));
+                ui.label(RichText::new(what).color(pal().dim));
             });
         } else if let Some((addr, _)) = &b.page {
             let page = &b.parsed;
             let bg = page.bg.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(Color32::WHITE);
-            let fg = if bg.r() as u32 + bg.g() as u32 + bg.b() as u32 > 380 { Color32::from_rgb(20, 24, 32) } else { TEXT };
+            let fg = if bg.r() as u32 + bg.g() as u32 + bg.b() as u32 > 380 { Color32::from_rgb(20, 24, 32) } else { pal().text };
             if !page.title.is_empty() {
                 ui.label(RichText::new(&page.title).strong());
             }
@@ -1988,12 +2076,12 @@ impl App {
                 };
                 if page.center { ui.vertical_centered(body) } else { ui.vertical(body) };
             });
-            ui.label(RichText::new(format!("{}  {addr}", ic::LOCK)).small().color(DIM));
+            ui.label(RichText::new(format!("{}  {addr}", ic::LOCK)).small().color(pal().dim));
             if let Some(n) = &b.note {
-                ui.label(RichText::new(n).small().color(DIM));
+                ui.label(RichText::new(n).small().color(pal().dim));
             }
         } else {
-            ui.label(RichText::new("Type an address — a device's IP, its name, or a real website like wikipedia.org — and press Enter.").color(DIM));
+            ui.label(RichText::new("Type an address — a device's IP, its name, or a real website like wikipedia.org — and press Enter.").color(pal().dim));
         }
         if let Some(h) = follow.filter(|h| !h.starts_with('#') && !h.starts_with("mailto:") && !h.starts_with("javascript:")) {
             let here = b.page.as_ref().map(|p| p.0.clone()).unwrap_or_default();
@@ -2140,11 +2228,11 @@ impl App {
         });
         let term = self.terms.entry(id).or_insert_with(|| Term { lines: vec![format!("{} — type help for commands", d.name)], input: String::new() });
         let h = ui.available_height() - 64.0;
-        egui::Frame::new().fill(BG).corner_radius(8).inner_margin(Margin::same(8)).show(ui, |ui| {
+        egui::Frame::new().fill(pal().bg).corner_radius(8).inner_margin(Margin::same(8)).show(ui, |ui| {
             ui.set_min_height(h.max(120.0));
             egui::ScrollArea::vertical().stick_to_bottom(true).max_height(h.max(120.0)).auto_shrink([false, false]).show(ui, |ui| {
                 for l in &term.lines {
-                    let col = if l.starts_with("$ ") { ACCENT } else if l.contains("timeout") || l.contains("Can't") || l.contains("refused") || l.contains("NXDOMAIN") { RED } else { TEXT };
+                    let col = if l.starts_with("$ ") { pal().accent } else if l.contains("timeout") || l.contains("Can't") || l.contains("refused") || l.contains("NXDOMAIN") { pal().red } else { pal().text };
                     ui.label(RichText::new(l).monospace().color(col));
                 }
             });
@@ -2194,10 +2282,10 @@ impl App {
         egui::ScrollArea::both().auto_shrink([false, false]).stick_to_bottom(self.bottom == Bottom::Packets).show(ui, |ui| match self.bottom {
             Bottom::Problems => {
                 if issues.is_empty() {
-                    ui.label(RichText::new(format!("{}  Everything looks good.", ic::CHECK_CIRCLE)).color(GREEN));
+                    ui.label(RichText::new(format!("{}  Everything looks good.", ic::CHECK_CIRCLE)).color(pal().green));
                 }
                 let fixable = issues.iter().filter(|i| i.fix.is_some()).count();
-                if fixable > 1 && ui.button(RichText::new(format!("{}  Apply all {fixable} one-click fixes", ic::WRENCH)).color(ACCENT)).on_hover_text("Every fix below in one go (Ctrl+Z undoes it)").clicked() {
+                if fixable > 1 && ui.button(RichText::new(format!("{}  Apply all {fixable} one-click fixes", ic::WRENCH)).color(pal().accent)).on_hover_text("Every fix below in one go (Ctrl+Z undoes it)").clicked() {
                     self.snapshot();
                     let n = self.net.fix_all().len();
                     self.issues = None;
@@ -2223,7 +2311,7 @@ impl App {
             Bottom::Packets => {
                 let sel = if let Sel::Dev(d) = self.sel { Some(d) } else { None };
                 if self.rows.is_empty() {
-                    ui.label(RichText::new("No traffic yet. Switch to Simulate and run a command.").color(DIM));
+                    ui.label(RichText::new("No traffic yet. Switch to Simulate and run a command.").color(pal().dim));
                 }
                 let rows: Vec<&Row> = self.rows.iter().filter(|r| !self.only_selected || sel.is_none() || Some(r.log.dev) == sel).collect();
                 packet_grid(ui, "pk", &rows);
@@ -2239,10 +2327,10 @@ impl App {
                     }
                     ui.label(RichText::new("Total (estimate)").strong());
                     ui.label("");
-                    ui.label(RichText::new(format!("{}{total:.0}", self.net.currency)).strong().color(ACCENT));
+                    ui.label(RichText::new(format!("{}{total:.0}", self.net.currency)).strong().color(pal().accent));
                     ui.end_row();
                 });
-                ui.label(RichText::new("Prices are rough estimates — set your own per device.").small().color(DIM));
+                ui.label(RichText::new("Prices are rough estimates — set your own per device.").small().color(pal().dim));
             }
         });
     }
@@ -2250,30 +2338,30 @@ impl App {
     // ---------- learn ----------
 
     fn learn(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("lessons").exact_size(270.0).frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(12))).show(ui, |ui| {
-            ui.label(RichText::new("LESSONS").small().color(DIM));
+        egui::Panel::left("lessons").exact_size(270.0).frame(egui::Frame::new().fill(pal().panel).inner_margin(Margin::same(12))).show(ui, |ui| {
+            ui.label(RichText::new("LESSONS").small().color(pal().dim));
             egui::ScrollArea::vertical().show(ui, |ui| for (i, (title, ..)) in lessons::LESSONS.iter().enumerate() {
                 let on = self.lesson == i;
-                let b = egui::Button::new(RichText::new(format!("{:>2}  {title}", i + 1)).color(if on { ACCENT } else { TEXT })).fill(if on { CARD } else { Color32::TRANSPARENT }).min_size(vec2(ui.available_width(), 30.0));
+                let b = egui::Button::new(RichText::new(format!("{:>2}  {title}", i + 1)).color(if on { pal().accent } else { pal().text })).fill(if on { pal().card } else { Color32::TRANSPARENT }).min_size(vec2(ui.available_width(), 30.0));
                 if ui.add(b).clicked() {
                     self.lesson = i;
                 }
             });
         });
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(48, 32))).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(48, 32))).show(ui, |ui| {
             let (title, body, try_it, scenario) = lessons::LESSONS[self.lesson];
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.set_max_width(760.0);
-                ui.label(RichText::new(format!("Lesson {} of {}", self.lesson + 1, lessons::LESSONS.len())).color(DIM));
+                ui.label(RichText::new(format!("Lesson {} of {}", self.lesson + 1, lessons::LESSONS.len())).color(pal().dim));
                 ui.label(RichText::new(title).size(28.0).strong());
                 ui.add_space(12.0);
                 for p in body.split("\n\n") {
                     ui.label(RichText::new(p).size(15.5).line_height(Some(24.0)));
                     ui.add_space(8.0);
                 }
-                egui::Frame::new().fill(CARD).corner_radius(10).inner_margin(Margin::same(14)).show(ui, |ui| {
+                egui::Frame::new().fill(pal().card).corner_radius(10).inner_margin(Margin::same(14)).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("{}  Try it", ic::LIGHTNING)).strong().color(ACCENT));
+                        ui.label(RichText::new(format!("{}  Try it", ic::LIGHTNING)).strong().color(pal().accent));
                         ui.label(try_it);
                     });
                 });
@@ -2303,11 +2391,11 @@ impl App {
 }
 
 fn stat(ui: &mut egui::Ui, value: &str, label: &str, col: Color32) {
-    egui::Frame::new().fill(CARD).corner_radius(8).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+    egui::Frame::new().fill(pal().card).corner_radius(8).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
         ui.set_min_width(54.0);
         ui.vertical(|ui| {
             ui.label(RichText::new(value).size(18.0).strong().color(col));
-            ui.label(RichText::new(label).small().color(DIM));
+            ui.label(RichText::new(label).small().color(pal().dim));
         });
     });
 }
@@ -2315,15 +2403,15 @@ fn stat(ui: &mut egui::Ui, value: &str, label: &str, col: Color32) {
 fn packet_grid(ui: &mut egui::Ui, id: &str, rows: &[&Row]) {
     egui::Grid::new(id).striped(true).num_columns(6).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
         for h in ["Time", "Source", "Destination", "Protocol", "Layer", "What happens"] {
-            ui.label(RichText::new(h).small().color(DIM));
+            ui.label(RichText::new(h).small().color(pal().dim));
         }
         ui.end_row();
         for r in rows {
-            ui.label(RichText::new(format!("{:.2} s", r.t)).monospace().color(DIM));
+            ui.label(RichText::new(format!("{:.2} s", r.t)).monospace().color(pal().dim));
             ui.label(RichText::new(&r.log.src).monospace());
             ui.label(RichText::new(&r.log.dst).monospace());
             ui.label(RichText::new(r.log.proto).strong().color(proto_color(r.log.proto)));
-            ui.label(RichText::new(r.log.layer).color(DIM));
+            ui.label(RichText::new(r.log.layer).color(pal().dim));
             ui.label(&r.log.info);
             ui.end_row();
         }
@@ -2334,12 +2422,12 @@ fn proto_color(p: &str) -> Color32 {
     match p {
         "DHCP" => Color32::from_rgb(167, 139, 250),
         "DNS" => Color32::from_rgb(96, 165, 250),
-        "ARP" => DIM,
-        "NAT" => AMBER,
-        "TLS" | "HTTP" => GREEN,
+        "ARP" => pal().dim,
+        "NAT" => pal().amber,
+        "TLS" | "HTTP" => pal().green,
         "802.11" => Color32::from_rgb(45, 212, 191),
         "802.1Q" => Color32::from_rgb(232, 121, 249),
-        _ => ACCENT,
+        _ => pal().accent,
     }
 }
 
@@ -2373,9 +2461,20 @@ fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 impl eframe::App for App {
     /// Screenshots ignore the real mouse, so a pointer resting on the window adds no hover or tooltip.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if self.screenshot.is_some() {
             raw.events.retain(|e| !matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }));
+        }
+        // With nothing focused, Tab walks through the devices on the map instead of the buttons.
+        if self.mode != Mode::Learn && ctx.memory(|m| m.focused().is_none()) {
+            raw.events.retain(|e| match e {
+                egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } => {
+                    self.tab = Some(if modifiers.shift { -1 } else { 1 });
+                    false
+                }
+                egui::Event::Key { key: egui::Key::Tab, .. } => false,
+                _ => true,
+            });
         }
     }
 
@@ -2425,6 +2524,30 @@ impl eframe::App for App {
         }
         if !typing && ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.command) {
             self.fit();
+        }
+        // Keyboard use of the map: Tab picks devices on this storey in turn, the arrow keys nudge the picked one.
+        if let Some(dir) = self.tab.take() {
+            let ids: Vec<u32> = self.net.devices.iter().filter(|d| d.floor == self.floor).map(|d| d.id).collect();
+            if !ids.is_empty() {
+                let at = ids.iter().position(|i| self.sel == Sel::Dev(*i)).map_or(if dir > 0 { ids.len() - 1 } else { 0 }, |p| p);
+                let id = ids[(at as i32 + dir).rem_euclid(ids.len() as i32) as usize];
+                self.sel = Sel::Dev(id);
+                let at = self.to_screen(Vec2::from(self.net.dev(id).unwrap().pos));
+                if !self.canvas_rect.shrink(40.0).contains(at) {
+                    self.pan += self.canvas_rect.center() - at;
+                }
+                self.say(&ctx, format!("{} — arrow keys move it, Delete removes it.", self.net.name(id)));
+            }
+        }
+        if let (false, Mode::Design, Sel::Dev(id)) = (typing, self.mode, self.sel) {
+            let step = PX_PER_M / 4.0;
+            let d = ctx.input(|i| [(egui::Key::ArrowLeft, [-step, 0.0]), (egui::Key::ArrowRight, [step, 0.0]), (egui::Key::ArrowUp, [0.0, -step]), (egui::Key::ArrowDown, [0.0, step])].into_iter().filter(|(k, _)| i.key_pressed(*k)).map(|x| x.1).next());
+            if let Some([dx, dy]) = d {
+                self.snapshot();
+                if let Some(dev) = self.net.dev_mut(id) {
+                    dev.pos = [dev.pos[0] + dx, dev.pos[1] + dy];
+                }
+            }
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
             self.open(&ctx);
@@ -2515,14 +2638,14 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        egui::Panel::top("top").frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 9)).stroke(Stroke::new(1.0, LINE))).show(ui, |ui| self.top_bar(ui));
+        egui::Panel::top("top").frame(egui::Frame::new().fill(pal().panel).inner_margin(Margin::symmetric(14, 9)).stroke(Stroke::new(1.0, pal().line))).show(ui, |ui| self.top_bar(ui));
 
         if let Some((msg, until)) = self.toast.clone() {
             if Self::now(&ctx) < until {
                 // Over the map only, so it never hides the settings panel.
                 let c = if self.canvas_rect.is_positive() { self.canvas_rect } else { ctx.content_rect() };
                 egui::Area::new(Id::new("toast")).fixed_pos(pos2(c.center().x, c.top() + 50.0)).pivot(Align2::CENTER_TOP).order(egui::Order::Foreground).show(&ctx, |ui| {
-                    egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0, ACCENT)).corner_radius(10).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
+                    egui::Frame::new().fill(pal().card).stroke(Stroke::new(1.0, pal().accent)).corner_radius(10).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
                         ui.set_max_width(520.0f32.min(c.width() - 60.0).max(200.0));
                         ui.label(msg);
                     });
@@ -2538,7 +2661,7 @@ impl eframe::App for App {
             return;
         }
 
-        let side = egui::Frame::new().fill(PANEL).inner_margin(Margin::same(12));
+        let side = egui::Frame::new().fill(pal().panel).inner_margin(Margin::same(12));
         let screen = ctx.content_rect();
         if self.mode == Mode::Design {
             egui::Panel::left("shelf").exact_size(if screen.width() < 1200.0 { 186.0 } else { 224.0 }).frame(side).show(ui, |ui| {
@@ -2548,9 +2671,9 @@ impl eframe::App for App {
         // Side panels can't squeeze the map away: the inspector stays under ~40% of the window, the log under 40% of its height.
         egui::Panel::right("inspector").default_size((screen.width() * 0.32).clamp(320.0, 420.0)).size_range(320.0..=(screen.width() * 0.4).max(340.0)).frame(side).show(ui, |ui| {
             if self.mode == Mode::Simulate && !matches!(self.sel, Sel::Dev(_)) {
-                Self::header(ui, ic::PLAY, ACCENT, "Simulation", "Click any device to use its apps");
+                Self::header(ui, ic::PLAY, pal().accent, "Simulation", "Click any device to use its apps");
                 ui.add_space(6.0);
-                ui.label(RichText::new("Addresses were handed out by DHCP. Pick a device on the map: see its Wi-Fi, take it for a walk to watch it roam, open a web page in its browser, or run ping, speedtest, wifi and stp on its command line. Packets move along the cables and every step lands in the packet log below.").color(DIM));
+                ui.label(RichText::new("Addresses were handed out by DHCP. Pick a device on the map: see its Wi-Fi, take it for a walk to watch it roam, open a web page in its browser, or run ping, speedtest, wifi and stp on its command line. Packets move along the cables and every step lands in the packet log below.").color(pal().dim));
                 ui.add_space(6.0);
                 if ui.button(format!("{}  Back to design", ic::PENCIL_SIMPLE)).clicked() {
                     self.mode = Mode::Design;
@@ -2561,7 +2684,7 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui, &issues));
         });
         egui::Panel::bottom("bottom").default_size(190.0).size_range(90.0..=(screen.height() * 0.4).max(120.0)).resizable(true).frame(side).show(ui, |ui| self.bottom_panel(ui, &issues));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| self.canvas(ui, &issues));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().bg)).show(ui, |ui| self.canvas(ui, &issues));
     }
 }
 
