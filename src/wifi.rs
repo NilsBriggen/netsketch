@@ -1,5 +1,6 @@
-//! The air: walls, signal strength, Wi-Fi speed, channels, neighbours, extenders, roaming and hardware presets.
-//! shortcut: a 2-D multi-wall path-loss model (COST-231 style: near free-space distance loss plus each wall
+//! The air: walls, signal strength, Wi-Fi speed, channels, neighbours, extenders, roaming, hardware presets,
+//! and the Thread/Zigbee (802.15.4) gadgets that share 2.4 GHz with Wi-Fi.
+//! shortcut: a multi-wall path-loss model over 3-D distance (COST-231 style: near free-space distance loss plus each wall
 //! and floor crossed) — good for planning and teaching, not a ray tracer; reflections are only described, not computed.
 use crate::net::{Device, Kind, Link, Medium, Network, WifiStd, PX_PER_M};
 use serde::{Deserialize, Serialize};
@@ -187,6 +188,8 @@ pub struct Signal {
     pub walls: usize,
     /// 1 = the channel is all yours; 2 = you get half the airtime.
     pub contention: f32,
+    /// Wi-Fi 7 Multi-Link: the second band carrying data at the same time (its speed is included above).
+    pub also: Option<Band>,
 }
 
 impl Signal {
@@ -257,6 +260,9 @@ pub fn width_factor(w: u16) -> f32 {
 
 /// 2.4 GHz channels that don't overlap: the classic 1/6/11 plan first, then the European 1/5/9/13 plan.
 pub const CH24: [u16; 6] = [1, 6, 11, 5, 9, 13];
+
+/// Height (m) above the floor of a spot on the Wi-Fi map: a phone in the hand, a laptop on a desk.
+pub const SPOT_M: f32 = 1.0;
 
 /// Spatial streams a link can really use at a signal: extra streams need a clean signal.
 fn usable_streams(rssi: f32, n: u8) -> u8 {
@@ -462,12 +468,14 @@ impl Network {
         (loss, n)
     }
 
-    /// Path loss (dB) between two spots, multi-wall style: near free-space loss over the distance (3 m per
-    /// storey), plus every wall crossed, plus the floor slabs (each further slab costs a little less).
-    pub fn path_loss(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, band: Band) -> f32 {
+    /// Path loss (dB) between two spots, multi-wall style: near free-space loss over the real 3-D distance
+    /// (storey heights, plus `dh` = how much higher b's antenna sits above its floor than a's), plus every
+    /// wall crossed, plus the floor slabs (each further slab costs a little less).
+    pub fn path_loss(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, dh: f32, band: Band) -> f32 {
         let storeys = (fa as f32 - fb as f32).abs();
         let flat = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() / PX_PER_M;
-        let d = (flat * flat + (storeys * 3.0).powi(2)).sqrt().max(1.0);
+        let up = self.floor_z(fb) - self.floor_z(fa) + dh;
+        let d = (flat * flat + up * up).sqrt().max(1.0);
         let f_mhz: f32 = match band {
             Band::B24 => 2437.0,
             Band::B5 => 5500.0,
@@ -490,7 +498,7 @@ impl Network {
             return -120.0;
         }
         let gain = if ap.streams >= 4 { 2.0 } else { 0.0 };
-        self.eirp(ap, pos, band) + gain + ap.cal_db - self.path_loss(ap.pos, ap.floor, pos, floor, band)
+        self.eirp(ap, pos, band) + gain + ap.cal_db - self.path_loss(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount, band)
     }
 
     /// Best signal over the bands a radio has on (2.4 GHz counted 6 dB lower: it's the slow band).
@@ -645,12 +653,13 @@ impl Network {
         // Echoes from metal and coated glass cost a little speed even on average.
         let multipath = 1.0 - 0.04 * (self.reflectors(cl.pos, cl.floor) + self.reflectors(ap.pos, ap.floor)).min(4) as f32;
         let mut best: Option<Signal> = None;
+        let mut alive: Vec<Signal> = vec![];
         for band in Band::ALL {
             let width = ap.width[band.i()].min(cl.width[band.i()]).min(std.max_width(band.i())).min(self.chan(ap, band).1);
             if !ap.bands[band.i()] || !cl.bands[band.i()] || width == 0 {
                 continue;
             }
-            let loss = self.path_loss(ap.pos, ap.floor, cl.pos, cl.floor, band);
+            let loss = self.path_loss(ap.pos, ap.floor, cl.pos, cl.floor, cl.mount - ap.mount, band);
             let fade = if live { self.fade(l.id as u64, band, cl) } else { 0.0 };
             // Directional antennas help (or hurt) at both ends of the link; sending is capped at the legal limit.
             let rssi = self.eirp(ap, cl.pos, band) + dir_gain(cl, ap.pos) + rx_gain + ap.cal_db - loss + fade;
@@ -678,7 +687,10 @@ impl Network {
             // Data one way needs acknowledgements the other way: both directions must get through.
             let usable = phy > 0.0 && phy_up > 0.0;
             let rate = |p: f32| if usable { p * mac_eff(p) * multipath / contention } else { 0.0 };
-            let s = Signal { rssi, up, band, width: used, streams: usable_streams(rssi + bf, streams), mbps: rate(phy), up_mbps: rate(phy_up), phy, walls, contention };
+            let s = Signal { rssi, up, band, width: used, streams: usable_streams(rssi + bf, streams), mbps: rate(phy), up_mbps: rate(phy_up), phy, walls, contention, also: None };
+            if s.alive() {
+                alive.push(s);
+            }
             // With band steering the device lands on the fastest band; without, on the loudest.
             let better = match best {
                 None => true,
@@ -688,6 +700,13 @@ impl Network {
             if better {
                 best = Some(s);
             }
+        }
+        // Multi-Link (both ends Wi-Fi 7 with MLO on): the two best bands carry data together, and when one
+        // drops the other simply carries on — no hand-over, no gap.
+        if ap.mlo && cl.mlo && std >= WifiStd::Wifi7 && alive.len() >= 2 {
+            alive.sort_by(|a, b| b.mbps.total_cmp(&a.mbps));
+            let (a, b) = (alive[0], alive[1]);
+            best = Some(Signal { mbps: a.mbps + b.mbps, up_mbps: a.up_mbps + b.up_mbps, phy: a.phy + b.phy, also: Some(b.band), ..a });
         }
         best
     }
@@ -723,8 +742,9 @@ impl Network {
                 let close = crate::catalog::find_kit(&l.kit).map_or(300.0, |k| k.real_mbps);
                 (close * (-self.wiring_m(l) / 70.0).exp() * wiring * now * self.phase_factor(l)).min(self.negotiated(l) as f32 * 0.94)
             }
-            // Ethernet carries about 94% of the line rate as data.
-            _ => self.negotiated(l) as f32 * 0.94,
+            // Ethernet carries about 94% of the line rate as data; a bundle (LACP) adds its cables up.
+            // shortcut: real LACP keeps each connection on one cable, so one single download still gets one cable's speed.
+            _ => self.bundle(l).iter().map(|o| self.negotiated(o)).sum::<u32>() as f32 * 0.94,
         };
         let isp = [l.a, l.b].iter().filter_map(|x| self.dev(*x)).find(|d| d.kind == Kind::Internet);
         let rate = isp.map(|i| base.min(i.plan_mbps)).unwrap_or(base);
@@ -859,7 +879,7 @@ impl Network {
             .filter_map(|o| self.wifi_ends(o).filter(|(a, c)| a.id == ap.id && !c.kind.radio() && !c.off).map(|(_, c)| c))
             .filter(|c| {
                 // Can I hear them? Their transmit power over the path between us, on 5 GHz.
-                let heard = c.tx[1].max(c.tx[0]) - self.path_loss(c.pos, c.floor, me.pos, me.floor, Band::B5);
+                let heard = c.tx[1].max(c.tx[0]) - self.path_loss(c.pos, c.floor, me.pos, me.floor, me.mount - c.mount, Band::B5);
                 heard < -82.0
             })
             .map(|c| c.id)
@@ -1079,6 +1099,53 @@ pub struct Roam {
     pub fast: bool,
 }
 
+/// Thread and Zigbee radios: transmit power (dBm) and the weakest signal they still decode.
+const ZB_TX: f32 = 3.0;
+const ZB_FLOOR: f32 = -92.0;
+
+/// The 2 MHz an 802.15.4 channel (11–26) uses: 2405 MHz for 11, then every 5 MHz.
+fn zb_range(ch: u8) -> (f32, f32) {
+    let f = 2405.0 + 5.0 * (ch as f32 - 11.0);
+    (f - 1.0, f + 1.0)
+}
+
+impl Network {
+    /// The hub a Thread or Zigbee gadget joins: the strongest smart-home hub in reach (Thread border router and
+    /// Zigbee coordinator in one), with its signal (dBm).
+    // shortcut: gadgets reach the hub directly; real mains-powered Thread/Zigbee devices also repeat for others (mesh).
+    pub fn smart_hub(&self, d: &Device) -> Option<(u32, f32)> {
+        if !d.on_802154() {
+            return None;
+        }
+        self.devices
+            .iter()
+            .filter(|h| h.id != d.id && h.hub && !h.off && matches!(h.kind, Kind::HomeRouter | Kind::Speaker | Kind::SmartHome))
+            .map(|h| (h.id, ZB_TX - self.path_loss(h.pos, h.floor, d.pos, d.floor, d.mount - h.mount, Band::B24)))
+            .filter(|x| x.1 >= ZB_FLOOR)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// Wi-Fi transmitters a hub hears (above −82 dBm, its own radio too) whose 2.4 GHz channel covers its 802.15.4 channel `ch`.
+    pub fn zb_clash(&self, hub: &Device, ch: u8) -> Vec<(u32, u16)> {
+        let z = zb_range(ch);
+        self.devices
+            .iter()
+            .filter(|t| !t.off && t.kind.transmits() && t.kind != Kind::Interference && t.bands[0])
+            .filter(|t| self.rssi_at(t, hub.pos, hub.floor, Band::B24) >= -82.0)
+            .filter_map(|t| {
+                let (c, w) = self.chan(t, Band::B24);
+                let r = range(Band::B24, c, w);
+                (z.1 > r.0 && z.0 < r.1).then_some((t.id, c))
+            })
+            .collect()
+    }
+
+    /// A Thread/Zigbee channel that no Wi-Fi around the hub uses, if there is one (15, 20, 25 and 26 sit between 1, 6 and 11).
+    pub fn free_zb_channel(&self, hub: &Device) -> Option<u8> {
+        [15, 20, 25, 26].into_iter().chain(11..=24).find(|c| self.zb_clash(hub, *c).is_empty())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,6 +1156,65 @@ mod tests {
         let ph = n.add_device(Kind::Phone, [d, 0.0]);
         let l = n.connect(ap, ph, Medium::WiFi).unwrap();
         n.links.iter().find(|x| x.id == l).unwrap().clone()
+    }
+
+    #[test]
+    fn heights_count_in_three_dimensions() {
+        let mut n = Network::default();
+        let link = pair(&mut n, 10.0);
+        let at = |n: &Network| n.signal(&link, false).unwrap().rssi;
+        let desk = at(&n);
+        // On the ceiling right above the phone: 1.5 m further away.
+        n.dev_mut(link.a).unwrap().mount = 2.5;
+        assert!(at(&n) < desk - 3.0, "{desk} {}", at(&n));
+        // Upstairs: a tall storey is further than a low one.
+        n.dev_mut(link.a).unwrap().mount = 1.0;
+        n.dev_mut(link.b).unwrap().floor = 1;
+        let low = at(&n);
+        n.storey_heights.push((0, 4.0));
+        assert!(at(&n) < low - 1.0 && (n.floor_z(1) - 4.0).abs() < 1e-6 && (n.floor_z(-1) + 2.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn multi_link_adds_two_bands_and_survives_one_dropping() {
+        let mut n = Network::default();
+        let link = pair(&mut n, 100.0);
+        for d in n.devices.iter_mut() {
+            d.wifi = WifiStd::Wifi7;
+            d.bands = [true, true, true];
+            normalize_radio(d);
+        }
+        let single = n.signal(&link, false).unwrap();
+        for d in n.devices.iter_mut() {
+            d.mlo = true;
+        }
+        let both = n.signal(&link, false).unwrap();
+        assert!(both.also.is_some() && both.mbps > single.mbps * 1.2, "{} {}", single.mbps, both.mbps);
+        // One band goes away: the link keeps running on the others at once.
+        n.dev_mut(link.a).unwrap().bands[both.band.i()] = false;
+        assert!(n.signal(&link, false).unwrap().alive());
+    }
+
+    #[test]
+    fn zigbee_gadgets_join_a_hub_and_dodge_busy_wifi() {
+        let mut n = template("home");
+        let r = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().clone();
+        let plug = n.add_device(Kind::SmartHome, [r.pos[0] + 60.0, r.pos[1]]);
+        n.dev_mut(plug).unwrap().smart = crate::net::SmartLink::Zigbee;
+        let plug_d = n.dev(plug).unwrap().clone();
+        assert!(n.smart_hub(&plug_d).is_none());
+        assert!(n.check().iter().any(|i| i.dev == Some(plug) && i.text.contains("no smart-home hub")));
+        n.dev_mut(r.id).unwrap().hub = true;
+        assert_eq!(n.smart_hub(&plug_d).map(|h| h.0), Some(r.id));
+        // Its own Wi-Fi on 2.4 GHz channel 6 (2427–2447 MHz) covers Zigbee 17 (2435 MHz) but not 25 (2475 MHz).
+        n.dev_mut(r.id).unwrap().ch[0] = 6;
+        n.dev_mut(r.id).unwrap().zb_ch = 17;
+        let hub = n.dev(r.id).unwrap().clone();
+        assert!(n.zb_clash(&hub, 17).iter().any(|c| c.0 == r.id) && n.zb_clash(&hub, 25).iter().all(|c| c.0 != r.id));
+        let fix = n.check().into_iter().find_map(|i| i.fix.filter(|f| matches!(f, crate::issues::Fix::ZigbeeChannel(..)))).expect("channel tip");
+        n.apply_fix(&fix);
+        let hub = n.dev(r.id).unwrap().clone();
+        assert!(n.zb_clash(&hub, hub.zb_ch).is_empty(), "{}", hub.zb_ch);
     }
 
     #[test]
@@ -1286,7 +1412,7 @@ mod tests {
         let slant = n.wall_loss([0.0, 0.0], 0, [200.0, 400.0], 0, Band::B5).0;
         assert!(straight == 14.0 && slant > 20.0 && slant <= 28.0, "{straight} {slant}");
         // Every further concrete slab costs less than the first one.
-        let pl = |f: i8| n.path_loss([0.0, 0.0], 0, [0.0, 0.0], f, Band::B5);
+        let pl = |f: i8| n.path_loss([0.0, 0.0], 0, [0.0, 0.0], f, 0.0, Band::B5);
         assert!(pl(2) - pl(1) < pl(1) - pl(0) - 5.0, "{} {} {}", pl(0), pl(1), pl(2));
     }
 

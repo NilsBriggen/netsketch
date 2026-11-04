@@ -57,5 +57,5 @@ Key cross-file facts:
 
 - Every file starts with a `//!` header saying what it covers. Keep it accurate when moving things.
 - UI and lesson text is plain English for non-experts, current (no obsolete hubs, IPv6 is normal, WPA3, etc.). Don't reintroduce outdated facts.
-- Known simplifications are marked `// shortcut: <limit>` (e.g. the 2-D path-loss model in `wifi.rs`, the HTML subset in `html.rs`).
+- Known simplifications are marked `// shortcut: <limit>` (e.g. the multi-wall path-loss model in `wifi.rs`, the HTML subset in `html.rs`).
 - Icons come from `egui_phosphor::regular` (imported as `ic`).

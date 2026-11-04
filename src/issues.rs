@@ -26,6 +26,10 @@ pub enum Fix {
     Sqm(u32),
     /// Move a cable's end (link, device) to the fastest free port.
     MovePort(u32, u32),
+    /// Bundle two parallel cables between switches (LACP).
+    Bundle(u32, u32),
+    /// Move a smart-home hub to another Thread/Zigbee channel.
+    ZigbeeChannel(u32, u8),
 }
 
 impl Fix {
@@ -46,6 +50,8 @@ impl Fix {
             Fix::GivePoe(..) => "Make it a PoE+ switch",
             Fix::Sqm(_) => "Turn on smart queueing",
             Fix::MovePort(..) => "Use the faster port",
+            Fix::Bundle(..) => "Bundle them (LACP)",
+            Fix::ZigbeeChannel(..) => "Move to a free channel",
         }
     }
 }
@@ -116,7 +122,12 @@ impl Network {
             }
             for id in stp.blocked.iter().filter(|id| !hijacked.contains(id)) {
                 let l = self.links.iter().find(|l| l.id == *id).unwrap();
-                v.push(issue(Level::Tip, None, Some(*id), crate::i18n::trf("Spanning tree keeps {}–{} on standby as a backup path (root: {}).", &[&(self.name(l.a)), &(self.name(l.b)), &root.name]), None));
+                let switches = [l.a, l.b].iter().all(|x| self.dev(*x).is_some_and(|d| d.kind == Kind::Switch));
+                let twin = self.links.iter().find(|o| o.id != l.id && o.medium.cable() && l.medium.cable() && !stp.blocked.contains(&o.id) && ((o.a, o.b) == (l.a, l.b) || (o.a, o.b) == (l.b, l.a)));
+                match twin.filter(|_| switches) {
+                    Some(o) => v.push(issue(Level::Tip, None, Some(*id), crate::i18n::trf("{} and {} have two cables between them and spanning tree keeps one on standby. Bundle them (LACP): both carry traffic and a broken cable costs no time.", &[&(self.name(l.a)), &(self.name(l.b))]), Some(Fix::Bundle(l.id, o.id)))),
+                    None => v.push(issue(Level::Tip, None, Some(*id), crate::i18n::trf("Spanning tree keeps {}–{} on standby as a backup path (root: {}).", &[&(self.name(l.a)), &(self.name(l.b)), &root.name]), None)),
+                }
             }
         }
 
@@ -308,6 +319,36 @@ impl Network {
             }
         }
 
+        // --- Remote access and UPnP ---
+        for r in self.devices.iter().filter(|d| d.kind == Kind::HomeRouter) {
+            if let Some((ok, why)) = self.remote_access(r) {
+                v.push(issue(if ok { Level::Tip } else { Level::Warning }, Some(r.id), None, crate::i18n::trf("Remote access (VPN) to {}. {}", &[&r.name, &why]), None));
+            }
+            if r.upnp {
+                v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("UPnP is on at {}: games and consoles open ports by themselves. Handy, but so can any infected device inside. Turn it off and forward only the ports you need.", &[&r.name]), None));
+            }
+        }
+
+        // --- Thread and Zigbee ---
+        for d in self.devices.iter().filter(|d| d.on_802154() && !d.off) {
+            if self.smart_hub(d).is_none() {
+                v.push(issue(Level::Warning, Some(d.id), None, crate::i18n::trf("{} uses {}, but no smart-home hub is in reach: nothing can switch it. Make the home router or a speaker a hub (Thread border router / Zigbee), or put a hub closer.", &[&d.name, &(d.smart.label())]), None));
+            }
+        }
+        for h in self.devices.iter().filter(|h| h.hub && !h.off && self.devices.iter().any(|d| self.smart_hub(d).is_some_and(|x| x.0 == h.id))) {
+            let clash = self.zb_clash(h, h.zb_ch);
+            if let Some(&(_, wch)) = clash.first() {
+                let who: Vec<String> = clash.iter().map(|c| self.name(c.0)).collect();
+                v.push(issue(
+                    Level::Tip,
+                    Some(h.id),
+                    None,
+                    crate::i18n::trf("{}'s Thread/Zigbee channel {} sits inside busy 2.4 GHz Wi-Fi channel {} ({}): they share the air, so gadgets react late or drop off. Channels 15, 20 and 25 sit between Wi-Fi 1, 6 and 11.", &[&h.name, &h.zb_ch, &wch, &(who.join(", "))]),
+                    self.free_zb_channel(h).map(|c| Fix::ZigbeeChannel(h.id, c)),
+                ));
+            }
+        }
+
         // --- Crowded access points ---
         for ap in self.devices.iter().filter(|d| d.kind.radio()) {
             let n = self.links.iter().filter(|l| l.medium == Medium::WiFi && self.wifi_ends(l).is_some_and(|(a, c)| a.id == ap.id && !c.kind.radio())).count();
@@ -437,6 +478,18 @@ impl Network {
                 self.move_port(*link, *id, q);
                 crate::i18n::trf("{} now goes into {}'s {}.", &[&(self.name(l.other(*id).0)), &(self.name(*id)), &(self.port_name(*id, q))])
             }
+            Fix::Bundle(x, y) => {
+                let lag = self.links.iter().map(|l| l.lag).max().unwrap_or(0).saturating_add(1);
+                for l in self.links.iter_mut().filter(|l| l.id == *x || l.id == *y) {
+                    l.lag = lag;
+                }
+                crate::i18n::tr("The two cables now work as one bundle (LACP).").into()
+            }
+            Fix::ZigbeeChannel(id, ch) => {
+                let d = self.dev_mut(*id).unwrap();
+                d.zb_ch = *ch;
+                crate::i18n::trf("{}'s Thread/Zigbee network now uses channel {}.", &[&d.name, &ch])
+            }
             Fix::Sqm(id) => {
                 let d = self.dev_mut(*id).unwrap();
                 d.sqm = true;
@@ -513,7 +566,7 @@ impl Network {
                     .path
                     .windows(2)
                     .filter_map(|w| self.link_between(w[0], w[1]))
-                    .map(|l| self.link_rate(l) * (1.0 - self.utilisation(&load, l.id)).max(0.05))
+                    .map(|l| self.link_rate(l) * (1.0 - self.utilisation_for(&load, l.id, d.qos)).max(0.05))
                     .fold(f32::MAX, f32::min);
                 let mut mbps = raw.min(free);
                 // One TCP connection can't beat its round trip and loss: Mathis et al. (MSS/RTT · 1.22/√p),
@@ -531,12 +584,20 @@ impl Network {
                 if free < raw * 0.95 {
                     why += " — and other devices' apps are using part of the line right now";
                 }
+                let qos = match d.qos {
+                    crate::net::Qos::High => Some("high priority: a full line serves it before everyone else"),
+                    crate::net::Qos::Low => Some("low priority: a full line serves everyone else first"),
+                    crate::net::Qos::Normal => None,
+                };
                 // TCP never quite fills the pipe; live runs vary a little from test to test.
                 let mbps = mbps * if self.live { 0.86 + 0.1 * crate::sim::unit(self.seed, (self.clock * 1000.0) as u64, 7) } else { 0.93 };
                 o.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "TCP", layer: "Transport", info: format!("Bulk transfer: ≈ {mbps:.0} Mbit/s"), dev: id, ..Default::default() });
                 o.lines.push(format!("Speed test to {target}"));
                 o.lines.push(format!("  Download ≈ {mbps:.0} Mbit/s   latency {:.1} ms", t.ms * 2.0));
                 o.lines.push(format!("  Bottleneck: {why}"));
+                if let Some(q) = qos {
+                    o.lines.push(format!("  QoS: {q}"));
+                }
                 if single < mbps {
                     o.lines.push(format!("  One single download gets ≈ {single:.0} Mbit/s ({:.0} ms round trip{})", rtt * 1000.0, if p > 1e-4 { format!(", {:.2}% loss", p * 100.0) } else { String::new() }));
                 }

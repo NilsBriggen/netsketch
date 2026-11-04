@@ -153,7 +153,7 @@ impl App {
         let fingerprint = || {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            serde_json::to_vec(&(&radios, &self.net.walls, self.net.slab)).unwrap_or_default().hash(&mut h);
+            serde_json::to_vec(&(&radios, &self.net.walls, self.net.slab, &self.net.storey_heights)).unwrap_or_default().hash(&mut h);
             h.finish()
         };
         let mut stamp = 0;
@@ -296,6 +296,31 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Drawing a cable's route: each click adds a point, snapped to wall corners and along walls like the wall tool.
+    pub(crate) fn route_tool(&mut self, id: u32, resp: &egui::Response, painter: &egui::Painter, pointer: Option<Pos2>) {
+        let ctx = resp.ctx.clone();
+        let (clicked, ended, shift) = ctx.input(|i| (i.pointer.primary_clicked(), i.pointer.secondary_clicked(), i.modifiers.shift));
+        let Some(last) = self.net.links.iter().find(|l| l.id == id).and_then(|l| l.path.last().copied().or(self.net.dev(l.a).map(|d| d.pos))) else {
+            self.route = None;
+            return;
+        };
+        if ended || resp.double_clicked() {
+            self.route = None;
+            return;
+        }
+        let Some(p) = pointer else { return };
+        let (pt, _) = snap_point(&self.net.walls, self.floor, self.to_world(p), 12.0 / self.zoom, Some(last), shift, self.snap);
+        let (sa, sp) = (self.to_screen(vec2(last[0], last[1])), self.to_screen(vec2(pt[0], pt[1])));
+        painter.extend(Shape::dashed_line(&[sa, sp], Stroke::new(2.0, pal().accent), 6.0, 4.0));
+        painter.circle_filled(sp, 4.0, pal().accent);
+        painter.text(sp + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, tr("click along the walls · right-click to finish"), FontId::proportional(11.5), pal().dim);
+        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        if clicked && resp.hovered() {
+            self.snapshot();
+            self.net.links.iter_mut().find(|l| l.id == id).unwrap().path.push(pt);
         }
     }
 
@@ -561,6 +586,9 @@ impl App {
         }
         ui.checkbox(&mut d.band_steer, tr("Band steering")).on_hover_text(tr("Pushes devices to the faster band"));
         ui.checkbox(&mut d.fast_roam, tr("Fast roaming (802.11k/v/r)")).on_hover_text(tr("Quick, well-timed hand-overs between access points"));
+        if d.wifi >= WifiStd::Wifi7 {
+            ui.checkbox(&mut d.mlo, tr("Multi-Link (MLO)")).on_hover_text(tr("Wi-Fi 7 devices with Multi-Link use two bands at once: their speeds add up, and if one band drops the other carries on without a gap"));
+        }
         let mut kick = d.min_rssi != 0;
         ui.horizontal(|ui| {
             if ui.checkbox(&mut kick, tr("Drop clients weaker than")).on_hover_text(tr("Pushes far-away devices off so they look for a closer access point")).changed() {
@@ -599,6 +627,11 @@ impl App {
                 ui.label(tr("Antennas"));
                 ui.add(egui::Slider::new(&mut d.streams, 1..=4));
                 ui.end_row();
+                if d.wifi >= WifiStd::Wifi7 {
+                    ui.label(tr("Multi-Link"));
+                    ui.checkbox(&mut d.mlo, tr("MLO")).on_hover_text(tr("Wi-Fi 7 devices with Multi-Link use two bands at once: their speeds add up, and if one band drops the other carries on without a gap"));
+                    ui.end_row();
+                }
                 for b in Band::ALL {
                     let i = b.i();
                     ui.checkbox(&mut d.bands[i], b.label());

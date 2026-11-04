@@ -1,5 +1,6 @@
 //! Window parts for the planning extras: floor plan pictures, measurements, model library,
-//! busy-hour apps, firewall / guest Wi-Fi / IPv6, Power over Ethernet and Ethernet ports (with the learned MAC and ARP tables).
+//! busy-hour apps and QoS, Thread/Zigbee, firewall / guest Wi-Fi / IPv6 / VPN, Power over Ethernet and Ethernet ports
+//! (with the learned MAC and ARP tables).
 use super::*;
 use crate::extras::{load_library, save_library, FloorPlan, Model, Sample, GUEST_VLAN, POE};
 use crate::ports::{PortGroup, PortKind, SPEEDS};
@@ -168,8 +169,60 @@ impl App {
                 }
             });
         }
+        if kind.is_host() && !kind.uses().is_empty() {
+            let d = self.net.dev_mut(id).unwrap();
+            ui.horizontal(|ui| {
+                ui.label(tr("Priority (QoS)"));
+                egui::ComboBox::from_id_salt(("qos", id)).selected_text(tr(d.qos.label())).width(100.0).show_ui(ui, |ui| {
+                    for q in crate::net::Qos::ALL {
+                        ui.selectable_value(&mut d.qos, q, tr(q.label()));
+                    }
+                });
+            })
+            .response
+            .on_hover_text(tr("When a link is full, high-priority devices go first: their delay stays low and their speed holds; low ones wait"));
+        }
+        // Smart-home gadgets: Wi-Fi, or Thread/Zigbee through a hub.
+        if kind == Kind::SmartHome && Self::section_hint(ui, "Smart-home radio", "Thread and Zigbee are low-power meshes on 2.4 GHz channels 11–26. Their gadgets join a hub (Thread border router / Zigbee coordinator) instead of the Wi-Fi: Thread speaks IPv6 (Matter), Zigbee isn't IP at all, so neither needs an address from DHCP.") {
+            let mut smart = self.net.dev(id).unwrap().smart;
+            ui.horizontal(|ui| {
+                ui.label(tr("Connects by"));
+                for m in crate::net::SmartLink::ALL {
+                    ui.selectable_value(&mut smart, m, tr(m.label()));
+                }
+            });
+            if smart != self.net.dev(id).unwrap().smart {
+                self.snapshot();
+                // Thread and Zigbee gadgets don't join the Wi-Fi.
+                if smart != crate::net::SmartLink::WiFi {
+                    self.net.links.retain(|l| l.a != id && l.b != id);
+                    self.net.dev_mut(id).unwrap().ifaces.iter_mut().for_each(|f| f.ip.clear());
+                }
+                self.net.dev_mut(id).unwrap().smart = smart;
+            }
+            let d = self.net.dev(id).unwrap();
+            if d.on_802154() {
+                let (text, col) = match self.net.smart_hub(d) {
+                    Some((h, dbm)) => (trf("Joined to {} ({} dBm) on channel {}", &[&self.net.name(h), &format!("{dbm:.0}"), &self.net.dev(h).map_or(0, |h| h.zb_ch)]), pal().green),
+                    None => (tr("No smart-home hub in reach").to_string(), pal().amber),
+                };
+                ui.label(RichText::new(text).color(col));
+                let how = if d.smart == crate::net::SmartLink::Thread { tr("Thread: it has its own IPv6 address; the border router connects it to your network.") } else { tr("Zigbee: not IP at all; the hub translates for your phone's app.") };
+                ui.label(RichText::new(how).small().color(pal().dim));
+            }
+        }
+        if matches!(kind, Kind::HomeRouter | Kind::Speaker | Kind::SmartHome) && Self::section_hint(ui, "Smart-home hub", "A hub runs the Thread or Zigbee network that low-power gadgets join. Many home routers, smart speakers and dedicated hubs can.") {
+            let d = self.net.dev_mut(id).unwrap();
+            ui.checkbox(&mut d.hub, tr("Thread border router / Zigbee hub"));
+            if d.hub {
+                ui.horizontal(|ui| {
+                    ui.label(tr("Channel"));
+                    ui.add(egui::DragValue::new(&mut d.zb_ch).range(11..=26)).on_hover_text(tr("802.15.4 channels 11–26 share 2.4 GHz with Wi-Fi; 15, 20 and 25 sit between Wi-Fi channels 1, 6 and 11"));
+                });
+            }
+        }
         // Wi-Fi devices pick which of their access point's names they join (home, guest, gadgets…).
-        if kind.wifi_client() && !kind.radio() {
+        if kind.wifi_client() && !kind.radio() && !self.net.dev(id).unwrap().on_802154() {
             self.join_picker(ui, id);
         }
 
@@ -189,12 +242,25 @@ impl App {
                 }
                 ui.checkbox(&mut d.ipv6, tr("IPv6")).on_hover_text(tr("Every device also gets a public IPv6 address (try ping6)"));
                 ui.checkbox(&mut d.sqm, tr("Smart queueing (SQM)")).on_hover_text(tr("Keeps calls and games smooth when the line is full; costs about 8% top speed"));
+                ui.checkbox(&mut d.adblock, tr("Block ads and trackers (DNS)")).on_hover_text(tr("The router's name server answers 0.0.0.0 for known ad and tracker names, for every device at home"));
+                ui.checkbox(&mut d.upnp, tr("UPnP")).on_hover_text(tr("Games and consoles open the ports they need by themselves. Handy, but so can malware inside."));
+                ui.checkbox(&mut d.vpn, tr("VPN server (WireGuard) for remote access")).on_hover_text(tr("Reach your home network from your phone or laptop anywhere, as if you were at home"));
+                if d.vpn {
+                    ui.horizontal(|ui| {
+                        ui.label(tr("Dynamic DNS name"));
+                        ui.add(TextEdit::singleline(&mut d.ddns).hint_text(tr("e.g. myhome.ddns.net")).desired_width(170.0));
+                    });
+                    let r = self.net.dev(id).unwrap();
+                    if let Some((ok, why)) = self.net.remote_access(r) {
+                        ui.label(RichText::new(why).small().color(if ok { pal().green } else { pal().amber }));
+                    }
+                }
             }
             let d = self.net.dev_mut(id).unwrap();
             ui.label(RichText::new(tr("Firewall rules")).color(pal().dim));
-            ui.add(TextEdit::multiline(&mut d.rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("deny guest lan\nallow internet 192.168.1.10 443\nforward 443 192.168.1.10")))
-                .on_hover_text(tr("First match wins: allow|deny <from> <to> [port] — from/to: any, lan, guest, internet, an address or network/prefix. Port forwarding: forward <port> <address>."));
-            ui.label(RichText::new(tr("One rule per line, the first match wins: allow|deny <from> <to> [port] (any, lan, guest, internet, an address or network/prefix) · forward <port> <address> opens a port from the internet.")).small().color(pal().dim));
+            ui.add(TextEdit::multiline(&mut d.rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("deny guest lan\nforward 50000-50100 192.168.1.20 udp\ndeny kids-tablet internet 22:00-06:30")))
+                .on_hover_text(tr("First match wins: allow|deny <from> <to> [port or range] [tcp|udp] [time like 22:00-06:30] — from/to: any, lan, guest, internet, an address, network/prefix or device name. Port forwarding: forward <port or range> <address> [tcp|udp]."));
+            ui.label(RichText::new(tr("One rule per line, the first match wins: allow|deny <from> <to> [port or range] [tcp|udp] [22:00-06:30] (any, lan, guest, internet, an address, network/prefix or device name) · forward <port or range> <address> [tcp|udp] opens ports from the internet · block-site <name> blocks a website.")).small().color(pal().dim));
         }
 
         // Power over Ethernet.
