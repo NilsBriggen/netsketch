@@ -885,9 +885,7 @@ impl App {
                 if ui.button(ic::FLOPPY_DISK_BACK).on_hover_text(tr("Save as a new file (Ctrl+Shift+S)")).clicked() {
                     self.save(&ctx, true);
                 }
-                if ui.button(lab(ic::FOLDER_OPEN, tr("Open"))).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O). Plans, phone surveys and floor-plan pictures can also be dropped on the window.")).clicked() {
-                    self.open(&ctx);
-                }
+                // Right to left: the recent-plans arrow shows just right of Open.
                 ui.menu_button(ic::CARET_DOWN, |ui| {
                     let files = recent_files();
                     if files.is_empty() {
@@ -903,6 +901,9 @@ impl App {
                 })
                 .response
                 .on_hover_text(tr("Recent plans"));
+                if ui.button(lab(ic::FOLDER_OPEN, tr("Open"))).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O). Plans, phone surveys and floor-plan pictures can also be dropped on the window.")).clicked() {
+                    self.open(&ctx);
+                }
                 if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(ic::ARROW_CLOCKWISE)).on_hover_text(tr("Redo (Ctrl+Y)")).clicked() {
                     self.redo_once(&ctx);
                 }

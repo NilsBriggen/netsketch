@@ -251,10 +251,10 @@ impl App {
         let mut pick = target;
         ui.horizontal(|ui| {
             ui.label(tr("Good Wi-Fi means"));
-            let shown = plan::TARGETS.iter().find(|t| t.0 == target).map_or_else(|| format!("{target:.0} dBm"), |t| format!("{} ({:.0} dBm)", tr(t.1), t.0));
+            let shown = plan::TARGETS.iter().find(|t| t.0 == target).map_or_else(|| format!("{target:.0} dBm"), |t| format!("{} · {:.0} dBm", tr(t.1), t.0));
             egui::ComboBox::from_id_salt("target").selected_text(shown).show_ui(ui, |ui| {
                 for (dbm, name) in plan::TARGETS {
-                    ui.selectable_value(&mut pick, dbm, format!("{} ({dbm:.0} dBm)", tr(name)));
+                    ui.selectable_value(&mut pick, dbm, format!("{} · {dbm:.0} dBm", tr(name)));
                 }
             });
         });
