@@ -155,7 +155,7 @@ pub fn from_xml(xml: &str) -> Result<(Network, usize), String> {
         let l = net.links.iter().find(|l| l.id == link).unwrap().clone();
         for ((dev, iface), port) in [(a, l.a_if), (b, l.b_if)] {
             let d = net.dev_mut(new_ids[dev]).unwrap();
-            // The old "Switch / Wi-Fi" box: once something joins it by radio it is a Wi-Fi point here.
+            // The old "Switch / Wi-Fi" box: once something joins it by radio it is an access point here.
             if wireless && d.kind == Kind::Switch {
                 d.kind = Kind::AccessPoint;
                 d.price = Kind::AccessPoint.price();

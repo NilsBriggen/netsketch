@@ -132,7 +132,7 @@ impl Network {
                 let text = if s.rssi >= crate::wifi::floor(s.band) {
                     format!("{} hears {} ({:.0} dBm) but its answer doesn't make it back ({:.0} dBm): the router shouts, the device whispers. More router power won't help — move closer or add an access point.", cl.name, ap.name, s.rssi, s.up)
                 } else {
-                    format!("{} can't hear {} at all ({:.0} dBm{walls}). Move it, or add a Wi-Fi point on this side.", cl.name, ap.name, s.rssi)
+                    format!("{} can't hear {} at all ({:.0} dBm{walls}). Move it, or add an access point on this side.", cl.name, ap.name, s.rssi)
                 };
                 let other = self.roam_candidates(cl, Network::joined(cl, ap)).iter().any(|c| c.0 != ap.id);
                 v.push(issue(Level::Error, Some(cl.id), Some(l.id), text, other.then_some(Fix::Reconnect(cl.id))));

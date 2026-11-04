@@ -58,7 +58,7 @@ impl Kind {
             HomeRouter => "Home router",
             Router => "Router",
             Switch => "Switch",
-            AccessPoint => "Wi-Fi point",
+            AccessPoint => "Access point",
             Desktop => "Desktop PC",
             Laptop => "Laptop",
             Phone => "Phone",
@@ -204,7 +204,7 @@ impl Kind {
             HomeRouter => "Home router",
             Router => "Router",
             Switch => "Switch",
-            AccessPoint => "Wi-Fi point",
+            AccessPoint => "Access point",
             Desktop => "PC",
             Laptop => "Laptop",
             Phone => "Phone",
@@ -1073,7 +1073,7 @@ impl Network {
         }
         for (k, id) in [(ka, a), (kb, b)] {
             if k.is_host() && self.connected(id) {
-                return Err(format!("This {} already has a connection. Put a switch or Wi-Fi point in between.", k.label().to_lowercase()));
+                return Err(format!("This {} already has a connection. Put a switch or access point in between.", k.label().to_lowercase()));
             }
         }
         let a_if = self.bind_iface(a, kb);
@@ -1887,7 +1887,7 @@ impl Network {
             if l.medium == Medium::WiFi {
                 let (ap, cl) = if a.kind.radio() { (a, b) } else { (b, a) };
                 if !ap.kind.radio() {
-                    push(Level::Error, None, lk, format!("Wi-Fi between {} and {}: one side must be a router or Wi-Fi point.", a.name, b.name));
+                    push(Level::Error, None, lk, format!("Wi-Fi between {} and {}: one side must be a router or access point.", a.name, b.name));
                 } else if !cl.kind.wifi_client() && !cl.kind.radio() {
                     push(Level::Error, None, lk, format!("{} has no Wi-Fi. Use a cable.", cl.name));
                 }

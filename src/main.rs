@@ -134,6 +134,20 @@ enum Sel {
     Label(u32),
 }
 
+/// The keyboard shortcuts (handled in `ui` below), for the list in the top bar.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("V", "Move and select"),
+    ("C", "Connect devices"),
+    ("W", "Draw walls"),
+    ("M", "Measure a distance"),
+    ("F", "Fit the plan to the window"),
+    ("Delete", "Remove what's selected"),
+    ("Esc", "Deselect, end a wall"),
+    ("Ctrl+Z / Ctrl+Y", "Undo, redo"),
+    ("Ctrl+D", "Duplicate"),
+    ("Ctrl+S / Ctrl+O", "Save, open"),
+];
+
 /// What an in-place edit replaced, for its undo step (App::snapshot_before).
 enum Before {
     Device(net::Device),
@@ -639,6 +653,20 @@ impl App {
                 self.start_sim(&ctx);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.menu_button(ic::KEYBOARD, |ui| {
+                    ui.set_min_width(300.0);
+                    ui.label(RichText::new("Keyboard shortcuts").strong());
+                    egui::Grid::new("keys").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
+                        for (k, what) in SHORTCUTS {
+                            ui.label(RichText::new(*k).monospace().color(ACCENT));
+                            ui.label(*what);
+                            ui.end_row();
+                        }
+                    });
+                    ui.label(RichText::new("Right-click anything on the map for more. Hold Shift while connecting to cable a laptop.").small().color(DIM));
+                })
+                .response
+                .on_hover_text("Keyboard shortcuts");
                 if ui.button(lab(ic::EXPORT, "Export")).on_hover_text("Export: the plan, addresses and shopping list as a document").clicked() {
                     self.export(&ctx);
                 }
@@ -680,9 +708,17 @@ impl App {
                 let used: std::collections::BTreeSet<i8> = self.net.devices.iter().map(|d| d.floor).chain(self.net.walls.iter().map(|w| w.floor)).chain([0, self.floor]).collect();
                 let (lo, hi) = (*used.first().unwrap(), *used.last().unwrap());
                 egui::ComboBox::from_id_salt("floor").selected_text(format!("{}  {}", ic::STACK, self.net.storey(self.floor))).width(if compact { 120.0 } else { 150.0 }).show_ui(ui, |ui| {
-                    for f in (lo - 1..=hi + 1).rev() {
+                    for f in (lo..=hi).rev() {
                         let n = self.net.devices.iter().filter(|d| d.floor == f).count();
-                        ui.selectable_value(&mut self.floor, f, format!("{}{}", self.net.storey(f), if n > 0 { format!(" ({n})") } else if used.contains(&f) { String::new() } else { " — new".into() }));
+                        ui.selectable_value(&mut self.floor, f, format!("{}{}", self.net.storey(f), if n > 0 { format!(" ({n})") } else { String::new() }));
+                    }
+                    // A new storey is a clear choice of its own; it stays once something is placed on it.
+                    ui.separator();
+                    if hi < 20 && ui.button(format!("{}  Add a storey above ({})", ic::PLUS, net::floor_name(hi + 1))).clicked() {
+                        self.floor = hi + 1;
+                    }
+                    if lo > -3 && ui.button(format!("{}  Add a basement level ({})", ic::PLUS, net::floor_name(lo - 1))).clicked() {
+                        self.floor = lo - 1;
                     }
                     ui.separator();
                     let f = self.floor;
@@ -1405,7 +1441,7 @@ impl App {
     /// A section whose explanation sits behind an info icon instead of filling the panel.
     fn section_hint(ui: &mut egui::Ui, title: &str, hint: &str) -> bool {
         // The essentials start open; details start folded away.
-        const OPEN: &[&str] = &["Measured here", "Joined network", "Addresses", "Internet plan", "Wi-Fi hardware", "Their Wi-Fi", "Speaker mesh radio", "What it is", "Bands", "Material", "Type", "Length", "Ports", "How it performs", "At a glance", "Wi-Fi coverage", "Connected devices", "Channels", "Overlaps with", "Networks in the air here", "Try it", "About this setup", "How to"];
+        const OPEN: &[&str] = &["Measured here", "Real measurements", "Joined network", "Addresses", "Internet plan", "Wi-Fi hardware", "Their Wi-Fi", "Speaker mesh radio", "What it is", "Bands", "Material", "Type", "Length", "Ports", "How it performs", "At a glance", "Wi-Fi coverage", "Connected devices", "Channels", "Overlaps with", "Networks in the air here", "Try it", "About this setup", "How to"];
         let id = Id::new(("section", title));
         let mut open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(id, OPEN.contains(&title)));
         ui.add(egui::Separator::default().spacing(6.0));
@@ -1806,7 +1842,7 @@ impl App {
                 (ic::WALL, "Walls: click corner after corner; right-click or Esc ends the wall."),
                 (ic::PLAY, "Simulate: click a device to use its browser, command line or Wi-Fi."),
                 (ic::MAP_PIN, "Measure the real air with the NetSketch Survey phone app: Real measurements → Link a phone, and every spot you measure lands here as a pin."),
-                (ic::KEYBOARD, "V move · C connect · W walls · M measure · F fit to window · Delete removes · Ctrl+Z / Ctrl+Y undo, redo · Ctrl+D duplicates · Ctrl+S saves · Ctrl+O opens · Esc deselects."),
+                (ic::KEYBOARD, "Keyboard shortcuts: the keyboard button at the top right lists them all."),
             ] {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(icon).color(ACCENT));
@@ -2215,16 +2251,16 @@ impl App {
     fn learn(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("lessons").exact_size(270.0).frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(12))).show(ui, |ui| {
             ui.label(RichText::new("LESSONS").small().color(DIM));
-            egui::ScrollArea::vertical().show(ui, |ui| for (i, (title, _, _)) in lessons::LESSONS.iter().enumerate() {
+            egui::ScrollArea::vertical().show(ui, |ui| for (i, (title, ..)) in lessons::LESSONS.iter().enumerate() {
                 let on = self.lesson == i;
-                let b = egui::Button::new(RichText::new(format!("{:>2}  {title}", i + 1)).color(if on { ACCENT } else { TEXT })).fill(if on { CARD } else { Color32::TRANSPARENT }).min_size(vec2(246.0, 30.0));
+                let b = egui::Button::new(RichText::new(format!("{:>2}  {title}", i + 1)).color(if on { ACCENT } else { TEXT })).fill(if on { CARD } else { Color32::TRANSPARENT }).min_size(vec2(ui.available_width(), 30.0));
                 if ui.add(b).clicked() {
                     self.lesson = i;
                 }
             });
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(48, 32))).show(ui, |ui| {
-            let (title, body, try_it) = lessons::LESSONS[self.lesson];
+            let (title, body, try_it, scenario) = lessons::LESSONS[self.lesson];
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.set_max_width(760.0);
                 ui.label(RichText::new(format!("Lesson {} of {}", self.lesson + 1, lessons::LESSONS.len())).color(DIM));
@@ -2252,7 +2288,7 @@ impl App {
                         self.mode = Mode::Design;
                     }
                     // The example plan this lesson's exercise talks about, one click away.
-                    if let Some((key, label, _)) = scenarios::SCENARIOS.iter().find(|s| s.0 != "blank" && try_it.contains(s.1.split(" (").next().unwrap_or(s.1))) {
+                    if let Some((key, label, _)) = scenarios::SCENARIOS.iter().find(|s| s.0 == scenario) {
                         if ui.button(format!("{}  Open \"{}\"", ic::FOLDER_OPEN, label.split(" (").next().unwrap_or(label))).clicked() {
                             self.load(net::template(key));
                             self.file = None;

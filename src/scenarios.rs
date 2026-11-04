@@ -6,7 +6,7 @@ use crate::wifi::{Wall, WallKind};
 /// (key, menu label, one-line description)
 pub const SCENARIOS: &[(&str, &str, &str)] = &[
     ("flat", "Small flat", "A 58 m² two-room flat: one router in the hall, a few devices, a neighbour through the wall."),
-    ("home", "Typical home", "Router, switch, a Wi-Fi point upstairs, walls of brick and concrete."),
+    ("home", "Typical home", "Router, switch, an access point upstairs, walls of brick and concrete."),
     ("roaming", "Walk & roam", "Two access points: walk a phone through the house and watch it hand over."),
     ("extender", "Range-extender trouble", "A badly placed extender with its own name: half speed and sticky devices."),
     ("apartment", "Crowded apartment block", "Five neighbours' networks on your channels."),

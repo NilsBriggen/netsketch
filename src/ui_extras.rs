@@ -194,6 +194,7 @@ impl App {
             ui.label(RichText::new("Firewall rules").color(DIM));
             ui.add(TextEdit::multiline(&mut d.rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("deny guest lan\nallow internet 192.168.1.10 443\nforward 443 192.168.1.10"))
                 .on_hover_text("First match wins: allow|deny <from> <to> [port] — from/to: any, lan, guest, internet, an address or network/prefix. Port forwarding: forward <port> <address>.");
+            ui.label(RichText::new("One rule per line, the first match wins: allow|deny <from> <to> [port] (any, lan, guest, internet, an address or network/prefix) · forward <port> <address> opens a port from the internet.").small().color(DIM));
         }
 
         // Power over Ethernet.
