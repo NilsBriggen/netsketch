@@ -297,7 +297,7 @@ impl App {
 }
 
 /// What two options are compared on: cost, cable, power, Wi-Fi and problems.
-fn summary(n: &Network) -> Vec<(&'static str, String)> {
+pub(crate) fn summary(n: &Network) -> Vec<(&'static str, String)> {
     let (_, cost) = crate::shopping(n);
     let cable: f32 = n.links.iter().filter(|l| !l.medium.wireless() && l.medium != Medium::Powerline).map(|l| n.link_len(l)).sum();
     let mut floors: Vec<i8> = n.walls.iter().map(|w| w.floor).collect();

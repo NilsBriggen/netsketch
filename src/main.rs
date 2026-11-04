@@ -15,6 +15,7 @@ mod phone_link;
 mod plan;
 mod ports;
 mod radio_ui;
+mod report;
 mod scenarios;
 mod sim;
 mod stp;
@@ -801,40 +802,9 @@ impl App {
     }
 
     fn export(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Text", &["md", "txt"]).set_file_name("network-plan.md").save_file() else { return };
-        let n = &self.net;
-        let mut s = format!("# {}\n\n## Devices\n\n| Device | Type | Address | Gateway | DNS |\n|---|---|---|---|---|\n", n.title);
-        for d in &n.devices {
-            let ips: Vec<String> = d.ifaces.iter().filter(|f| !f.ip.is_empty()).map(|f| format!("{} {}/{}", f.name, f.ip, f.prefix)).collect();
-            s += &format!("| {} | {} | {}{} | {} | {} |\n", d.name, d.kind.label(), ips.join(", "), if d.dhcp_client { " (DHCP)" } else { "" }, d.gateway, d.dns);
-        }
-        s += "\n## Connections\n\n";
-        for l in &n.links {
-            s += &format!("- {} ↔ {}: {} ({} m)\n", n.name(l.a), n.name(l.b), l.medium.label(), n.link_len(l));
-        }
-        s += "\n## Wi-Fi hardware\n\n";
-        for d in n.devices.iter().filter(|d| d.kind.radio()) {
-            let bands: Vec<String> = wifi::Band::ALL.iter().filter(|b| d.bands[b.i()]).map(|b| trf("{} ch {} / {} MHz / {} dBm", &[&(b.label()), &(n.channel(d, *b)), &(d.width[b.i()]), &format!("{:.0}", d.tx[b.i()])])).collect();
-            s += &format!("- {} ({}): '{}', {}, {} streams — {}{}\n", d.name, if d.model.is_empty() { "custom" } else { &d.model }, d.ssid, d.wifi.label(), d.streams, bands.join("; "), if d.fast_roam { ", fast roaming on" } else { "" });
-        }
-        let stp = n.stp();
-        s += &trf("\nSpanning-tree root: {}. Walls drawn: {}.\n", &[&(stp.root.map(|r| n.name(r)).unwrap_or_else(|| "none".into())), &(n.walls.len())]);
-        s += tr("\n## Weak spots\n\n");
-        for (id, k) in n.weak_spots().iter().take(5) {
-            s += &trf("- If {} fails, {} device(s) lose the network\n", &[&(n.name(*id)), &k]);
-        }
-        s += &trf("\nPower: ≈ {} W, {} kWh a year (≈ {}{} a year at {}{}/kWh).\n", &[&format!("{:.0}", n.power_w()), &format!("{:.0}", n.yearly_kwh()), &n.currency, &format!("{:.0}", n.yearly_kwh() * n.kwh_price), &n.currency, &format!("{:.2}", n.kwh_price)]);
-        s += tr("\n## Shopping list (estimates)\n\n");
-        let (items, total) = shopping(n);
-        for (what, qty, cost) in items {
-            s += &format!("- {qty} × {what}: {}{cost:.0}\n", n.currency);
-        }
-        s += &trf("\n**Total: {}{}**\n\n## Open problems\n\n", &[&n.currency, &format!("{:.0}", total)]);
-        for i in n.check() {
-            s += &format!("- {:?}: {}\n", i.level, i.text);
-        }
-        match std::fs::write(&path, s) {
-            Ok(()) => self.say(ctx, trf("Exported {}", &[&(path.display())])),
+        let Some(path) = rfd::FileDialog::new().add_filter(tr("Web page (opens in any browser, prints to PDF)"), &["html"]).set_file_name("network-plan.html").save_file() else { return };
+        match std::fs::write(&path, report::html(&self.net)) {
+            Ok(()) => self.say(ctx, trf("Exported {}. Open it in a browser; Print → Save as PDF makes a PDF.", &[&(path.display())])),
             Err(e) => self.say(ctx, trf("Couldn't export: {}", &[&e])),
         }
     }
@@ -906,7 +876,7 @@ impl App {
                 })
                 .response
                 .on_hover_text(tr("Keyboard shortcuts"));
-                if ui.button(lab(ic::EXPORT, tr("Export"))).on_hover_text(tr("Export: the plan, addresses and shopping list as a document")).clicked() {
+                if ui.button(lab(ic::EXPORT, tr("Export"))).on_hover_text(tr("Export a report: each storey's Wi-Fi map, the access points and channels, the shopping list, open problems and addresses (a web page that prints to PDF)")).clicked() {
                     self.export(&ctx);
                 }
                 if ui.button(lab(ic::FLOPPY_DISK, tr("Save"))).on_hover_text(tr("Save (Ctrl+S)")).clicked() {

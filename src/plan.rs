@@ -56,7 +56,7 @@ impl Network {
         (v, cell)
     }
 
-    fn radios(&self) -> Vec<&Device> {
+    pub(crate) fn radios(&self) -> Vec<&Device> {
         self.devices.iter().filter(|d| d.kind.radio() && !d.kind.foreign() && !d.off && d.bands.iter().any(|b| *b)).collect()
     }
 
