@@ -742,6 +742,8 @@ pub struct Network {
     /// Room names written on the map, and names people gave their storeys ("Loft").
     pub labels: Vec<RoomLabel>,
     pub storey_names: Vec<(i8, String)>,
+    /// Garden, terrace or yard: places outside the walls where Wi-Fi should reach too.
+    pub outdoor: Vec<crate::plan::Outdoor>,
     /// Electricity price per kWh, for the yearly running cost.
     pub kwh_price: f32,
     /// Time of day (hours) the traffic is looked at; 20.5 = the evening busy hour.
@@ -774,6 +776,7 @@ impl Default for Network {
             measured: vec![],
             labels: vec![],
             storey_names: vec![],
+            outdoor: vec![],
             kwh_price: 0.30,
             hour: 20.5,
             clock: 0.0,
@@ -846,6 +849,10 @@ impl Network {
         for p in self.points.iter_mut() {
             p.floor = p.floor.clamp(-3, 20);
         }
+        self.outdoor.retain(|o| o.a.iter().chain(&o.b).all(|v| v.is_finite()));
+        for o in self.outdoor.iter_mut() {
+            o.floor = o.floor.clamp(-3, 20);
+        }
         // Ids near the top of u32 would make next_id overflow; a real plan never gets there.
         const MAX_ID: u32 = 1 << 30;
         self.links.retain(|l| l.id < MAX_ID);
@@ -904,6 +911,7 @@ impl Network {
         fresh(&mut self.walls.iter_mut().map(|w| &mut w.id));
         fresh(&mut self.points.iter_mut().map(|p| &mut p.id));
         fresh(&mut self.labels.iter_mut().map(|l| &mut l.id));
+        fresh(&mut self.outdoor.iter_mut().map(|o| &mut o.id));
         // Migrations above are keyed on what's in the file; from here on it is the current format (fields a newer one added are gone).
         self.version = FORMAT;
         self.assign_ports();

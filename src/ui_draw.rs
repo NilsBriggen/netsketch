@@ -5,6 +5,12 @@ use crate::radio_ui::{insert_opening, snap_point};
 impl App {
     /// Room names on the map: drag to move (Move tool), click to edit.
     pub(crate) fn draw_labels(&mut self, ui: &mut egui::Ui, painter: &egui::Painter) {
+        // Outdoor areas: a soft green field with its name, under everything else.
+        for o in self.net.outdoor.iter().filter(|o| o.floor == self.floor) {
+            let r = Rect::from_two_pos(self.to_screen(Vec2::from(o.a)), self.to_screen(Vec2::from(o.b)));
+            painter.rect(r, 4, pal().green.gamma_multiply(0.08), Stroke::new(1.0, pal().green.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+            painter.text(r.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, format!("{} {}", ic::TREE, o.name), FontId::proportional(12.0), pal().green);
+        }
         let ids: Vec<u32> = self.net.labels.iter().filter(|l| l.floor == self.floor).map(|l| l.id).collect();
         let size = (13.0 * self.zoom.sqrt()).clamp(11.0, 22.0);
         for id in ids {
@@ -211,6 +217,14 @@ impl App {
         };
         let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / net::PX_PER_M;
         ui.label(RichText::new(format!("{len:.2} m on the map")).strong());
+        if ui.button(format!("{}  Make this an outdoor area", ic::TREE)).on_hover_text("A garden, terrace or yard with these two points as opposite corners: the Wi-Fi coverage section scores it").clicked() {
+            self.snapshot();
+            self.net.next_id += 1;
+            let n = self.net.outdoor.len() + 1;
+            self.net.outdoor.push(crate::plan::Outdoor { id: self.net.next_id, name: format!("Garden {n}"), floor: self.floor, a, b });
+            self.measure = None;
+            return;
+        }
         let Some(i) = self.net.plans.iter().position(|p| p.floor == self.floor) else { return };
         ui.label(RichText::new("Measured a wall you know on the floor-plan picture? Type its real length:").small().color(pal().dim));
         ui.horizontal(|ui| {

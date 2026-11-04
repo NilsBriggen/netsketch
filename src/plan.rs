@@ -1,10 +1,21 @@
-//! Planning help: how much of each storey has good Wi-Fi, where one more access point would help
-//! most, and applying every one-click fix in one go.
+//! Planning help: how much of each storey (and each garden or terrace) has good Wi-Fi, where one more
+//! access point would help most, and applying every one-click fix in one go.
 use crate::net::{Device, Kind, Network, PX_PER_M};
 
 /// Signal levels the coverage score counts: good enough for video calls, and still usable.
 pub const GOOD: f32 = -67.0;
 pub const USABLE: f32 = -75.0;
+
+/// A rectangle outside the building (two opposite corners, map pixels) where Wi-Fi should reach.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Outdoor {
+    pub id: u32,
+    pub name: String,
+    pub floor: i8,
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+}
 
 pub struct Coverage {
     pub good: f32,
@@ -59,6 +70,25 @@ impl Network {
         let s: Vec<f32> = spots.iter().map(|p| self.best_at(&radios, *p, floor)).collect();
         let share = |t: f32| s.iter().filter(|x| **x >= t).count() as f32 / s.len() as f32;
         Some(Coverage { good: share(GOOD), usable: share(USABLE), area_m2: s.len() as f32 * (cell / PX_PER_M).powi(2) })
+    }
+
+    /// Good and usable share of an outdoor area, sampled about every metre (walls of the house in between count).
+    pub fn outdoor_coverage(&self, o: &Outdoor) -> Coverage {
+        let (x0, x1, y0, y1) = (o.a[0].min(o.b[0]), o.a[0].max(o.b[0]), o.a[1].min(o.b[1]), o.a[1].max(o.b[1]));
+        let cell = PX_PER_M.max(((x1 - x0) * (y1 - y0) / 2500.0).sqrt());
+        let radios = self.radios();
+        let mut s = vec![];
+        let mut y = y0 + cell / 2.0;
+        while y < y1 {
+            let mut x = x0 + cell / 2.0;
+            while x < x1 {
+                s.push(self.best_at(&radios, [x, y], o.floor));
+                x += cell;
+            }
+            y += cell;
+        }
+        let share = |t: f32| if s.is_empty() { 0.0 } else { s.iter().filter(|x| **x >= t).count() as f32 / s.len() as f32 };
+        Coverage { good: share(GOOD), usable: share(USABLE), area_m2: (x1 - x0) * (y1 - y0) / (PX_PER_M * PX_PER_M) }
     }
 
     /// The spot on a storey where one more ordinary access point would give the most extra area good Wi-Fi.
@@ -201,5 +231,15 @@ mod tests {
         let before = n.check().iter().filter(|i| i.fix.is_some()).count();
         let done = n.fix_all();
         assert!(done.len() <= before.max(1) * 3, "{done:?}");
+    }
+
+    #[test]
+    fn a_garden_next_to_the_router_has_better_wifi_than_one_far_away() {
+        let n = template("home");
+        let r = n.devices.iter().find(|d| d.kind == crate::net::Kind::HomeRouter).unwrap();
+        let near = super::Outdoor { a: [r.pos[0] - 100.0, r.pos[1] + 60.0], b: [r.pos[0] + 100.0, r.pos[1] + 200.0], ..Default::default() };
+        let far = super::Outdoor { a: [r.pos[0] + 2000.0, r.pos[1]], b: [r.pos[0] + 2200.0, r.pos[1] + 140.0], ..Default::default() };
+        let (cn, cf) = (n.outdoor_coverage(&near), n.outdoor_coverage(&far));
+        assert!(cn.usable > cf.usable && cf.good == 0.0 && (cn.area_m2 - 70.0).abs() < 1.0, "{} {}", cn.usable, cf.usable);
     }
 }

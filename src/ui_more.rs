@@ -230,6 +230,7 @@ impl App {
         if !self.cov_cache.as_ref().is_some_and(|c| c.0 == self.floor && now - c.1 < 1.0) {
             self.cov_cache = Some((self.floor, now, self.net.coverage(self.floor)));
         }
+        self.outdoor_rows(ui);
         let Some(Some(c)) = self.cov_cache.as_ref().map(|c| c.2.as_ref()) else { return };
         let (good, usable, area) = (c.good, c.usable, c.area_m2);
         let col = if good >= 0.9 { pal().green } else if good >= 0.7 { pal().amber } else { pal().red };
@@ -284,6 +285,32 @@ fn summary(n: &Network) -> Vec<(&'static str, String)> {
 }
 
 impl App {
+    /// Each garden or terrace on this storey: its name, how much of it has Wi-Fi, and a way to remove it.
+    fn outdoor_rows(&mut self, ui: &mut egui::Ui) {
+        let mut remove = None;
+        let ids: Vec<u32> = self.net.outdoor.iter().filter(|o| o.floor == self.floor).map(|o| o.id).collect();
+        for id in ids {
+            let c = self.net.outdoor_coverage(self.net.outdoor.iter().find(|o| o.id == id).unwrap());
+            let o = self.net.outdoor.iter_mut().find(|o| o.id == id).unwrap();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ic::TREE).color(pal().green));
+                ui.add(TextEdit::singleline(&mut o.name).desired_width(110.0));
+                let col = if c.good > 0.8 { pal().green } else if c.usable > 0.5 { pal().amber } else { pal().red };
+                ui.label(RichText::new(format!("{:.0}% good, {:.0}% usable · {:.0} m²", c.good * 100.0, c.usable * 100.0, c.area_m2)).color(col));
+                if ui.small_button(ic::TRASH).on_hover_text("Remove this outdoor area").clicked() {
+                    remove = Some(id);
+                }
+            });
+        }
+        if let Some(id) = remove {
+            self.snapshot();
+            self.net.outdoor.retain(|o| o.id != id);
+        }
+        if self.net.outdoor.is_empty() {
+            ui.label(RichText::new("Garden or terrace? Measure across it (M) and press 'Make this an outdoor area'.").small().color(pal().dim));
+        }
+    }
+
     /// Side by side with another saved plan: is option B worth what it costs?
     fn compare_section(&mut self, ui: &mut egui::Ui) {
         if !Self::section_hint(ui, "Compare options", "Save each idea as its own plan (for example 'mesh' and 'cabled access points'), then compare this one with another: cost, cable, power, Wi-Fi coverage and problems.") {
