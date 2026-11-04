@@ -510,8 +510,9 @@ pub struct Device {
     pub min_rssi: i16,
     /// Neighbour networks: share of airtime they use (0–1).
     pub busy: f32,
-    /// Internet: the plan's download speed in Mbit/s.
+    /// Internet: the plan's download and upload speed in Mbit/s (upload 0 = as fast as the download).
     pub plan_mbps: f32,
+    pub plan_up_mbps: f32,
     /// Ethernet, fibre and internet-line sockets, as groups of identical ports.
     #[serde(rename = "port_groups")]
     pub ports: Vec<crate::ports::PortGroup>,
@@ -570,8 +571,10 @@ pub struct Device {
     pub ddns: String,
     /// Home router: UPnP lets consoles and games open ports by themselves.
     pub upnp: bool,
-    /// Home router: its DNS answers 0.0.0.0 for ad and tracker names.
+    /// Home router: its DNS answers 0.0.0.0 for ad and tracker names (the starter list plus `blocklist`).
     pub adblock: bool,
+    /// Names imported from a real blocklist file, one per line (see `more::parse_blocklist`).
+    pub blocklist: String,
     /// Hosts: which traffic goes first when a link is full.
     pub qos: Qos,
     /// Battery (Wh) of the UPS this device is plugged into; 0 = none.
@@ -615,6 +618,7 @@ impl Default for Device {
             min_rssi: 0,
             busy: 0.3,
             plan_mbps: 500.0,
+            plan_up_mbps: 0.0,
             ports: vec![crate::ports::PortGroup::rj45(1, 1000)],
             old_ports: 0,
             old_mbps: 0,
@@ -645,6 +649,7 @@ impl Default for Device {
             ddns: String::new(),
             upnp: false,
             adblock: false,
+            blocklist: String::new(),
             qos: Qos::Normal,
             ups_wh: 0.0,
         }
@@ -1156,6 +1161,7 @@ impl Network {
             d.ports.retain(|g| g.n > 0);
             d.poe_class = d.poe_class.min(4);
             d.streams = d.streams.clamp(1, 4);
+            d.plan_up_mbps = if d.plan_up_mbps.is_finite() { d.plan_up_mbps.clamp(0.0, 25000.0) } else { 0.0 };
             for f in d.ifaces.iter_mut() {
                 f.prefix = f.prefix.min(32);
                 f.vlan = f.vlan.clamp(1, 4094);
@@ -1641,6 +1647,9 @@ impl Network {
             }
             if let Some((r, inner)) = nat_back {
                 if r == cur && d.has_ip(dst) {
+                    if let Some(cg) = self.cgnat(d) {
+                        t.log.push(Log { src: src.to_string(), dst: cg.clone(), proto: "NAT", layer: "Network", info: format!("The provider's carrier-grade NAT maps the reply for {dst} back to {cg}"), dev: cur, ..Default::default() });
+                    }
                     t.log.push(Log { src: src.to_string(), dst: inner.to_string(), proto: "NAT", layer: "Network", info: format!("{} translates the reply back to {inner}", d.name), dev: cur, ..Default::default() });
                     dst = inner;
                     nat_back = None;
@@ -1768,9 +1777,13 @@ impl Network {
             t.path.extend(path.into_iter().skip(1));
             if d.kind == Kind::HomeRouter && out == 1 && came_in.is_some_and(|i| i != 1) {
                 let wan = parse_ip(&d.ifaces[1].ip).unwrap_or(src);
-                t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("{} replaces sender {src} with its public address {wan}", d.name), dev: cur, ..Default::default() });
-                if let Some(cg) = self.cgnat(d) {
-                    t.log.push(Log { src: cg.clone(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Mobile line: the provider translates {cg} once more to an address shared by many customers (carrier-grade NAT)"), dev: cur, ..Default::default() });
+                match self.cgnat(d) {
+                    // Mobile line: two translations, the router's own and then the provider's.
+                    Some(cg) => {
+                        t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("{} replaces sender {src} with its mobile-line address {cg}", d.name), dev: cur, ..Default::default() });
+                        t.log.push(Log { src: cg.clone(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("The provider's carrier-grade NAT replaces {cg} with {wan}, a public address many customers share"), dev: cur, ..Default::default() });
+                    }
+                    None => t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("{} replaces sender {src} with its public address {wan}", d.name), dev: cur, ..Default::default() }),
                 }
                 t.nat = Some((cur, src));
                 src = wan;
@@ -1787,9 +1800,11 @@ impl Network {
         t
     }
 
-    /// The shared address (100.64.0.0/10) a router gets while its internet runs over the mobile line
-    /// (carrier-grade NAT), or None on a normal line.
-    // shortcut: inside the simulation the router keeps its usual WAN address; the 100.64 one is shown and explained.
+    /// The router's own address while its internet runs over the mobile line, from the provider's shared
+    /// range 100.64.0.0/10 (carrier-grade NAT), or None on a normal line. Its WAN entry then stands for the
+    /// public address the provider's NAT shares among many customers: the router sends from the 100.64
+    /// address, the provider maps that to the shared one on the way out and back again for replies, and
+    /// unsolicited traffic to the shared address stops at the provider (see `send`).
     pub fn cgnat(&self, r: &Device) -> Option<String> {
         let inet = self.devices.iter().find(|d| d.kind == Kind::Internet)?;
         let h = crate::sim::hash(self.seed, r.id as u64, 0xC6);
@@ -2644,8 +2659,15 @@ impl Network {
                 );
             }
             "ipconfig" | "ifconfig" | "ip" => {
-                for f in &d.ifaces {
-                    o.lines.push(format!("{}: {}  mac {}", f.name, if f.ip.is_empty() { "no address".into() } else { format!("{}/{}", f.ip, f.prefix) }, f.mac));
+                let cg = self.cgnat(&d);
+                for (i, f) in d.ifaces.iter().enumerate() {
+                    let addr = match &cg {
+                        // On the mobile line the router itself holds a shared-range address; the WAN entry is the provider's.
+                        Some(cg) if i == 1 => format!("{cg}/10 (mobile line; the provider shares {} among many customers)", f.ip),
+                        _ if f.ip.is_empty() => "no address".into(),
+                        _ => format!("{}/{}", f.ip, f.prefix),
+                    };
+                    o.lines.push(format!("{}: {addr}  mac {}", f.name, f.mac));
                 }
                 o.lines.push(format!("gateway: {}   dns: {}   {}", or_dash(&d.gateway), or_dash(&d.dns), if d.dhcp_client { "(from DHCP)" } else { "(fixed)" }));
                 match self.v6_of(&d) {
@@ -2653,8 +2675,8 @@ impl Network {
                     None => o.lines.push("IPv6: fe80:: link-local only (no IPv6 from the router)".into()),
                 }
                 o.lines.extend(self.v6_delegation(&d));
-                if let Some(cg) = self.cgnat(&d) {
-                    o.lines.push(format!("Mobile line: the provider only gives this router the shared address {cg} (carrier-grade NAT) — no port forwarding."));
+                if let Some(cg) = cg {
+                    o.lines.push(format!("Mobile line: the router only has {cg} from the provider's shared range (carrier-grade NAT) — nothing from outside reaches it, so no port forwarding."));
                 }
             }
             "ping6" => self.ping6(id, arg, &mut o),

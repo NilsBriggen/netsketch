@@ -244,6 +244,20 @@ impl App {
                 ui.checkbox(&mut d.ipv6, tr("IPv6")).on_hover_text(tr("Every device also gets a public IPv6 address (try ping6)"));
                 ui.checkbox(&mut d.sqm, tr("Smart queueing (SQM)")).on_hover_text(tr("Keeps calls and games smooth when the line is full; costs about 8% top speed"));
                 ui.checkbox(&mut d.adblock, tr("Block ads and trackers (DNS)")).on_hover_text(tr("The router's name server answers 0.0.0.0 for known ad and tracker names, for every device at home"));
+                if d.adblock {
+                    let own = d.blocklist.lines().count();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(trf("{} names: a starter list plus {} imported", &[&(crate::more::AD_LIST.len() + own), &own])).small().color(pal().dim));
+                        if ui.small_button(format!("{}  {}", ic::DOWNLOAD_SIMPLE, tr("Import a blocklist…"))).on_hover_text(tr("A hosts file or a list with one name per line, as Pi-hole and router blockers use (e.g. the StevenBlack hosts list)")).clicked() {
+                            if let Some(text) = rfd::FileDialog::new().add_filter("Blocklist", &["txt", "hosts", "list"]).pick_file().and_then(|p| std::fs::read_to_string(p).ok()) {
+                                d.blocklist = crate::more::parse_blocklist(&text);
+                            }
+                        }
+                        if own > 0 && ui.small_button(tr("Clear")).clicked() {
+                            d.blocklist.clear();
+                        }
+                    });
+                }
                 ui.checkbox(&mut d.upnp, tr("UPnP")).on_hover_text(tr("Games and consoles open the ports they need by themselves. Handy, but so can malware inside."));
                 ui.checkbox(&mut d.vpn, tr("VPN server (WireGuard) for remote access")).on_hover_text(tr("Reach your home network from your phone or laptop anywhere, as if you were at home"));
                 if d.vpn {
@@ -258,6 +272,9 @@ impl App {
                 }
             }
             let d = self.net.dev_mut(id).unwrap();
+            if kind == Kind::Router {
+                ui.checkbox(&mut d.ipv6, tr("Routes IPv6 too")).on_hover_text(tr("Without it this router passes only IPv4: IPv6 traffic stops here even where IPv4 gets through"));
+            }
             ui.label(RichText::new(tr("Firewall rules")).color(pal().dim));
             ui.add(TextEdit::multiline(&mut d.rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("deny guest lan\nforward 50000-50100 192.168.1.20 udp\ndeny kids-tablet internet 22:00-06:30")))
                 .on_hover_text(tr("First match wins: allow|deny <from> <to> [port or range] [tcp|udp] [time like 22:00-06:30] — from/to: any, lan, guest, internet, an address, network/prefix or device name. Port forwarding: forward <port or range> <address> [tcp|udp]."));
@@ -445,6 +462,7 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
         job.append(&format!("\n{}", p.summary()), 0.0, egui::TextFormat { font_id: FontId::proportional(11.5), color: pal().dim, ..Default::default() });
         if ui.selectable_label(d.model == p.title(), job).on_hover_text(&p.note).clicked() {
             d.plan_mbps = p.down_mbps;
+            d.plan_up_mbps = p.up_mbps;
             d.model = p.title();
             query.clear();
         }

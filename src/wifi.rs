@@ -536,23 +536,28 @@ impl Network {
         (base * (1.0 + 0.6 * crate::sim::wander(self.seed, t.id as u64 + 0x5EED, self.clock, 7.0))).clamp(0.0, 0.95)
     }
 
-    /// Airtime your own radio needs on a band: its devices' apps at this hour over its radio rate, plus ~2% for beacons.
-    // shortcut: every device counted at the radio's full rate on this band; weak devices really take longer.
+    /// Airtime your own radio needs on a band, plus ~2% for beacons: each device's apps at this hour over the rate
+    /// its own signal allows, so a far, slow device takes more of the air than a near one with the same traffic.
     fn demand_airtime(&self, ap: &Device, band: Band) -> f32 {
-        let demand: f32 = self
+        let w = ap.width[band.i()].max(20);
+        let used: f32 = self
             .links
             .iter()
             .filter(|l| l.medium == Medium::WiFi && (l.a == ap.id || l.b == ap.id))
             .filter_map(|l| self.dev(l.other(ap.id).0))
             .filter(|c| !c.off && !c.kind.radio())
-            .flat_map(|c| c.uses.iter())
-            .map(|u| {
-                let (down, up) = u.demand();
-                (down + up) * crate::more::activity(*u, self.hour)
+            .map(|c| {
+                let demand: f32 = c.uses.iter().map(|u| {
+                    let (down, up) = u.demand();
+                    (down + up) * crate::more::activity(*u, self.hour)
+                }).sum();
+                let rssi = self.rssi_at(ap, c.pos, c.floor, band);
+                let streams = usable_streams(rssi, ap.streams.min(c.streams).max(1));
+                let rate = (ap.wifi.stream20(band.i()) * width_factor(w) * streams as f32 * rate_fraction(rssi, w)).max(1.0);
+                demand / (rate * mac_eff(rate))
             })
             .sum();
-        let phy = ap.wifi.stream20(band.i()) * width_factor(ap.width[band.i()].max(20)) * ap.streams.max(1) as f32;
-        (0.02 + demand / (phy * mac_eff(phy))).min(0.8)
+        (0.02 + used).min(0.8)
     }
 
     /// The radio whose channel a device really uses: single-radio repeaters follow their upstream.
@@ -782,9 +787,8 @@ impl Network {
     }
 
     /// Throughput from the first device of a path to the last (an upload): radio hops in the direction they're
-    /// crossed (devices send weaker than routers), the mobile line's slower uplink, and same-channel radio hops
-    /// taking turns as in `path_rate`.
-    // shortcut: the internet plan's upload is taken to equal its download (Swiss fibre plans mostly are symmetric).
+    /// crossed (devices send weaker than routers), the plan's upload speed, the mobile line's slower uplink, and
+    /// same-channel radio hops taking turns as in `path_rate`.
     pub fn upload_rate(&self, path: &[u32]) -> f32 {
         let mut worst = f32::MAX;
         let mut shared: Vec<((Band, u16), f32)> = vec![];
@@ -802,7 +806,10 @@ impl Network {
                     }
                     r
                 }
-                _ => self.link_rate(l),
+                _ => {
+                    let up = [l.a, l.b].iter().filter_map(|x| self.dev(*x)).find(|d| d.kind == Kind::Internet).map(|i| if i.plan_up_mbps > 0.0 { i.plan_up_mbps } else { i.plan_mbps });
+                    self.link_rate(l).min(up.unwrap_or(f32::MAX))
+                }
             };
             worst = worst.min(r);
         }
@@ -1244,6 +1251,21 @@ mod tests {
         n.apply_fix(&fix);
         let hub = n.dev(r.id).unwrap().clone();
         assert!(n.zb_clash(&hub, hub.zb_ch).is_empty(), "{}", hub.zb_ch);
+    }
+
+    #[test]
+    fn a_far_device_uses_more_airtime_than_a_near_one_with_the_same_traffic() {
+        let mut n = Network::default();
+        let ap = n.add_device(Kind::AccessPoint, [0.0, 0.0]);
+        let ph = n.add_device(Kind::Phone, [2.0 * PX_PER_M, 0.0]);
+        n.connect(ap, ph, Medium::WiFi).unwrap();
+        n.dev_mut(ph).unwrap().uses = vec![crate::extras::Use::Stream4k];
+        n.hour = 20.5;
+        let near = n.demand_airtime(n.dev(ap).unwrap(), Band::B5);
+        n.dev_mut(ph).unwrap().pos = [100.0 * PX_PER_M, 0.0];
+        let far = n.demand_airtime(n.dev(ap).unwrap(), Band::B5);
+        // Beacons (2%) aside, the same stream takes about twice the air from far away.
+        assert!(far - 0.02 > 1.5 * (near - 0.02), "{near} {far}");
     }
 
     #[test]

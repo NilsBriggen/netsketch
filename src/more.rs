@@ -4,8 +4,8 @@ use crate::extras::{Use, GUEST_VLAN};
 use crate::net::{Device, Kind, Link, Network};
 use std::collections::{HashSet, VecDeque};
 
-/// A few well-known ad and tracker domains.
-// shortcut: real blocklists hold hundreds of thousands of names and are updated daily.
+/// A starter list of well-known ad and tracker domains; real lists (hosts files with hundreds of thousands of
+/// names, updated daily) are imported on the router and kept in `Device::blocklist`.
 pub const AD_LIST: [&str; 8] = ["doubleclick.net", "googlesyndication.com", "googleadservices.com", "adnxs.com", "scorecardresearch.com", "taboola.com", "criteo.com", "ads.example.com"];
 
 /// Typical power draw (W): while in use for TVs, computers and consoles (see `duty`), else the average over a
@@ -74,6 +74,20 @@ pub fn activity(u: Use, hour: f32) -> f32 {
 pub fn clock(hour: f32) -> String {
     let h = hour.rem_euclid(24.0);
     format!("{:02}:{:02}", h as u32, ((h.fract()) * 60.0).round() as u32 % 60)
+}
+
+/// The names in a blocklist file, one per line: plain lists ("ads.example.com") and hosts files
+/// ("0.0.0.0 ads.example.com") both work; comments, localhost lines and duplicates are dropped.
+pub fn parse_blocklist(text: &str) -> String {
+    let mut seen = HashSet::new();
+    text.lines()
+        .filter_map(|l| {
+            let l = l.split('#').next()?.trim();
+            let name = l.split_whitespace().last()?.trim_end_matches('.').to_lowercase();
+            (name.contains('.') && !name.starts_with("localhost") && name.parse::<std::net::IpAddr>().is_err() && seen.insert(name.clone())).then_some(name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl Network {
@@ -228,7 +242,7 @@ impl Network {
             let site = w.get(1)?;
             (w.first() == Some(&"block-site") && hit(site)).then(|| site.to_string())
         });
-        own.or_else(|| AD_LIST.iter().find(|s| d.adblock && hit(s)).map(|s| format!("{s}, ad and tracker blocklist")))
+        own.or_else(|| AD_LIST.iter().copied().chain(d.blocklist.lines()).find(|s| d.adblock && !s.is_empty() && hit(s)).map(|s| format!("{s}, ad and tracker blocklist")))
     }
 
     /// Points a directional antenna straight at another device.
@@ -333,8 +347,14 @@ mod tests {
         let wan = n.dev(r).unwrap().ifaces[1].ip.clone();
         let from_outside = n.exec(inet, &format!("open {wan}")).lines.join(" ");
         assert!(from_outside.contains("carrier-grade NAT"), "{from_outside}");
-        assert!(n.exec(r, "ipconfig").lines.join(" ").contains("100."));
-        assert!(n.exec(pc, "ping example.com").lines.join(" ").contains(", 4 received"));
+        let cg = n.cgnat(n.dev(r).unwrap()).unwrap();
+        assert!(cg.starts_with("100.") && n.exec(r, "ipconfig").lines.join(" ").contains(&format!("{cg}/10")));
+        let ping = n.exec(pc, "ping example.com");
+        assert!(ping.lines.join(" ").contains(", 4 received"));
+        // Out: the router translates to its 100.64 address, the provider to the shared one; back: the reverse.
+        let nat: Vec<&str> = ping.log.iter().filter(|l| l.proto == "NAT").map(|l| l.info.as_str()).collect();
+        assert!(nat.iter().any(|i| i.contains(&format!("mobile-line address {cg}"))) && nat.iter().any(|i| i.contains("carrier-grade NAT replaces")), "{nat:?}");
+        assert!(nat.iter().any(|i| i.contains(&format!("back to {cg}"))), "{nat:?}");
         assert!(n.check().iter().any(|i| i.link == Some(backup) && i.text.contains("mobile backup")));
         // Without a backup, the same failure takes the house offline.
         n.remove_link(backup);
@@ -422,5 +442,20 @@ mod tests {
         let copy = n.duplicate(tv).unwrap();
         assert_eq!(n.dev(copy).unwrap().kind, Kind::Tv);
         assert!(n.dev(copy).unwrap().ifaces[0].mac != n.dev(tv).unwrap().ifaces[0].mac);
+    }
+
+    #[test]
+    fn an_imported_hosts_file_blocks_its_names_and_their_subdomains() {
+        let list = super::parse_blocklist("# StevenBlack-style hosts file\n127.0.0.1 localhost\n0.0.0.0 tracker.example.org\n0.0.0.0 tracker.example.org\nads.example.net\n");
+        assert_eq!(list, "tracker.example.org\nads.example.net");
+        let mut n = template_seeded("home", 1);
+        let r = id(&n, "Home router");
+        n.dev_mut(r).unwrap().blocklist = list;
+        let d = n.dev(r).unwrap().clone();
+        assert!(n.blocked_by(&d, "cdn.tracker.example.org").is_none(), "only with the blocker on");
+        n.dev_mut(r).unwrap().adblock = true;
+        let d = n.dev(r).unwrap().clone();
+        assert!(n.blocked_by(&d, "cdn.tracker.example.org").is_some() && n.blocked_by(&d, "doubleclick.net").is_some());
+        assert!(n.blocked_by(&d, "example.org").is_none());
     }
 }

@@ -1688,6 +1688,8 @@ impl App {
         }
         let plugged = self.net.port_users(id);
         {
+            // On the mobile line the router's own address comes from the provider's shared range.
+            let mobile = self.net.dev(id).and_then(|d| self.net.cgnat(d));
             let d = self.net.dev_mut(id).unwrap();
             let kind = d.kind;
             // Thread and Zigbee gadgets get no address from DHCP (their hub speaks for them; see Smart-home radio).
@@ -1710,6 +1712,11 @@ impl App {
                             ui.add_enabled(!locked, egui::DragValue::new(&mut f.prefix).range(0..=32));
                         });
                         ui.end_row();
+                        if let (Some(cg), true) = (&mobile, kind == Kind::HomeRouter && i == 1) {
+                            ui.label("");
+                            ui.label(RichText::new(trf("Mobile line: the router itself has {} (carrier-grade NAT); {} is the provider's address shared by many customers.", &[cg, &f.ip])).small().color(pal().amber));
+                            ui.end_row();
+                        }
                     }
                     // A VLAN number is set on wired ports; Wi-Fi devices get theirs from the network they join.
                     if kind.is_host() && self_wired {
@@ -1734,11 +1741,18 @@ impl App {
                 ui_extras::plan_picker(ui, d, &mut self.catalog_query);
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("plan").selected_text(format!("{:.0} Mbit/s", d.plan_mbps)).width(150.0).show_ui(ui, |ui| {
-                        for (n, v) in [("DSL 50", 50.0), ("DSL vectoring 250", 250.0), ("Cable 500", 500.0), ("Fibre 1 Gbit/s", 1000.0), ("Fibre 10 Gbit/s", 10000.0), ("5G home internet", 300.0), ("Satellite (low orbit)", 150.0)] {
-                            ui.selectable_value(&mut d.plan_mbps, v, format!("{n} — {v:.0} Mbit/s"));
+                        // Typical down/up speeds: DSL and cable upload far slower, fibre is symmetric.
+                        for (n, v, up) in [("DSL 50", 50.0, 10.0), ("DSL vectoring 250", 250.0, 40.0), ("Cable 500", 500.0, 50.0), ("Fibre 1 Gbit/s", 1000.0, 1000.0), ("Fibre 10 Gbit/s", 10000.0, 10000.0), ("5G home internet", 300.0, 50.0), ("Satellite (low orbit)", 150.0, 20.0)] {
+                            if ui.selectable_label(d.plan_mbps == v && d.plan_up_mbps == up, format!("{} — {v:.0} / {up:.0} Mbit/s", tr(n))).clicked() {
+                                (d.plan_mbps, d.plan_up_mbps) = (v, up);
+                            }
                         }
                     });
-                    ui.add(egui::DragValue::new(&mut d.plan_mbps).range(1.0..=25000.0).suffix(" Mbit/s"));
+                    ui.add(egui::DragValue::new(&mut d.plan_mbps).range(1.0..=25000.0).prefix("↓ ").suffix(" Mbit/s"));
+                    let mut up = if d.plan_up_mbps > 0.0 { d.plan_up_mbps } else { d.plan_mbps };
+                    if ui.add(egui::DragValue::new(&mut up).range(1.0..=25000.0).prefix("↑ ").suffix(" Mbit/s")).on_hover_text(tr("Upload speed: backups, video calls and cameras send this way")).changed() {
+                        d.plan_up_mbps = up;
+                    }
                 });
             }
             if kind.serves() && Self::section(ui, "Services") {

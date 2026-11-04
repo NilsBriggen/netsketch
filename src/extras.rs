@@ -379,21 +379,27 @@ impl Network {
 
 impl Network {
     /// The /64 a home router hands to its network (documentation range 2001:db8::/32). The provider delegates a
-    /// /56 (256 networks) to the router on the line (DHCPv6-PD), which uses the first /64; a router behind it
-    /// asks it for one more /64 out of that /56 the same way.
-    // shortcut: one level of routers behind routers; a third one gets no further delegation.
+    /// /56 (256 networks) to the router on the line (DHCPv6-PD), which uses the first /64; every router behind
+    /// it, however many levels deep, asks the one in front for a /64 out of that /56 the same way. A router in
+    /// the chain without IPv6 cuts everything behind it off.
     pub fn v6_prefix(&self, router: &Device) -> Option<String> {
         if router.kind != Kind::HomeRouter || !router.ipv6 {
             return None;
         }
         let segs = self.segments();
-        let wan = segs.get(&(router.id, 1));
-        let up = self.devices.iter().find(|u| u.id != router.id && u.kind == Kind::HomeRouter && wan.is_some() && segs.get(&(u.id, 0)) == wan);
-        let (top, sub) = match up {
-            Some(u) if !u.ipv6 => return None,
-            Some(u) => (u, 1 + (router.id % 255) as u16),
-            None => (router, 0),
+        let upstream = |r: &Device| {
+            let wan = segs.get(&(r.id, 1));
+            self.devices.iter().find(|u| u.id != r.id && u.kind == Kind::HomeRouter && wan.is_some() && segs.get(&(u.id, 0)) == wan)
         };
+        let mut top = router;
+        for _ in 0..8 {
+            match upstream(top) {
+                Some(u) if !u.ipv6 => return None,
+                Some(u) => top = u,
+                None => break,
+            }
+        }
+        let sub = if top.id == router.id { 0 } else { 1 + (router.id % 255) as u16 };
         Some(format!("2001:db8:{:x}:{:x}", (self.seed & 0xffff) as u16, self.v6_site(top) << 8 | sub))
     }
 
@@ -425,6 +431,11 @@ impl Network {
         Some(format!("{prefix}:{:x}:{:x}:{:x}:{:x}", (h >> 48) as u16, (h >> 32) as u16, (h >> 16) as u16, h as u16))
     }
 
+    /// The first router on a path (after the sender) that passes only IPv4.
+    pub fn v4_only_router(&self, path: &[u32]) -> Option<&Device> {
+        path.iter().skip(1).filter_map(|x| self.dev(*x)).find(|d| matches!(d.kind, Kind::Router | Kind::HomeRouter) && !d.ipv6)
+    }
+
     /// ping6: outbound works without NAT; inbound from the internet needs a firewall rule.
     pub fn ping6(&self, id: u32, target: &str, o: &mut Outcome) {
         let me = self.dev(id).unwrap();
@@ -443,7 +454,6 @@ impl Network {
                     o.lines.push(format!("{} has no IPv6 address.", t.name));
                     return;
                 };
-                // shortcut: IPv6 reuses the IPv4 path (same cables and routers); fine for home networks, not for v6-only routing.
                 if from_internet {
                     let Some(r) = self.devices.iter().find(|r| r.kind == Kind::HomeRouter && r.ipv6 && self.v6_of(t).is_some_and(|a| a.starts_with(&self.v6_prefix(r).unwrap_or_default()))) else {
                         return;
@@ -467,7 +477,13 @@ impl Network {
             }
         };
         let Some(src) = me.first_ip() else { return };
-        let t = self.send(path_from, src, path_to, "ICMPv6", 0, None);
+        // IPv6 runs over the same cables, but each router on the way must route IPv6 itself, and nothing is translated.
+        let mut t = self.send(path_from, src, path_to, "ICMPv6", 0, None);
+        t.log.retain(|l| l.proto != "NAT");
+        if let Some(r) = self.v4_only_router(&t.path) {
+            t.ok = false;
+            t.error = format!("{} routes only IPv4, so IPv6 stops there even though IPv4 gets through. Turn IPv6 on for it.", r.name);
+        }
         o.lines.push(format!("PING {dst6} from {mine}"));
         if t.ok {
             o.lines.push(format!("64 bytes from {dst6}: icmp_seq=1..4 time={:.1} ms — no NAT: the address is the same end to end", t.ms * 2.0));
@@ -855,5 +871,26 @@ mod tests {
         assert_eq!(n.forward_of(&rd, 27020, "UDP"), ip(&n, pc));
         assert_eq!(n.forward_of(&rd, 3479, "UDP"), None, "nobody here plays on PlayStation");
         assert_eq!(n.forward_of(&rd, 445, "TCP"), None);
+    }
+
+    #[test]
+    fn ipv6_needs_every_router_on_the_way_and_isnt_translated() {
+        let mut n = crate::net::template("classroom");
+        let r = n.devices.iter().find(|d| d.kind == Kind::Router).unwrap().id;
+        let pc = n.devices.iter().find(|d| d.kind == Kind::Desktop).unwrap().id;
+        let srv = n.devices.iter().find(|d| d.kind == Kind::Server).unwrap().id;
+        let path = n.send(pc, n.dev(pc).unwrap().first_ip().unwrap(), n.dev(srv).unwrap().first_ip().unwrap(), "ICMP", 0, None).path;
+        assert!(path.contains(&r), "the classroom path crosses the router");
+        n.dev_mut(r).unwrap().ipv6 = false;
+        assert_eq!(n.v4_only_router(&path).map(|d| d.id), Some(r), "IPv4 gets through, IPv6 stops at the plain router");
+        n.dev_mut(r).unwrap().ipv6 = true;
+        assert!(n.v4_only_router(&path).is_none());
+        // At home with IPv6 on: ping6 reaches the internet and nothing is translated on the way.
+        let mut h = crate::net::template("home");
+        let hr = h.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().id;
+        h.dev_mut(hr).unwrap().ipv6 = true;
+        let office = h.devices.iter().find(|d| d.name == "Office PC").unwrap().id;
+        let o = h.exec(office, "ping6 example.com");
+        assert!(o.lines.join(" ").contains("4 received") && !o.traces.iter().flat_map(|t| &t.log).any(|l| l.proto == "NAT"), "{:?}", o.lines);
     }
 }
