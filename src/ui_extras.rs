@@ -64,6 +64,7 @@ impl App {
                     match self.texture(&ctx, &path) {
                         Some(_) => {
                             let plan = FloorPlan { floor: self.floor, path, pos: [0.0, 0.0], width_m: 15.0, opacity: 0.5 };
+                            self.snapshot();
                             match idx {
                                 Some(i) => self.net.plans[i] = plan,
                                 None => self.net.plans.push(plan),
@@ -120,6 +121,7 @@ impl App {
                             Err(e) => trf("Couldn't import: {}", &[&e]),
                         }
                     } else {
+                        self.snapshot();
                         match text.and_then(|t| self.net.import_survey(&t)) {
                             Ok(n) => trf("Imported {} readings.", &[&n]),
                             Err(e) => trf("Couldn't import: {}", &[&e]),
@@ -493,21 +495,27 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
     ui.vertical(|ui| {
         let mut remove = None;
         let mut first = 0u16;
+        // A drag is one undo step (from where it started), a click or typed value one each.
+        let mut changed = false;
+        let step = |r: egui::Response| r.drag_started() || (r.changed() && !r.dragged());
         for (i, g) in ports.iter_mut().enumerate() {
             ui.horizontal_wrapped(|ui| {
-                ui.add(egui::DragValue::new(&mut g.n).range(1..=96)).on_hover_text(tr("How many ports of this kind"));
+                changed |= step(ui.add(egui::DragValue::new(&mut g.n).range(1..=96)).on_hover_text(tr("How many ports of this kind")));
                 ui.label(tr("×"));
+                let (mbps, kind) = (g.mbps, g.kind);
                 if g.kind.line() {
-                    ui.add(egui::DragValue::new(&mut g.mbps).range(1..=10000).speed(10.0).suffix(tr(" Mbit/s"))).on_hover_text(tr("The fastest line rate the modem supports"));
+                    changed |= step(ui.add(egui::DragValue::new(&mut g.mbps).range(1..=10000).speed(10.0).suffix(tr(" Mbit/s"))).on_hover_text(tr("The fastest line rate the modem supports")));
                 } else {
                     speed_combo(ui, ("pg-speed", id, i), &mut g.mbps);
+                    changed |= g.mbps != mbps;
                 }
                 egui::ComboBox::from_id_salt(("pg-kind", id, i)).selected_text(g.kind.short()).width(56.0).show_ui(ui, |ui| {
                     for k in PortKind::ALL {
                         ui.selectable_value(&mut g.kind, k, k.label());
                     }
                 });
-                ui.toggle_value(&mut g.wan, "WAN").on_hover_text(tr("For the internet line: other cables only use it when nothing else is free"));
+                changed |= g.kind != kind;
+                changed |= ui.toggle_value(&mut g.wan, "WAN").on_hover_text(tr("For the internet line: other cables only use it when nothing else is free")).changed();
                 if ui.small_button(ic::X).on_hover_text(tr("Remove these ports")).clicked() {
                     remove = Some(i);
                 }
@@ -526,7 +534,7 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
         if add {
             ports.push(PortGroup::rj45(1, 1000));
         }
-        remove.is_some() || add
+        remove.is_some() || add || changed
     })
     .inner
 }

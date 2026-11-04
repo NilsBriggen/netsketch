@@ -1109,8 +1109,41 @@ pub fn floor_name(f: i8) -> String {
 }
 
 impl Network {
+    /// Reads a saved plan. Only a file that lists devices counts: any other JSON (a phone survey, a
+    /// settings file) would otherwise open as an empty plan, and saving would write over it.
+    pub fn from_json(text: &str) -> Result<Network, String> {
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        if v.get("devices").is_none_or(|d| !d.is_array()) {
+            return Err(crate::i18n::tr("this isn't a NetSketch plan").into());
+        }
+        serde_json::from_value(v).map_err(|e| e.to_string())
+    }
+
     /// Repairs a plan read from a file so nothing points at devices or ports that don't exist.
     pub fn sanitize(&mut self) {
+        // Positions that aren't real numbers (1e39 reads as infinity) would blank the whole map.
+        let ok = |p: &[f32; 2]| p.iter().all(|v| v.is_finite());
+        self.devices.retain(|d| ok(&d.pos));
+        self.walls.retain(|w| ok(&w.a) && ok(&w.b));
+        self.labels.retain(|l| ok(&l.pos));
+        self.points.retain(|p| ok(&p.pos));
+        self.survey.retain(|p| ok(&p.pos) && p.rssi.is_finite());
+        self.plans.retain(|p| ok(&p.pos) && p.width_m.is_finite() && p.width_m > 0.0);
+        for l in self.labels.iter_mut() {
+            l.floor = l.floor.clamp(-3, 20);
+        }
+        for p in self.plans.iter_mut() {
+            p.floor = p.floor.clamp(-3, 20);
+        }
+        for p in self.survey.iter_mut() {
+            p.floor = p.floor.clamp(-3, 20);
+        }
+        for s in self.storey_names.iter_mut() {
+            s.0 = s.0.clamp(-3, 20);
+        }
+        for s in self.storey_heights.iter_mut() {
+            s.0 = s.0.clamp(-3, 20);
+        }
         for d in self.devices.iter_mut() {
             crate::wifi::normalize_radio(d);
             d.floor = d.floor.clamp(-3, 20);
@@ -1143,13 +1176,16 @@ impl Network {
         self.walls.retain(|w| w.id < MAX_ID);
         self.points.retain(|p| p.id < MAX_ID);
         self.labels.retain(|l| l.id < MAX_ID);
+        self.outdoor.retain(|o| o.id < MAX_ID);
         let mut seen = std::collections::HashSet::new();
         self.devices.retain(|d| d.id < MAX_ID && seen.insert(d.id));
         self.next_id = self.next_id.max(self.devices.iter().map(|d| d.id).max().unwrap_or(0)).max(self.walls.iter().map(|w| w.id).max().unwrap_or(0))
             .max(self.points.iter().map(|p| p.id).max().unwrap_or(0))
-            .max(self.labels.iter().map(|l| l.id).max().unwrap_or(0));
+            .max(self.labels.iter().map(|l| l.id).max().unwrap_or(0))
+            .max(self.outdoor.iter().map(|o| o.id).max().unwrap_or(0));
         let ids: std::collections::HashSet<u32> = self.devices.iter().map(|d| d.id).collect();
         self.links.retain(|l| ids.contains(&l.a) && ids.contains(&l.b) && l.a != l.b);
+        self.measured.retain(|m| ids.contains(&m.1));
         for d in self.devices.iter_mut() {
             if d.old_ports > 0 {
                 let mbps = if d.old_mbps > 0 { d.old_mbps } else { 1000 };
@@ -1429,6 +1465,8 @@ impl Network {
             self.remove_link(l);
         }
         self.devices.retain(|d| d.id != id);
+        // Measured networks matched to it are free again (adding it back re-matches them).
+        self.measured.retain(|m| m.1 != id);
     }
 
     pub fn link_len(&self, l: &Link) -> f32 {
@@ -2993,6 +3031,23 @@ mod tests {
     fn run(n: &mut Network, name: &str, cmd: &str) -> String {
         let id = n.lookup_dev(name).unwrap().id;
         n.exec(id, cmd).lines.join("\n")
+    }
+
+    #[test]
+    fn only_a_plan_opens_as_a_plan_and_damaged_numbers_are_dropped() {
+        assert!(Network::from_json(r#"{"format":"netsketch-survey","points":[]}"#).is_err());
+        assert!(Network::from_json("{}").is_err());
+        let mut n = template("flat");
+        let json = serde_json::to_string(&n).unwrap();
+        assert_eq!(Network::from_json(&json).unwrap().devices.len(), n.devices.len());
+        // 1e39 doesn't fit an f32 and reads as infinity.
+        let bad = json.replacen(&format!("\"pos\":[{},", serde_json::to_string(&n.devices[0].pos[0]).unwrap()), "\"pos\":[1e39,", 1);
+        let mut m = Network::from_json(&bad).unwrap();
+        m.sanitize();
+        assert_eq!(m.devices.len(), n.devices.len() - 1);
+        n.labels.push(RoomLabel { id: 999, pos: [0.0, 0.0], floor: -100, text: "x".into() });
+        n.sanitize();
+        assert_eq!(n.labels.last().unwrap().floor, -3);
     }
 
     #[test]

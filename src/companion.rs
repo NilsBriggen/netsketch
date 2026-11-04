@@ -131,12 +131,14 @@ impl Network {
             return Err("not a NetSketch survey file".into());
         }
         let mut nets = 0;
-        let n_points = f.points.len();
+        // A point already here (sent live, then imported from the shared file too) isn't added twice.
+        let fresh: Vec<FilePoint> = f.points.into_iter().filter(|p| p.time.is_empty() || !self.points.iter().any(|q| q.time == p.time && q.name == p.name && q.phone == f.device)).collect();
+        let n_points = fresh.len();
         // Positions must be real numbers on a plausible scale (within 10 km).
-        if f.points.iter().any(|p| [p.x, p.y].iter().flatten().any(|v| !v.is_finite() || v.abs() > 10_000.0) || p.networks.iter().any(|s| !s.rssi.is_finite())) {
+        if fresh.iter().any(|p| [p.x, p.y].iter().flatten().any(|v| !v.is_finite() || v.abs() > 10_000.0) || p.networks.iter().any(|s| !s.rssi.is_finite())) {
             return Err("the file has impossible positions or readings".into());
         }
-        for (i, mut p) in f.points.into_iter().enumerate() {
+        for (i, mut p) in fresh.into_iter().enumerate() {
             // The same storeys a plan allows (Network::sanitize).
             p.floor = p.floor.clamp(-3, 20);
             let placed = p.x.is_some() && p.y.is_some();
@@ -155,11 +157,17 @@ impl Network {
         for m in self.measured_networks() {
             if m.dev.is_none() {
                 if let Some(d) = self.own_radio_for(&m) {
-                    self.measured.push((m.key.clone(), d));
+                    self.match_measured(&m.key, d);
                 }
             }
         }
         Ok((n_points, nets))
+    }
+
+    /// Ties a measured network to a device, replacing an earlier match.
+    fn match_measured(&mut self, key: &str, dev: u32) {
+        self.measured.retain(|m| m.0 != key);
+        self.measured.push((key.to_string(), dev));
     }
 
     /// Middle of a storey's walls (or devices), where new pins go.
@@ -224,7 +232,7 @@ impl Network {
     pub fn link_measured(&mut self, key: &str, dev: Option<u32>) {
         self.measured.retain(|m| m.0 != key);
         if let Some(d) = dev {
-            self.measured.push((key.to_string(), d));
+            self.match_measured(key, d);
         }
     }
 
@@ -268,7 +276,7 @@ impl Network {
             d.ch[b.i()] = *ch;
             d.width[b.i()] = *w;
         }
-        self.measured.push((key.to_string(), id));
+        self.match_measured(key, id);
         self.fit_measured(id, true);
         Some(id)
     }
@@ -396,6 +404,22 @@ mod tests {
         assert!(p[0] < 0.0 || p[0] > 9.0 * PX_PER_M || p[1] < 0.0 || p[1] > 6.5 * PX_PER_M, "{p:?}");
         assert!(n.fit_all_measured().contains("off by"));
         assert!(n.measured_error().unwrap() < 6.0);
+    }
+
+    #[test]
+    fn the_same_points_twice_are_added_once_and_a_deleted_neighbour_lets_go_of_its_networks() {
+        let mut n = template("flat");
+        let (first, _) = n.import_companion(SAMPLE).unwrap();
+        // Sent live, then imported from the shared file as well.
+        assert_eq!(n.import_companion(SAMPLE).unwrap().0, 0);
+        assert_eq!(n.points.len(), first);
+        let nb = n.measured_networks().into_iter().find(|m| m.ssid == "Flat-3B").unwrap();
+        let id = n.add_measured_neighbour(&nb.key).unwrap();
+        n.remove_device(id);
+        assert!(n.measured.iter().all(|m| m.1 != id));
+        let again = n.add_measured_neighbour(&nb.key).unwrap();
+        assert_eq!(n.measured.iter().filter(|m| m.0 == nb.key).count(), 1);
+        assert_eq!(n.measured_networks().iter().find(|m| m.key == nb.key).unwrap().dev, Some(again));
     }
 
     #[test]

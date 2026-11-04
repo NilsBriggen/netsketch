@@ -327,6 +327,14 @@ struct Fetch {
 const SPEED_TESTS: [&str; 6] = ["speedtest.net", "fast.com", "speed.cloudflare.com", "nperf.com", "speedof.me", "testmy.net"];
 
 /// Downloads a real page (in a background thread). Sends only a generic client name.
+/// Fingerprint of everything a plan saves.
+fn plan_hash(net: &Network) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(net).unwrap_or_default().hash(&mut h);
+    h.finish()
+}
+
 fn fetch_real(url: &str) -> Result<String, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(15))).build().into();
     let mut r = agent.get(url).header("User-Agent", "NetSketch/0.1 (network simulator)").call().map_err(|e| e.to_string())?;
@@ -399,7 +407,8 @@ struct App {
     compare: Option<(String, Network, Vec<(&'static str, String, String)>)>,
     reading: f32,
     issues: Option<Vec<Issue>>,
-    undo: Vec<Network>,
+    /// Earlier plans, each with the file it belonged to.
+    undo: Vec<(Network, Option<PathBuf>)>,
     issues_at: f64,
     /// Fingerprint of the plan the problem list was made from: in Design an unchanged plan isn't checked again.
     issues_key: u64,
@@ -417,7 +426,7 @@ struct App {
     cov_cache: Option<(i8, f64, Option<plan::Coverage>)>,
     /// Suggested spot for one more access point: storey, position, good share before → after.
     ap_hint: Option<(i8, [f32; 2], f32, f32)>,
-    redo: Vec<Network>,
+    redo: Vec<(Network, Option<PathBuf>)>,
     snap: bool,
     search: String,
     export_pic: Option<PathBuf>,
@@ -434,6 +443,16 @@ struct App {
     hist: HashMap<u32, Vec<(f64, f32, bool)>>,
     last_sample: f64,
     file: Option<PathBuf>,
+    /// Fingerprint of the plan as last opened or saved; a different one means unsaved changes.
+    saved_hash: u64,
+    /// Unsaved changes (checked about once a second), shown as • in the window title.
+    dirty: bool,
+    dirty_at: f64,
+    /// Closing was asked for with unsaved changes: show "Save your changes?".
+    ask_quit: bool,
+    quit_ok: bool,
+    /// When an arrow key last nudged a device: a run of nudges is one undo step.
+    nudged: f64,
     toast: Option<(String, f64)>,
     screenshot: Option<PathBuf>,
     frame: u32,
@@ -514,6 +533,12 @@ impl App {
             hist: HashMap::new(),
             last_sample: 0.0,
             file: None,
+            saved_hash: 0,
+            dirty: false,
+            dirty_at: 0.0,
+            ask_quit: false,
+            quit_ok: false,
+            nudged: 0.0,
             toast: None,
             screenshot,
             frame: 0,
@@ -524,6 +549,11 @@ impl App {
         if let Some(path) = open {
             app.open_path(&cc.egui_ctx, path);
         }
+        // Nothing to undo at start, and the autosave only writes once the plan really changed:
+        // otherwise the start-up plan would replace last session's copy ("Recover last session").
+        app.undo.clear();
+        app.autosave_last = serde_json::to_string(&app.net).unwrap_or_default();
+        app.saved_hash = plan_hash(&app.net);
         app
     }
 
@@ -553,7 +583,8 @@ impl App {
     /// Remembers the plan before a change that removes or rewrites things (Ctrl+Z goes back).
     fn snapshot(&mut self) {
         self.redo.clear();
-        self.undo.push(self.net.clone());
+        // The file goes with each step, so undoing past an Open never lets Ctrl+S write over the other file.
+        self.undo.push((self.net.clone(), self.file.clone()));
         if self.undo.len() > 40 {
             self.undo.remove(0);
         }
@@ -581,10 +612,14 @@ impl App {
 
     fn load(&mut self, mut n: Network) {
         n.sanitize();
-        if !self.net.devices.is_empty() {
+        let p = &self.net;
+        if !(p.devices.is_empty() && p.walls.is_empty() && p.labels.is_empty() && p.points.is_empty() && p.plans.is_empty()) {
             self.snapshot();
         }
         self.net = n;
+        self.saved_hash = plan_hash(&self.net);
+        // The phone link belongs to the plan it was started for.
+        self.phone = None;
         self.issues = None;
         self.heat_cache = None;
         self.ap_hint = None;
@@ -657,23 +692,30 @@ impl App {
 
     // ---------- file handling ----------
 
-    fn save(&mut self, ctx: &egui::Context, ask: bool) {
+    /// Saves to the open file (or asks where, with `ask` or for a new plan); true when it was written.
+    fn save(&mut self, ctx: &egui::Context, ask: bool) -> bool {
         let path = match (&self.file, ask) {
             (Some(p), false) => Some(p.clone()),
-            _ => rfd::FileDialog::new().add_filter("Network plan", &["netplan"]).set_file_name("network.netplan").save_file(),
+            _ => rfd::FileDialog::new().add_filter(tr("Network plan"), &["netplan"]).set_file_name("network.netplan").save_file(),
         };
-        let Some(path) = path else { return };
+        let Some(path) = path else { return false };
         match serde_json::to_string_pretty(&self.net).map_err(|e| e.to_string()).and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string())) {
             Ok(()) => {
                 self.say(ctx, trf("Saved {}", &[&(path.display())]));
                 self.file = Some(path);
+                self.saved_hash = plan_hash(&self.net);
+                self.dirty = false;
+                true
             }
-            Err(e) => self.say(ctx, trf("Couldn't save: {}", &[&e])),
+            Err(e) => {
+                self.say(ctx, trf("Couldn't save: {}", &[&e]));
+                false
+            }
         }
     }
 
     fn open(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Network plan", &["netplan", "json", "fls"]).add_filter("Older .fls project", &["fls"]).pick_file() else { return };
+        let Some(path) = rfd::FileDialog::new().add_filter(tr("Network plan"), &["netplan", "json", "fls"]).add_filter(tr("Older .fls project"), &["fls"]).pick_file() else { return };
         self.open_path(ctx, path);
     }
 
@@ -683,7 +725,7 @@ impl App {
             match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| fls::import(&b)) {
                 Ok((mut n, skipped)) => {
                     n.title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n.title);
-                    let msg = trf("Imported {} devices and {} connections{}. Save keeps it as a new plan; the .fls file is left untouched.", &[&(n.devices.len()), &(n.links.len()), &(if skipped > 0 { format!(" ({skipped} connections couldn't be brought over)") } else { String::new() })]);
+                    let msg = trf("Imported {} devices and {} connections{}. Save keeps it as a new plan; the .fls file is left untouched.", &[&(n.devices.len()), &(n.links.len()), &(if skipped > 0 { format!(" ({})", trf("{} connections couldn't be brought over", &[&skipped])) } else { String::new() })]);
                     self.load(n);
                     self.say(ctx, msg);
                     // Never write our format over the old project.
@@ -693,14 +735,44 @@ impl App {
             }
             return;
         }
-        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| serde_json::from_str::<Network>(&s).map_err(|e| e.to_string())) {
+        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Network::from_json(&s)) {
             Ok(n) => {
                 let newer = n.version > net::FORMAT;
                 self.load(n);
-                self.say(ctx, if newer { trf("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", &[&(path.display())]) } else { format!("Opened {}", path.display()) });
+                self.say(ctx, if newer { trf("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", &[&(path.display())]) } else { trf("Opened {}", &[&(path.display())]) });
                 self.file = Some(path);
             }
             Err(e) => self.say(ctx, trf("Couldn't open that file: {}", &[&e])),
+        }
+    }
+
+    /// "Save your changes?" when the window is closed with unsaved changes.
+    fn quit_dialog(&mut self, ctx: &egui::Context) {
+        let mut quit = false;
+        egui::Modal::new(Id::new("quit")).show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.heading(tr("Save your changes?"));
+            ui.label(trf("\"{}\" has changes that aren't saved yet.", &[&self.net.title]));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new(tr("Save")).strong()).clicked() && self.save(ctx, false) {
+                    quit = true;
+                }
+                if ui.button(tr("Don't save")).on_hover_text(tr("New → Recover last session still brings it back")).clicked() {
+                    // Keep the latest state as the recovery copy.
+                    self.autosave_at = f64::MIN;
+                    self.autosave(ctx);
+                    quit = true;
+                }
+                if ui.button(tr("Cancel")).clicked() {
+                    self.ask_quit = false;
+                }
+            });
+        });
+        if quit {
+            self.ask_quit = false;
+            self.quit_ok = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -816,6 +888,9 @@ impl App {
                 if ui.button(lab(ic::FLOPPY_DISK, tr("Save"))).on_hover_text(tr("Save (Ctrl+S)")).clicked() {
                     self.save(&ctx, false);
                 }
+                if ui.button(ic::FLOPPY_DISK_BACK).on_hover_text(tr("Save as a new file (Ctrl+Shift+S)")).clicked() {
+                    self.save(&ctx, true);
+                }
                 if ui.button(lab(ic::FOLDER_OPEN, tr("Open"))).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O)")).clicked() {
                     self.open(&ctx);
                 }
@@ -828,11 +903,15 @@ impl App {
                 ui.menu_button(lab(ic::FILE_PLUS, tr("New")), |ui| {
                     ui.set_min_width(340.0);
                     if Self::autosave_path().exists() && ui.button(RichText::new(format!("{}  {}", ic::CLOCK_COUNTER_CLOCKWISE, tr("Recover last session"))).strong()).on_hover_text(tr("The plan as it was at the last automatic save")).clicked() {
-                        if let Some(n) = std::fs::read_to_string(Self::autosave_path()).ok().and_then(|t| serde_json::from_str::<Network>(&t).ok()) {
-                            self.load(n);
-                            // A recovered copy must not overwrite whatever file was open before.
-                            self.file = None;
-                            self.mode = Mode::Design;
+                        match std::fs::read_to_string(Self::autosave_path()).map_err(|e| e.to_string()).and_then(|t| Network::from_json(&t)) {
+                            Ok(n) => {
+                                self.load(n);
+                                // A recovered copy must not overwrite whatever file was open before, and it isn't saved yet.
+                                self.file = None;
+                                self.saved_hash = 0;
+                                self.mode = Mode::Design;
+                            }
+                            Err(e) => self.say(&ctx, trf("Couldn't read the automatic save: {}", &[&e])),
                         }
                         ui.close();
                     }
@@ -1503,14 +1582,14 @@ impl App {
 
     fn undo_once(&mut self, ctx: &egui::Context) {
         match self.undo.pop() {
-            Some(n) => {
-                self.redo.push(std::mem::replace(&mut self.net, n));
+            Some((n, f)) => {
+                self.redo.push((std::mem::replace(&mut self.net, n), std::mem::replace(&mut self.file, f)));
                 self.sel = Sel::None;
                 self.connect_from = None;
                 self.ap_hint = None;
                 self.heat_cache = None;
                 self.issues = None;
-                self.say(ctx, "Undone.");
+                self.say(ctx, tr("Undone."));
             }
             None => self.say(ctx, tr("Nothing to undo.")),
         }
@@ -1518,14 +1597,14 @@ impl App {
 
     fn redo_once(&mut self, ctx: &egui::Context) {
         match self.redo.pop() {
-            Some(n) => {
-                self.undo.push(std::mem::replace(&mut self.net, n));
+            Some((n, f)) => {
+                self.undo.push((std::mem::replace(&mut self.net, n), std::mem::replace(&mut self.file, f)));
                 self.sel = Sel::None;
                 self.connect_from = None;
                 self.ap_hint = None;
                 self.heat_cache = None;
                 self.issues = None;
-                self.say(ctx, "Redone.");
+                self.say(ctx, tr("Redone."));
             }
             None => self.say(ctx, tr("Nothing to redo.")),
         }
@@ -1957,6 +2036,9 @@ impl App {
                         ui.selectable_value(&mut l.kit, k.title(), trf("{} — {}, ≈ {} Mbit/s up close", &[&(k.title()), &k.standard, &format!("{:.0}", k.real_mbps)])).on_hover_text(trf("{}\n{}\nSpecs from {}", &[&(k.summary()), &k.note, &k.source]));
                     }
                 });
+                if l.kit != old.kit {
+                    self.before = Some(Before::Link(old.clone()));
+                }
                 ui.end_row();
             }
             ui.label(RichText::new(tr("Length")).color(pal().dim));
@@ -1979,6 +2061,7 @@ impl App {
                         route = true;
                     }
                     if !l.path.is_empty() && ui.small_button(tr("Straight")).on_hover_text(tr("Forget the drawn route")).clicked() {
+                        self.before = Some(Before::Link(old.clone()));
                         l.path.clear();
                     }
                 });
@@ -2838,7 +2921,11 @@ impl eframe::App for App {
             let step = PX_PER_M / 4.0;
             let d = ctx.input(|i| [(egui::Key::ArrowLeft, [-step, 0.0]), (egui::Key::ArrowRight, [step, 0.0]), (egui::Key::ArrowUp, [0.0, -step]), (egui::Key::ArrowDown, [0.0, step])].into_iter().filter(|(k, _)| i.key_pressed(*k)).map(|x| x.1).next());
             if let Some([dx, dy]) = d {
-                self.snapshot();
+                let now = Self::now(&ctx);
+                if now - self.nudged > 1.0 {
+                    self.snapshot();
+                }
+                self.nudged = now;
                 if let Some(dev) = self.net.dev_mut(id) {
                     dev.pos = [dev.pos[0] + dx, dev.pos[1] + dy];
                 }
@@ -2875,7 +2962,15 @@ impl eframe::App for App {
         self.net.clock = Self::now(&ctx);
         self.net.live = false;
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
-            self.save(&ctx, false);
+            let again = ctx.input(|i| i.modifiers.shift);
+            self.save(&ctx, again);
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+            self.load(net::template("blank"));
+            self.file = None;
+            if self.mode == Mode::Learn {
+                self.mode = Mode::Design;
+            }
         }
         if !typing && self.mode == Mode::Design && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
             if let Sel::Dev(id) = self.sel {
@@ -2887,10 +2982,23 @@ impl eframe::App for App {
         }
         self.autosave(&ctx);
         self.phone_tick(&ctx);
-        // The window title names the plan (and its file).
+        if Self::now(&ctx) - self.dirty_at > 1.0 {
+            self.dirty_at = Self::now(&ctx);
+            self.dirty = plan_hash(&self.net) != self.saved_hash;
+        }
+        // Closing with unsaved changes asks first (the screenshot mode closes by itself).
+        if ctx.input(|i| i.viewport().close_requested()) && self.screenshot.is_none() && !self.quit_ok && plan_hash(&self.net) != self.saved_hash {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.ask_quit = true;
+        }
+        if self.ask_quit {
+            self.quit_dialog(&ctx);
+        }
+        // The window title names the plan (and its file); • means unsaved changes.
+        let mark = if self.dirty { "• " } else { "" };
         let title = match &self.file {
-            Some(f) => format!("{} — {} — NetSketch", self.net.title, f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-            None => format!("{} — NetSketch", self.net.title),
+            Some(f) => format!("{mark}{} — {} — NetSketch", self.net.title, f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            None => format!("{mark}{} — NetSketch", self.net.title),
         };
         if title != self.shown_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -2910,10 +3018,7 @@ impl eframe::App for App {
         let due = self.issues_at + 0.3 <= now || self.issues.is_none();
         // Simulate moves things that aren't saved (walks, roaming), so it always refreshes; Design only after an edit.
         let key = if due && self.mode != Mode::Simulate {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            serde_json::to_vec(&self.net).unwrap_or_default().hash(&mut h);
-            h.finish()
+            plan_hash(&self.net)
         } else {
             0
         };
