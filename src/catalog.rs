@@ -9,6 +9,9 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
+    /// The box that connects a home or office to the internet: ISP boxes, Wi-Fi routers, gateways and firewalls.
+    Home,
+    /// A general-purpose wired router whose every port can be its own network.
     Router,
     Mesh,
     Extender,
@@ -24,7 +27,7 @@ pub struct Product {
     pub brand: String,
     /// As sold, without the brand.
     pub name: String,
-    /// router: routes, with Wi-Fi (ISP boxes too); mesh: a mesh node that can also be the main router;
+    /// home: a home router (see Role::Home); router: a plain router; mesh: a mesh node that can also be the main router;
     /// extender: repeater, booster or satellite-only mesh node; ap: access point without routing (ceiling/wall, usually PoE).
     pub role: Role,
     /// Launch year.
@@ -82,10 +85,10 @@ impl Product {
     pub fn fits(&self, k: Kind) -> bool {
         let radio = self.bands.iter().any(|b| *b);
         match k {
-            Kind::HomeRouter => matches!(self.role, Role::Router | Role::Mesh),
-            // A plain router has no Wi-Fi settings: only wired routers and firewalls.
-            Kind::Router => self.role == Role::Router && !radio,
-            Kind::Neighbor => radio && matches!(self.role, Role::Router | Role::Mesh),
+            // A plain router can also be the internet router; a home router isn't a plain one.
+            Kind::HomeRouter => matches!(self.role, Role::Home | Role::Router | Role::Mesh),
+            Kind::Router => self.role == Role::Router,
+            Kind::Neighbor => radio && matches!(self.role, Role::Home | Role::Mesh),
             Kind::Extender => matches!(self.role, Role::Extender | Role::Mesh),
             Kind::AccessPoint => radio,
             _ => false,
@@ -246,7 +249,9 @@ mod tests {
             assert!(p.source.starts_with("http"), "{t}: no source");
             assert!((1..=4).contains(&p.streams), "{t}: streams");
             assert!((2005..=2027).contains(&p.year), "{t}: year");
-            assert!(p.bands.iter().any(|b| *b) || (p.role == Role::Router && p.note.starts_with("No Wi-Fi")), "{t}: no radio");
+            assert!(p.bands.iter().any(|b| *b) || (matches!(p.role, Role::Home | Role::Router) && p.note.starts_with("No Wi-Fi")), "{t}: no radio");
+            // A plain router has no Wi-Fi settings.
+            assert!(p.role != Role::Router || !p.bands.iter().any(|b| *b), "{t}: a plain router with Wi-Fi is a home router");
             for i in 0..3 {
                 let max = p.wifi.max_width(i);
                 assert_eq!(p.bands[i], p.width[i] > 0, "{t}: band {i} on/off and width disagree");
@@ -262,7 +267,7 @@ mod tests {
             }
         }
         assert!(all.iter().filter(|p| p.brand == "Swisscom").count() >= 10, "all Swisscom boxes and boosters");
-        for r in [Role::Router, Role::Mesh, Role::Extender, Role::Ap, Role::Bridge] {
+        for r in [Role::Home, Role::Router, Role::Mesh, Role::Extender, Role::Ap, Role::Bridge] {
             assert!(all.iter().any(|p| p.role == r), "{r:?}");
         }
     }
@@ -298,7 +303,8 @@ mod tests {
         b.apply(n.dev_mut(ap).unwrap());
         assert_eq!(n.dev(ap).unwrap().beam, b.beam);
         let wired = search(Kind::Router, "");
-        assert!(wired.len() >= 10 && wired.iter().all(|p| p.bands.iter().all(|x| !x)), "only wired routers for a plain router");
+        assert!(wired.len() >= 5 && wired.iter().all(|p| p.role == Role::Router), "only plain routers for a plain router");
+        assert!(!wired.iter().any(|p| p.brand == "Swisscom" || p.brand == "Firewalla"), "home gateways belong to the home router");
         assert!(search(Kind::HomeRouter, "").iter().any(|p| p.note.starts_with("No Wi-Fi")), "a gateway without Wi-Fi can be the home router");
     }
 
@@ -353,7 +359,7 @@ mod tests {
         assert!(!search(Kind::Extender, "wlan-box SWISSCOM").is_empty());
         assert!(search(Kind::AccessPoint, "").iter().all(|p| p.bands.iter().any(|b| *b)), "an access point needs a radio");
         assert!(search(Kind::Extender, "").iter().all(|p| matches!(p.role, Role::Extender | Role::Mesh)));
-        assert!(search(Kind::HomeRouter, "").iter().all(|p| matches!(p.role, Role::Router | Role::Mesh)));
+        assert!(search(Kind::HomeRouter, "").iter().all(|p| matches!(p.role, Role::Home | Role::Router | Role::Mesh)));
         assert!(search(Kind::Laptop, "").is_empty());
         assert!(search(Kind::AccessPoint, "no such product xyz").is_empty());
     }

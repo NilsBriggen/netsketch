@@ -19,7 +19,7 @@ A built-in catalog fills in the radio, ports, power draw and price in one click:
 
 | | |
 |---|---|
-| **287 devices** from 25 brands | Routers, mesh systems, range extenders, ceiling access points, outdoor point-to-point bridges and wired gateways/firewalls |
+| **287 devices** from 25 brands | Home routers, gateways and firewalls, mesh systems, range extenders, ceiling access points, outdoor point-to-point bridges and plain wired routers |
 | **Swiss providers** | All 21 Swisscom routers and WLAN-Boxes from Centro Grande to Internet-Box 5 Pro, plus 25 boxes from Sunrise, Salt and Quickline |
 | **Popular brands** | AVM FRITZ!, TP-Link (Archer, Deco, Omada), Netgear (Nighthawk, Orbi), ASUS, Ubiquiti UniFi, eero, Google, Linksys, devolo, MikroTik and more |
 | **56 internet plans** | Current plans from Swisscom, Init7, Sunrise, Salt, Quickline, iWay, Wingo, M-Budget, yallo and Teleboy |
@@ -90,7 +90,7 @@ A ready-built `NetSketch-Survey.apk` is in that folder, and [`INSTALL.txt`](comp
 
 The catalog is plain JSON in [`data/`](data/):
 
-- `devices.json`: routers, mesh nodes, extenders, access points, bridges and gateways.
+- `devices.json`: home routers and gateways, plain routers, mesh nodes, extenders, access points and bridges.
 - `plans.json`: internet plans.
 - `powerline.json`: powerline kits.
 
