@@ -30,6 +30,9 @@ pub enum Fix {
 
 impl Fix {
     pub fn label(&self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(&self) -> &'static str {
         match self {
             Fix::Priority(..) => "Make it the root",
             Fix::EnableStp(_) => "Turn on spanning tree",
@@ -78,7 +81,7 @@ impl Network {
                 Level::Error,
                 None,
                 Some(*id),
-                format!("Loop between {} and {} and nothing runs spanning tree: broadcasts circle forever (broadcast storm) and the whole network stops.", self.name(l.a), self.name(l.b)),
+                crate::i18n::trf("Loop between {} and {} and nothing runs spanning tree: broadcasts circle forever (broadcast storm) and the whole network stops.", &[&(self.name(l.a)), &(self.name(l.b))]),
                 Some(sw.map(Fix::EnableStp).unwrap_or(Fix::Unplug(*id))),
             ));
         }
@@ -101,24 +104,19 @@ impl Network {
                     {
                         let mesh = self.links.iter().filter(|m| m.medium == Medium::Mesh && !stp.blocked.contains(&m.id)).map(|m| self.link_rate(m)).fold(f32::MAX, f32::min);
                         let (prio, mac) = self.bridge_id(root.id);
-                        format!(
-                            "{} won the spanning-tree election (priority {prio}, lowest MAC {mac}). It counts its 100 Mbit ports and its mesh on the old short cost scale, so the path through the speakers looks cheaper than your cable: the cable {}–{} is on standby and traffic crosses the speakers' mesh (≈ {mesh:.0} Mbit/s right now). Make your main switch the root (priority 4096).",
-                            root.name,
-                            self.name(l.a),
-                            self.name(l.b)
-                        )
+                        crate::i18n::trf("{} won the spanning-tree election (priority {}, lowest MAC {}). It counts its 100 Mbit ports and its mesh on the old short cost scale, so the path through the speakers looks cheaper than your cable: the cable {}–{} is on standby and traffic crosses the speakers' mesh (≈ {} Mbit/s right now). Make your main switch the root (priority 4096).", &[&root.name, &prio, &mac, &(self.name(l.a)), &(self.name(l.b)), &format!("{:.0}", mesh)])
                     },
                     fix,
                 ));
             } else if root.kind == Kind::Speaker && self.devices.iter().any(|d| d.kind == Kind::Switch) {
-                v.push(issue(Level::Warning, Some(root.id), None, format!("{} is the spanning-tree root. It works today, but the root should be your main switch — give that priority 4096.", root.name), fix));
+                v.push(issue(Level::Warning, Some(root.id), None, crate::i18n::trf("{} is the spanning-tree root. It works today, but the root should be your main switch — give that priority 4096.", &[&root.name]), fix));
             } else if fix.is_some() && root.priority == 32768 && self.devices.iter().filter(|d| d.kind == Kind::Switch && d.stp).count() >= 3 {
                 // With default priorities, the oldest switch (lowest MAC) runs the tree — often a closet switch.
-                v.push(issue(Level::Tip, Some(root.id), None, format!("{} became the spanning-tree root by its MAC address, not by design. Make the central switch the root so paths stay short.", root.name), fix));
+                v.push(issue(Level::Tip, Some(root.id), None, crate::i18n::trf("{} became the spanning-tree root by its MAC address, not by design. Make the central switch the root so paths stay short.", &[&root.name]), fix));
             }
             for id in stp.blocked.iter().filter(|id| !hijacked.contains(id)) {
                 let l = self.links.iter().find(|l| l.id == *id).unwrap();
-                v.push(issue(Level::Tip, None, Some(*id), format!("Spanning tree keeps {}–{} on standby as a backup path (root: {}).", self.name(l.a), self.name(l.b), root.name), None));
+                v.push(issue(Level::Tip, None, Some(*id), crate::i18n::trf("Spanning tree keeps {}–{} on standby as a backup path (root: {}).", &[&(self.name(l.a)), &(self.name(l.b)), &root.name]), None));
             }
         }
 
@@ -130,9 +128,9 @@ impl Network {
             let walls = if s.walls > 0 { format!(" through {} wall(s)", s.walls) } else { String::new() };
             if !s.alive() {
                 let text = if s.rssi >= crate::wifi::floor(s.band) {
-                    format!("{} hears {} ({:.0} dBm) but its answer doesn't make it back ({:.0} dBm): the router shouts, the device whispers. More router power won't help — move closer or add an access point.", cl.name, ap.name, s.rssi, s.up)
+                    crate::i18n::trf("{} hears {} ({} dBm) but its answer doesn't make it back ({} dBm): the router shouts, the device whispers. More router power won't help — move closer or add an access point.", &[&cl.name, &ap.name, &format!("{:.0}", s.rssi), &format!("{:.0}", s.up)])
                 } else {
-                    format!("{} can't hear {} at all ({:.0} dBm{walls}). Move it, or add an access point on this side.", cl.name, ap.name, s.rssi)
+                    crate::i18n::trf("{} can't hear {} at all ({} dBm{}). Move it, or add an access point on this side.", &[&cl.name, &ap.name, &format!("{:.0}", s.rssi), &walls])
                 };
                 let other = self.roam_candidates(cl, Network::joined(cl, ap)).iter().any(|c| c.0 != ap.id);
                 v.push(issue(Level::Error, Some(cl.id), Some(l.id), text, other.then_some(Fix::Reconnect(cl.id))));
@@ -140,17 +138,17 @@ impl Network {
             }
             let hidden = self.hidden(l);
             if !hidden.is_empty() && hidden_pairs.insert((cl.id.min(hidden[0]), cl.id.max(hidden[0]))) {
-                v.push(issue(Level::Tip, Some(cl.id), Some(l.id), format!("{} and {} both talk to {} but can't hear each other (walls between them): they send at the same time and collide. Another access point closer to one of them, or fewer walls in between, avoids it.", cl.name, self.name(hidden[0]), ap.name), None));
+                v.push(issue(Level::Tip, Some(cl.id), Some(l.id), crate::i18n::trf("{} and {} both talk to {} but can't hear each other (walls between them): they send at the same time and collide. Another access point closer to one of them, or fewer walls in between, avoids it.", &[&cl.name, &(self.name(hidden[0])), &ap.name]), None));
             }
             if s.band == Band::B24 && !ap.band_steer && cl.bands[1] && ap.bands[1] {
-                v.push(issue(Level::Tip, Some(cl.id), Some(l.id), format!("{} sits on 2.4 GHz because it's the loudest band. With band steering on {} it would move to 5 GHz and get more speed.", cl.name, ap.name), None));
+                v.push(issue(Level::Tip, Some(cl.id), Some(l.id), crate::i18n::trf("{} sits on 2.4 GHz because it's the loudest band. With band steering on {} it would move to 5 GHz and get more speed.", &[&cl.name, &ap.name]), None));
             }
             if cl.kind == Kind::Extender {
                 if s.rssi < -70.0 {
-                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), format!("{} hears {} at only {:.0} dBm{walls}. It can only pass on what it receives, then halves it: place it halfway, where the signal is still good — or run a cable to a real access point.", cl.name, ap.name, s.rssi), None));
+                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} hears {} at only {} dBm{}. It can only pass on what it receives, then halves it: place it halfway, where the signal is still good — or run a cable to a real access point.", &[&cl.name, &ap.name, &format!("{:.0}", s.rssi), &walls]), None));
                 }
                 if cl.ssid != ap.ssid {
-                    v.push(issue(Level::Tip, Some(cl.id), None, format!("{} uses its own name '{}'. Devices won't roam between it and '{}', so they cling to whichever they joined until the signal dies.", cl.name, cl.ssid, ap.ssid), Some(Fix::SameSsid(cl.id, ap.ssid.clone()))));
+                    v.push(issue(Level::Tip, Some(cl.id), None, crate::i18n::trf("{} uses its own name '{}'. Devices won't roam between it and '{}', so they cling to whichever they joined until the signal dies.", &[&cl.name, &cl.ssid, &ap.ssid]), Some(Fix::SameSsid(cl.id, ap.ssid.clone()))));
                 }
                 continue;
             }
@@ -158,26 +156,26 @@ impl Network {
                 continue;
             }
             if s.rssi < -75.0 {
-                v.push(issue(Level::Warning, Some(cl.id), Some(l.id), format!("{} gets a {} signal from {} ({:.0} dBm{walls}): ≈ {:.0} Mbit/s and dropouts.", cl.name, s.quality(), ap.name, s.rssi, s.mbps), None));
+                v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} gets a {} signal from {} ({} dBm{}): ≈ {} Mbit/s and dropouts.", &[&cl.name, &(s.quality()), &ap.name, &format!("{:.0}", s.rssi), &walls, &format!("{:.0}", s.mbps)]), None));
             }
             let now = self.rssi_at(ap, cl.pos, cl.floor, Band::B5);
             if let Some((best, rssi)) = self.roam_candidates(cl, Network::joined(cl, ap)).into_iter().find(|c| c.0 != ap.id) {
                 let best_d = self.dev(best).unwrap();
                 if ap.kind == Kind::Extender && rssi >= now - 3.0 && best_d.kind != Kind::Extender {
-                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), format!("{} goes through {} although {} is just as strong. Through an extender every packet crosses the air twice: half the speed.", cl.name, ap.name, best_d.name), Some(Fix::Reconnect(cl.id))));
+                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} goes through {} although {} is just as strong. Through an extender every packet crosses the air twice: half the speed.", &[&cl.name, &ap.name, &best_d.name]), Some(Fix::Reconnect(cl.id))));
                 } else if rssi > now + 10.0 {
-                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), format!("{} sticks to {} ({:.0} dBm) while {} offers {:.0} dBm — a 'sticky client'. 802.11k/v/r helps devices move on in time.", cl.name, ap.name, now, best_d.name, rssi), Some(Fix::Reconnect(cl.id))));
+                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} sticks to {} ({} dBm) while {} offers {} dBm — a 'sticky client'. 802.11k/v/r helps devices move on in time.", &[&cl.name, &ap.name, &format!("{:.0}", now), &best_d.name, &format!("{:.0}", rssi)]), Some(Fix::Reconnect(cl.id))));
                 }
             }
             // A stronger access point of yours under another name: devices never switch by themselves.
             if let Some(o) = self.devices.iter().filter(|o| o.kind.radio() && o.id != ap.id && o.ssid != ap.ssid).max_by(|a, b| self.best_rssi(a, cl.pos, cl.floor).total_cmp(&self.best_rssi(b, cl.pos, cl.floor))) {
                 if self.best_rssi(o, cl.pos, cl.floor) > now + 6.0 {
                     let fix = (ap.kind == Kind::Extender).then(|| Fix::SameSsid(ap.id, o.ssid.clone()));
-                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), format!("{} is on '{}' via {} although {} ('{}') is much stronger here. Different network names: devices never switch by themselves.", cl.name, ap.ssid, ap.name, o.name, o.ssid), fix));
+                    v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} is on '{}' via {} although {} ('{}') is much stronger here. Different network names: devices never switch by themselves.", &[&cl.name, &ap.ssid, &ap.name, &o.name, &o.ssid]), fix));
                 }
             }
             if cl.kind == Kind::Console {
-                v.push(issue(Level::Tip, Some(cl.id), Some(l.id), format!("{} plays on Wi-Fi: lag spikes come from retries and shared airtime. A cable gives stable latency.", cl.name), None));
+                v.push(issue(Level::Tip, Some(cl.id), Some(l.id), crate::i18n::trf("{} plays on Wi-Fi: lag spikes come from retries and shared airtime. A cable gives stable latency.", &[&cl.name]), None));
             }
         }
         // Radios that actually send (a firewall box with Wi-Fi switched off doesn't count).
@@ -188,50 +186,50 @@ impl Network {
             for b in Band::ALL.into_iter().filter(|b| r.bands[b.i()]) {
                 let (ch, w) = (r.ch[b.i()], r.width[b.i()]);
                 if r.tx[b.i()] > b.eirp_limit(ch) + 0.01 {
-                    v.push(issue(Level::Tip, Some(r.id), None, format!("{}: {:.0} dBm on {} is above the EU limit of {:.0} dBm. It also doesn't help phones answer back.", r.name, r.tx[b.i()], b.label(), b.eirp_limit(ch)), None));
+                    v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{}: {} dBm on {} is above the EU limit of {} dBm. It also doesn't help phones answer back.", &[&r.name, &format!("{:.0}", r.tx[b.i()]), &(b.label()), &format!("{:.0}", b.eirp_limit(ch))]), None));
                 }
                 if w > r.wifi.max_width(b.i()) {
-                    v.push(issue(Level::Warning, Some(r.id), None, format!("{}: {} can't use {w} MHz on {} (max {} MHz).", r.name, r.wifi.label(), b.label(), r.wifi.max_width(b.i())), None));
+                    v.push(issue(Level::Warning, Some(r.id), None, crate::i18n::trf("{}: {} can't use {} MHz on {} (max {} MHz).", &[&r.name, &(r.wifi.label()), &w, &(b.label()), &(r.wifi.max_width(b.i()))]), None));
                 }
                 if b != Band::B24 && !b.channels(w).contains(&ch) {
-                    v.push(issue(Level::Warning, Some(r.id), None, format!("{}: channel {ch} doesn't fit a {w} MHz block on {} — pick one from the list.", r.name, b.label()), Some(Fix::AutoChannels)));
+                    v.push(issue(Level::Warning, Some(r.id), None, crate::i18n::trf("{}: channel {} doesn't fit a {} MHz block on {} — pick one from the list.", &[&r.name, &ch, &w, &(b.label())]), Some(Fix::AutoChannels)));
                 }
                 if crate::wifi::dfs(b, ch, w) && r.kind != Kind::Neighbor {
-                    v.push(issue(Level::Tip, Some(r.id), None, format!("{} uses radar (DFS) channel {ch}: it must listen for a minute before sending and may jump away if radar shows up.", r.name), None));
+                    v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{} uses radar (DFS) channel {}: it must listen for a minute before sending and may jump away if radar shows up.", &[&r.name, &ch]), None));
                 }
                 if b == Band::B24 && w >= 40 {
-                    v.push(issue(Level::Tip, Some(r.id), None, format!("{} uses 40 MHz on 2.4 GHz: that's two of the three free channels — neighbours suffer and so do you.", r.name), None));
+                    v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{} uses 40 MHz on 2.4 GHz: that's two of the three free channels — neighbours suffer and so do you.", &[&r.name]), None));
                 }
             }
             if r.kind == Kind::Extender && r.wifi == crate::net::WifiStd::Wifi5 && !r.backhaul {
-                v.push(issue(Level::Tip, Some(r.id), None, format!("{} has one radio: it receives and repeats on the same channel. A mesh node with its own backhaul radio — or a cable — avoids the halving.", r.name), None));
+                v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{} has one radio: it receives and repeats on the same channel. A mesh node with its own backhaul radio — or a cable — avoids the halving.", &[&r.name]), None));
             }
         }
         for r in &radios {
             if r.bands[0] && !CH24.contains(&r.ch[0]) {
-                v.push(issue(Level::Tip, Some(r.id), None, format!("{} uses 2.4 GHz channel {}. Only 1, 6 and 11 (or 1, 5, 9 and 13 in Europe) don't overlap; in-between channels collide with two neighbours at once.", r.name, r.ch[0]), Some(Fix::AutoChannels)));
+                v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{} uses 2.4 GHz channel {}. Only 1, 6 and 11 (or 1, 5, 9 and 13 in Europe) don't overlap; in-between channels collide with two neighbours at once.", &[&r.name, &(r.ch[0])]), Some(Fix::AutoChannels)));
             }
             for band in Band::ALL.into_iter().filter(|b| r.bands[*b as usize]) {
                 let (c, who) = self.contention(r, band);
                 if c > 1.35 {
                     let (noise, nets): (Vec<u32>, Vec<u32>) = who.iter().partition(|w| self.dev(**w).is_some_and(|d| d.kind == Kind::Interference));
                     let names = |ids: &[u32]| ids.iter().map(|w| self.name(*w)).collect::<Vec<_>>().join(", ");
-                    let mut text = format!("{} only gets about {:.0}% of the airtime on {} channel {}", r.name, 100.0 / c, band.label(), self.channel(r, band));
+                    let mut text = crate::i18n::trf("{} only gets about {}% of the airtime on {} channel {}", &[&r.name, &format!("{:.0}", 100.0 / c), &(band.label()), &(self.channel(r, band))]);
                     if !nets.is_empty() {
-                        text += &format!(": it takes turns with {}", names(&nets));
+                        text += &crate::i18n::trf(": it takes turns with {}", &[&(names(&nets))]);
                     }
                     if !noise.is_empty() {
-                        text += &format!("{} {} disturbs it without waiting its turn — move it away, or use 5 GHz nearby", if nets.is_empty() { ":" } else { ";" }, names(&noise));
+                        text += &crate::i18n::trf("{} {} disturbs it without waiting its turn — move it away, or use 5 GHz nearby", &[&(if nets.is_empty() { ":" } else { ";" }), &(names(&noise))]);
                     }
                     v.push(issue(Level::Warning, Some(r.id), None, text + ".", Some(Fix::AutoChannels)));
                 }
             }
         }
         if radios.len() > 1 && radios.iter().any(|r| !r.fast_roam) && self.devices.iter().any(|d| matches!(d.kind, Kind::Phone | Kind::Laptop)) {
-            v.push(issue(Level::Tip, None, None, "Several access points but fast roaming (802.11k/v/r) is off: phones hang on to a far access point and calls stutter when they finally switch.".into(), Some(Fix::FastRoamEverywhere)));
+            v.push(issue(Level::Tip, None, None, crate::i18n::tr("Several access points but fast roaming (802.11k/v/r) is off: phones hang on to a far access point and calls stutter when they finally switch.").into(), Some(Fix::FastRoamEverywhere)));
         }
         for d in self.devices.iter().filter(|d| d.kind.radio() && d.bands.iter().any(|b| *b) && matches!(d.security, Security::Open | Security::Wep)) {
-            v.push(issue(Level::Tip, Some(d.id), None, format!("One click moves {} to WPA3.", d.name), Some(Fix::Wpa3(d.id))));
+            v.push(issue(Level::Tip, Some(d.id), None, crate::i18n::trf("One click moves {} to WPA3.", &[&d.name]), Some(Fix::Wpa3(d.id))));
         }
 
         // --- Power over Ethernet ---
@@ -270,11 +268,11 @@ impl Network {
                     Some(l.id),
                     format!(
                         "{} {}–{} is {:.0}% full ({} share ≈ {:.0} Mbit/s).{}",
-                        if (18.0..23.5).contains(&self.hour) { format!("At the busy hour ({})", crate::more::clock(self.hour)) } else { format!("At {}", crate::more::clock(self.hour)) },
+                        if (18.0..23.5).contains(&self.hour) { crate::i18n::trf("At the busy hour ({})", &[&(crate::more::clock(self.hour))]) } else { format!("At {}", crate::more::clock(self.hour)) },
                         self.name(l.a),
                         self.name(l.b),
                         u * 100.0,
-                        if who == 1 { "one device's apps".to_string() } else { format!("{who} devices' apps") },
+                        if who == 1 { crate::i18n::tr("one device's apps").to_string() } else { format!("{who} devices' apps") },
                         self.link_rate(l),
                         match (sensitive, self.sqm_on(l)) {
                             (_, true) => " Smart queueing keeps the delay low; more speed needs a faster plan or fewer heavy apps.",
@@ -289,14 +287,14 @@ impl Network {
         for ap in self.devices.iter().filter(|d| d.kind.radio()) {
             let air = self.airtime(&load, ap.id);
             if air > 0.8 {
-                v.push(issue(Level::Warning, Some(ap.id), None, format!("{}'s Wi-Fi needs {:.0}% of the airtime at the busy hour. Slow, far-away devices use the most — move them closer, wire them, or add an access point.", ap.name, air * 100.0), None));
+                v.push(issue(Level::Warning, Some(ap.id), None, crate::i18n::trf("{}'s Wi-Fi needs {}% of the airtime at the busy hour. Slow, far-away devices use the most — move them closer, wire them, or add an access point.", &[&ap.name, &format!("{:.0}", air * 100.0)]), None));
             }
         }
 
         // --- Running on the mobile backup ---
         for l in self.links.iter().filter(|l| l.medium == Medium::Cellular) {
             if self.link_ok(l) && self.link_between(l.a, l.b).is_some_and(|m| m.id == l.id) {
-                v.push(issue(Level::Tip, None, Some(l.id), format!("The main internet line is down: {} runs on its mobile backup (≈ 300 Mbit/s down, 50 up, about 30 ms more delay). Calls and browsing keep working.", self.name(if self.dev(l.a).is_some_and(|d| d.kind == Kind::Internet) { l.b } else { l.a })), None));
+                v.push(issue(Level::Tip, None, Some(l.id), crate::i18n::trf("The main internet line is down: {} runs on its mobile backup (≈ 300 Mbit/s down, 50 up, about 30 ms more delay). Calls and browsing keep working.", &[&(self.name(if self.dev(l.a).is_some_and(|d| d.kind == Kind::Internet) { l.b } else { l.a }))]), None));
             }
         }
 
@@ -305,7 +303,7 @@ impl Network {
             if let Some(l) = self.links.iter().find(|l| (l.a == r.id && l.a_if == 1) || (l.b == r.id && l.b_if == 1)) {
                 let up = self.dev(l.other(r.id).0).unwrap();
                 if up.kind != Kind::Internet {
-                    v.push(issue(Level::Warning, Some(r.id), Some(l.id), format!("Double NAT: {} gets its internet through {}'s network, so addresses are translated twice. Port forwarding, some games and calls need extra work — set {} to access-point mode (cable into its LAN port, DHCP off) unless you want a separate network.", r.name, up.name, r.name), None));
+                    v.push(issue(Level::Warning, Some(r.id), Some(l.id), crate::i18n::trf("Double NAT: {} gets its internet through {}'s network, so addresses are translated twice. Port forwarding, some games and calls need extra work — set {} to access-point mode (cable into its LAN port, DHCP off) unless you want a separate network.", &[&r.name, &up.name, &r.name]), None));
                 }
             }
         }
@@ -314,7 +312,7 @@ impl Network {
         for ap in self.devices.iter().filter(|d| d.kind.radio()) {
             let n = self.links.iter().filter(|l| l.medium == Medium::WiFi && self.wifi_ends(l).is_some_and(|(a, c)| a.id == ap.id && !c.kind.radio())).count();
             if n > 30 {
-                v.push(issue(Level::Warning, Some(ap.id), None, format!("{} serves {n} devices. Beyond about 30 active devices an access point spends more time managing turns than sending — add access points and lower their power.", ap.name), None));
+                v.push(issue(Level::Warning, Some(ap.id), None, crate::i18n::trf("{} serves {} devices. Beyond about 30 active devices an access point spends more time managing turns than sending — add access points and lower their power.", &[&ap.name, &n]), None));
             }
         }
 
@@ -322,7 +320,7 @@ impl Network {
         for r in self.devices.iter().filter(|d| d.kind == Kind::Router) {
             let to_inet = self.links.iter().any(|l| (l.a == r.id || l.b == r.id) && self.dev(l.other(r.id).0).is_some_and(|o| o.kind == Kind::Internet));
             if to_inet && r.ifaces.iter().any(|f| f.addr().is_some_and(|(ip, _)| ip.is_private())) {
-                v.push(issue(Level::Error, Some(r.id), None, format!("{} connects private addresses straight to the internet, but a plain router doesn't translate them (NAT). Nothing inside can reach the internet: put a firewall / home router in front.", r.name), None));
+                v.push(issue(Level::Error, Some(r.id), None, crate::i18n::trf("{} connects private addresses straight to the internet, but a plain router doesn't translate them (NAT). Nothing inside can reach the internet: put a firewall / home router in front.", &[&r.name]), None));
             }
         }
 
@@ -330,7 +328,7 @@ impl Network {
         for d in self.devices.iter().filter(|d| !d.kind.is_host() && d.kind != Kind::Internet && d.port_count() > 0) {
             let used = self.links.iter().filter(|l| l.medium.takes_port() && (l.a == d.id || l.b == d.id)).count();
             if used > d.port_count() {
-                v.push(issue(Level::Error, Some(d.id), None, format!("{} has {} ports but {used} cables plugged in. Add a switch or pick a model with more ports.", d.name, d.port_count()), None));
+                v.push(issue(Level::Error, Some(d.id), None, crate::i18n::trf("{} has {} ports but {} cables plugged in. Add a switch or pick a model with more ports.", &[&d.name, &(d.port_count()), &used]), None));
             }
         }
 
@@ -342,9 +340,9 @@ impl Network {
                 let other = self.name(l.other(id).0);
                 // A fibre internet line into an RJ45 WAN port is normal: the provider's fibre box converts it.
                 if l.medium == Medium::Fiber && g.kind == PortKind::Rj45 && !self.internet_end(l, id) {
-                    v.push(issue(Level::Warning, Some(id), Some(l.id), format!("The fibre from {other} ends in {}'s copper {}: that needs a media converter. Pick a model with an SFP port.", d.name, self.port_name(id, p)), None));
+                    v.push(issue(Level::Warning, Some(id), Some(l.id), crate::i18n::trf("The fibre from {} ends in {}'s copper {}: that needs a media converter. Pick a model with an SFP port.", &[&other, &d.name, &(self.port_name(id, p))]), None));
                 } else if l.medium != Medium::Fiber && g.kind == PortKind::Fiber {
-                    v.push(issue(Level::Tip, Some(id), Some(l.id), format!("The cable from {other} goes into {}'s SFP {}: that needs an RJ45 SFP module.", d.name, self.port_name(id, p)), None));
+                    v.push(issue(Level::Tip, Some(id), Some(l.id), crate::i18n::trf("The cable from {} goes into {}'s SFP {}: that needs an RJ45 SFP module.", &[&other, &d.name, &(self.port_name(id, p))]), None));
                 }
                 if let Some(q) = self.faster_free_port(l, id) {
                     v.push(issue(Level::Tip, Some(id), Some(l.id), format!("{other} is in {}'s {} while {} is free.", d.name, self.port_name(id, p), self.port_name(id, q)), Some(Fix::MovePort(l.id, id))));
@@ -355,8 +353,8 @@ impl Network {
         // --- Links that quietly slow things down ---
         for l in &self.links {
             match l.medium {
-                Medium::Cat5 => v.push(issue(Level::Tip, None, Some(l.id), format!("{}–{} is old Cat 5 cable: fine for 1 Gbit/s, nothing faster{}.", self.name(l.a), self.name(l.b), if self.negotiated(l) <= 100 { " — and here an old port runs it at 100 Mbit/s: everything behind it is capped there" } else { "" }), None)),
-                Medium::Powerline => v.push(issue(Level::Tip, None, Some(l.id), format!("Powerline {}–{}: speed depends on the house wiring and drops when appliances run.", self.name(l.a), self.name(l.b)), None)),
+                Medium::Cat5 => v.push(issue(Level::Tip, None, Some(l.id), crate::i18n::trf("{}–{} is old Cat 5 cable: fine for 1 Gbit/s, nothing faster{}.", &[&(self.name(l.a)), &(self.name(l.b)), &(if self.negotiated(l) <= 100 { " — and here an old port runs it at 100 Mbit/s: everything behind it is capped there" } else { "" })]), None)),
+                Medium::Powerline => v.push(issue(Level::Tip, None, Some(l.id), crate::i18n::trf("Powerline {}–{}: speed depends on the house wiring and drops when appliances run.", &[&(self.name(l.a)), &(self.name(l.b))]), None)),
                 _ => {}
             }
         }
@@ -367,12 +365,12 @@ impl Network {
             if d.kind.is_host() {
                 if let Some(f) = d.ifaces.first() {
                     if !(1..=4094).contains(&f.vlan) {
-                        v.push(issue(Level::Error, Some(d.id), None, format!("{}: VLAN {} doesn't exist — VLAN numbers go from 1 to 4094.", d.name, f.vlan), None));
+                        v.push(issue(Level::Error, Some(d.id), None, crate::i18n::trf("{}: VLAN {} doesn't exist — VLAN numbers go from 1 to 4094.", &[&d.name, &f.vlan]), None));
                     } else if f.vlan != 1 {
                         let seg = segs.get(&(d.id, 0));
                         let has_router = self.devices.iter().any(|r| r.kind.routes() && r.ifaces.iter().enumerate().any(|(i, _)| segs.get(&(r.id, i)) == seg));
                         if !has_router {
-                            v.push(issue(Level::Error, Some(d.id), None, format!("{} is in VLAN {} but no router has an interface there: it gets no address and can't leave its VLAN.", d.name, f.vlan), None));
+                            v.push(issue(Level::Error, Some(d.id), None, crate::i18n::trf("{} is in VLAN {} but no router has an interface there: it gets no address and can't leave its VLAN.", &[&d.name, &f.vlan]), None));
                         }
                     }
                 }
@@ -386,17 +384,17 @@ impl Network {
                     if let Some((ip, p)) = f.addr() {
                         if let Some(o) = nets.insert(crate::net::net_of(ip, p), f.vlan) {
                             if o != f.vlan {
-                                v.push(issue(Level::Error, Some(d.id), None, format!("{}: VLAN {o} and VLAN {} use the same network {}/{p}.", d.name, f.vlan, crate::net::net_of(ip, p)), None));
+                                v.push(issue(Level::Error, Some(d.id), None, crate::i18n::trf("{}: VLAN {} and VLAN {} use the same network {}/{}.", &[&d.name, &o, &f.vlan, &(crate::net::net_of(ip, p)), &p]), None));
                             }
                         }
                     }
                 }
                 if by_vlan.iter().any(|(k, n)| k.0 != usize::MAX && *n > 1) {
-                    v.push(issue(Level::Error, Some(d.id), None, format!("{} has the same VLAN twice on one port.", d.name), None));
+                    v.push(issue(Level::Error, Some(d.id), None, crate::i18n::trf("{} has the same VLAN twice on one port.", &[&d.name]), None));
                 }
                 let subs = d.ifaces.iter().filter(|f| f.parent.is_some()).count();
                 if subs > 20 {
-                    v.push(issue(Level::Tip, Some(d.id), None, format!("{} routes {subs} VLANs over one trunk cable (router-on-a-stick): all traffic between VLANs shares that cable. At this size a layer-3 core switch is the usual choice.", d.name), None));
+                    v.push(issue(Level::Tip, Some(d.id), None, crate::i18n::trf("{} routes {} VLANs over one trunk cable (router-on-a-stick): all traffic between VLANs shares that cable. At this size a layer-3 core switch is the usual choice.", &[&d.name, &subs]), None));
                 }
             }
         }
@@ -409,40 +407,40 @@ impl Network {
                 let d = self.dev_mut(*id).unwrap();
                 d.stp = true;
                 d.priority = *p;
-                format!("{} now has spanning-tree priority {p} and becomes the root.", d.name)
+                crate::i18n::trf("{} now has spanning-tree priority {} and becomes the root.", &[&d.name, &p])
             }
             Fix::EnableStp(id) => {
                 let d = self.dev_mut(*id).unwrap();
                 d.stp = true;
-                format!("Spanning tree is on for {}; it blocks the loop.", d.name)
+                crate::i18n::trf("Spanning tree is on for {}; it blocks the loop.", &[&d.name])
             }
             Fix::Unplug(l) => {
                 self.remove_link(*l);
-                "Removed the looping cable.".into()
+                crate::i18n::tr("Removed the looping cable.").into()
             }
             Fix::AutoChannels => self.auto_channels(),
             Fix::Wpa3(id) => {
                 let d = self.dev_mut(*id).unwrap();
                 d.security = Security::Wpa3;
-                format!("{} now uses WPA3.", d.name)
+                crate::i18n::trf("{} now uses WPA3.", &[&d.name])
             }
             Fix::FastRoamEverywhere => {
                 for d in self.devices.iter_mut().filter(|d| d.kind.radio()) {
                     d.fast_roam = true;
                 }
-                "802.11k/v/r is on for all your access points.".into()
+                crate::i18n::tr("802.11k/v/r is on for all your access points.").into()
             }
             Fix::Reconnect(id) => self.reconnect(*id),
             Fix::MovePort(link, id) => {
-                let Some(l) = self.links.iter().find(|l| l.id == *link).cloned() else { return "That cable is gone.".into() };
-                let Some(q) = self.best_free_port(&l, *id) else { return "No faster port is free.".into() };
+                let Some(l) = self.links.iter().find(|l| l.id == *link).cloned() else { return crate::i18n::tr("That cable is gone.").into() };
+                let Some(q) = self.best_free_port(&l, *id) else { return crate::i18n::tr("No faster port is free.").into() };
                 self.move_port(*link, *id, q);
-                format!("{} now goes into {}'s {}.", self.name(l.other(*id).0), self.name(*id), self.port_name(*id, q))
+                crate::i18n::trf("{} now goes into {}'s {}.", &[&(self.name(l.other(*id).0)), &(self.name(*id)), &(self.port_name(*id, q))])
             }
             Fix::Sqm(id) => {
                 let d = self.dev_mut(*id).unwrap();
                 d.sqm = true;
-                format!("{} now runs smart queueing: the line stays responsive when it's full.", d.name)
+                crate::i18n::trf("{} now runs smart queueing: the line stays responsive when it's full.", &[&d.name])
             }
             Fix::GivePoe(id, w, class) => {
                 let d = self.dev_mut(*id).unwrap();
@@ -452,19 +450,19 @@ impl Network {
                 d.price += EXTRA[class as usize] - EXTRA[d.poe_class.min(4) as usize];
                 d.poe_class = class;
                 d.poe_budget = d.poe_budget.max(*w);
-                format!("{} now supplies {} ({:.0} W in total).", d.name, crate::extras::POE[class as usize].0, d.poe_budget)
+                crate::i18n::trf("{} now supplies {} ({} W in total).", &[&d.name, &(crate::extras::POE[class as usize].0), &format!("{:.0}", d.poe_budget)])
             }
             Fix::SameSsid(id, ssid) => {
                 let d = self.dev_mut(*id).unwrap();
                 d.ssid = ssid.clone();
-                format!("{} now broadcasts '{ssid}'.", d.name)
+                crate::i18n::trf("{} now broadcasts '{}'.", &[&d.name, &ssid])
             }
         }
     }
 
     /// Moves a wireless client to the strongest access point with its network name.
     pub fn reconnect(&mut self, id: u32) -> String {
-        let Some(link) = self.wifi_link_of(id).cloned() else { return "No Wi-Fi connection to change.".into() };
+        let Some(link) = self.wifi_link_of(id).cloned() else { return crate::i18n::tr("No Wi-Fi connection to change.").into() };
         let Some((ap, cl)) = self.wifi_ends(&link).map(|(a, c)| (a.clone(), c.clone())) else { return String::new() };
         // Prefer a real access point over an extender when they're about as strong.
         let mut c = self.roam_candidates(&cl, Network::joined(&cl, &ap));
@@ -476,14 +474,14 @@ impl Network {
         // Staying put isn't a reconnect.
         c.retain(|x| x.0 != ap.id);
         c.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let Some(&(best, _)) = c.first() else { return "No other access point in reach.".into() };
+        let Some(&(best, _)) = c.first() else { return crate::i18n::tr("No other access point in reach.").into() };
         let l = self.links.iter_mut().find(|x| x.id == link.id).unwrap();
         if l.a == ap.id {
             (l.a, l.a_if) = (best, 0);
         } else {
             (l.b, l.b_if) = (best, 0);
         }
-        format!("{} now uses {}.", cl.name, self.name(best))
+        crate::i18n::trf("{} now uses {}.", &[&cl.name, &(self.name(best))])
     }
 
     /// Extra commands: speedtest, wifi, stp, vlan. Returns false when the command isn't one of them.

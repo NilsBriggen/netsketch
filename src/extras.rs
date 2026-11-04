@@ -216,10 +216,10 @@ impl Network {
             let port_w = POE[src.poe_class as usize].1;
             let need = poe_reserve(d.poe_draw);
             if port_w == 0.0 {
-                v.push((d.id, format!("{} needs about {:.0} W over the cable, but {} has no PoE. Use a PoE switch or an injector.", d.name, d.poe_draw, src.name), Some(src.id)));
+                v.push((d.id, crate::i18n::trf("{} needs about {} W over the cable, but {} has no PoE. Use a PoE switch or an injector.", &[&d.name, &format!("{:.0}", d.poe_draw), &src.name]), Some(src.id)));
             } else if need.is_none_or(|w| w > port_w) {
-                let class = need.map_or("more than PoE can carry".to_string(), |w| format!("a {w:.1} W port"));
-                v.push((d.id, format!("{} draws {:.0} W, so it needs {class}, but {}'s ports give only {:.1} W ({}). It won't start or keeps rebooting.", d.name, d.poe_draw, src.name, port_w, POE[src.poe_class as usize].0), Some(src.id)));
+                let class = need.map_or(crate::i18n::tr("more than PoE can carry").to_string(), |w| format!("a {w:.1} W port"));
+                v.push((d.id, crate::i18n::trf("{} draws {} W, so it needs {}, but {}'s ports give only {} W ({}). It won't start or keeps rebooting.", &[&d.name, &format!("{:.0}", d.poe_draw), &class, &src.name, &format!("{:.1}", port_w), &(POE[src.poe_class as usize].0)]), Some(src.id)));
             } else {
                 *used.entry(src.id).or_default() += need.unwrap_or(0.0);
             }
@@ -227,7 +227,7 @@ impl Network {
         for (sw, w) in used {
             let s = self.dev(sw).unwrap();
             if w > s.poe_budget {
-                v.push((sw, format!("{} has a PoE budget of {:.0} W but reserves {:.0} W for its devices (each one's class maximum). The last ones to start get no power.", s.name, s.poe_budget, w), None));
+                v.push((sw, crate::i18n::trf("{} has a PoE budget of {} W but reserves {} W for its devices (each one's class maximum). The last ones to start get no power.", &[&s.name, &format!("{:.0}", s.poe_budget), &format!("{:.0}", w)]), None));
             }
         }
         v

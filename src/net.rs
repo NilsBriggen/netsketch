@@ -1889,7 +1889,7 @@ impl Network {
             for (i, f) in d.ifaces.iter().enumerate() {
                 if let (Some((ip, _)), Some(&s)) = (f.addr(), segs.get(&(d.id, i))) {
                     if let Some(o) = seen.insert((s, ip), d.id) {
-                        push(Level::Error, Some(d.id), None, format!("{} and {} both use {ip}. Every address must be unique.", d.name, self.name(o)));
+                        push(Level::Error, Some(d.id), None, crate::i18n::trf("{} and {} both use {}. Every address must be unique.", &[&d.name, &(self.name(o)), &ip]));
                     }
                 }
             }
@@ -1900,49 +1900,49 @@ impl Network {
                 continue;
             }
             if !self.connected(d.id) {
-                push(Level::Warning, id, None, format!("{} isn't connected to anything.", d.name));
+                push(Level::Warning, id, None, crate::i18n::trf("{} isn't connected to anything.", &[&d.name]));
                 continue;
             }
             for f in &d.ifaces {
                 if !f.ip.trim().is_empty() && f.addr().is_none() {
-                    push(Level::Error, id, None, format!("{}: '{}' isn't a valid IPv4 address.", d.name, f.ip));
+                    push(Level::Error, id, None, crate::i18n::trf("{}: '{}' isn't a valid IPv4 address.", &[&d.name, &f.ip]));
                 }
                 if let Some((ip, p)) = f.addr() {
                     if p == 0 || p > 30 && !(p == 32 && d.kind.is_host()) {
-                        push(Level::Warning, id, None, format!("{}: prefix /{p} is unusual; home networks use /24 (255.255.255.0).", d.name));
+                        push(Level::Warning, id, None, crate::i18n::trf("{}: prefix /{} is unusual; home networks use /24 (255.255.255.0).", &[&d.name, &p]));
                     }
                     if ip.octets()[0] == 169 && ip.octets()[1] == 254 {
-                        push(Level::Error, id, None, format!("{} only has a link-local address ({ip}) — no DHCP server reached it.", d.name));
+                        push(Level::Error, id, None, crate::i18n::trf("{} only has a link-local address ({}) — no DHCP server reached it.", &[&d.name, &ip]));
                     }
                 }
             }
             if d.kind.is_host() {
                 let Some((ip, p)) = d.ifaces[0].addr() else {
                     if d.dhcp_client {
-                        push(Level::Tip, id, None, format!("{} will get its address by DHCP when the simulation starts.", d.name));
+                        push(Level::Tip, id, None, crate::i18n::trf("{} will get its address by DHCP when the simulation starts.", &[&d.name]));
                     } else {
-                        push(Level::Error, id, None, format!("{} has no IP address. Set one or turn on DHCP.", d.name));
+                        push(Level::Error, id, None, crate::i18n::trf("{} has no IP address. Set one or turn on DHCP.", &[&d.name]));
                     }
                     continue;
                 };
                 match parse_ip(&d.gateway) {
-                    Some(gw) if !same_net(gw, ip, p) => push(Level::Error, id, None, format!("{}'s gateway {gw} is outside its own network {}/{p}.", d.name, net_of(ip, p))),
+                    Some(gw) if !same_net(gw, ip, p) => push(Level::Error, id, None, crate::i18n::trf("{}'s gateway {} is outside its own network {}/{}.", &[&d.name, &gw, &(net_of(ip, p)), &p])),
                     Some(gw) => {
                         if let Some(&s) = segs.get(&(d.id, 0)) {
                             if self.owner_in(&segs, s, gw).is_none() {
-                                push(Level::Warning, id, None, format!("{}'s gateway {gw} doesn't exist in its network.", d.name));
+                                push(Level::Warning, id, None, crate::i18n::trf("{}'s gateway {} doesn't exist in its network.", &[&d.name, &gw]));
                             }
                         }
                     }
-                    None if !d.gateway.trim().is_empty() => push(Level::Error, id, None, format!("{}: gateway '{}' isn't a valid address.", d.name, d.gateway)),
-                    None if self.devices.iter().any(|x| x.kind.routes()) => push(Level::Tip, id, None, format!("{} has no default gateway, so it can only reach its own network.", d.name)),
+                    None if !d.gateway.trim().is_empty() => push(Level::Error, id, None, crate::i18n::trf("{}: gateway '{}' isn't a valid address.", &[&d.name, &d.gateway])),
+                    None if self.devices.iter().any(|x| x.kind.routes()) => push(Level::Tip, id, None, crate::i18n::trf("{} has no default gateway, so it can only reach its own network.", &[&d.name])),
                     None => {}
                 }
                 if !d.dhcp_client {
                     for s in &self.devices {
                         if let (true, Some(f), Some(t)) = (s.services.dhcp && segs.get(&(s.id, 0)) == segs.get(&(d.id, 0)), parse_ip(&s.dhcp_from), parse_ip(&s.dhcp_to)) {
                             if (u32::from(f)..=u32::from(t)).contains(&u32::from(ip)) {
-                                push(Level::Warning, id, None, format!("{}'s fixed address {ip} is inside {}'s DHCP pool — it may be handed out twice.", d.name, s.name));
+                                push(Level::Warning, id, None, crate::i18n::trf("{}'s fixed address {} is inside {}'s DHCP pool — it may be handed out twice.", &[&d.name, &ip, &s.name]));
                             }
                         }
                     }
@@ -1951,15 +1951,15 @@ impl Network {
             if d.services.dhcp {
                 if let (Some((ip, p)), Some(f), Some(t)) = (d.ifaces.first().and_then(|f| f.addr()), parse_ip(&d.dhcp_from), parse_ip(&d.dhcp_to)) {
                     if !same_net(f, ip, p) || !same_net(t, ip, p) || u32::from(f) > u32::from(t) {
-                        push(Level::Error, Some(d.id), None, format!("{}'s DHCP pool {f}–{t} doesn't fit its network {}/{p}.", d.name, net_of(ip, p)));
+                        push(Level::Error, Some(d.id), None, crate::i18n::trf("{}'s DHCP pool {}–{} doesn't fit its network {}/{}.", &[&d.name, &f, &t, &(net_of(ip, p)), &p]));
                     }
                 }
             }
             if d.kind.radio() && d.bands.iter().any(|b| *b) {
                 match d.security {
-                    Security::Open => push(Level::Error, id, None, format!("{}'s Wi-Fi has no password. Anyone nearby can join and read unencrypted traffic.", d.name)),
-                    Security::Wep => push(Level::Error, id, None, format!("{} uses WEP, which can be cracked in minutes. Use WPA3 (or WPA2/WPA3 mixed).", d.name)),
-                    Security::Wpa2 => push(Level::Tip, id, None, format!("{}: WPA3 is safer than WPA2 and required for 6 GHz Wi-Fi.", d.name)),
+                    Security::Open => push(Level::Error, id, None, crate::i18n::trf("{}'s Wi-Fi has no password. Anyone nearby can join and read unencrypted traffic.", &[&d.name])),
+                    Security::Wep => push(Level::Error, id, None, crate::i18n::trf("{} uses WEP, which can be cracked in minutes. Use WPA3 (or WPA2/WPA3 mixed).", &[&d.name])),
+                    Security::Wpa2 => push(Level::Tip, id, None, crate::i18n::trf("{}: WPA3 is safer than WPA2 and required for 6 GHz Wi-Fi.", &[&d.name])),
                     Security::Wpa3 | Security::Wpa3Ent => {}
                 }
             }
@@ -1969,7 +1969,7 @@ impl Network {
         for d in self.devices.iter().filter(|d| d.services.dhcp && self.connected(d.id)) {
             if let Some(&s) = segs.get(&(d.id, 0)) {
                 if let Some(o) = dhcp.insert(s, d.id) {
-                    push(Level::Warning, Some(d.id), None, format!("{} and {} both hand out addresses in the same network. Keep one DHCP server.", d.name, self.name(o)));
+                    push(Level::Warning, Some(d.id), None, crate::i18n::trf("{} and {} both hand out addresses in the same network. Keep one DHCP server.", &[&d.name, &(self.name(o))]));
                 }
             }
         }
@@ -1980,18 +1980,18 @@ impl Network {
             if l.medium == Medium::WiFi {
                 let (ap, cl) = if a.kind.radio() { (a, b) } else { (b, a) };
                 if !ap.kind.radio() {
-                    push(Level::Error, None, lk, format!("Wi-Fi between {} and {}: one side must be a router or access point.", a.name, b.name));
+                    push(Level::Error, None, lk, crate::i18n::trf("Wi-Fi between {} and {}: one side must be a router or access point.", &[&a.name, &b.name]));
                 } else if !cl.kind.wifi_client() && !cl.kind.radio() {
-                    push(Level::Error, None, lk, format!("{} has no Wi-Fi. Use a cable.", cl.name));
+                    push(Level::Error, None, lk, crate::i18n::trf("{} has no Wi-Fi. Use a cable.", &[&cl.name]));
                 }
             } else {
                 if l.medium.cable() && l.medium != Medium::Fiber && len > 100.0 {
-                    push(Level::Error, None, lk, format!("The cable {}–{} is {len:.0} m; copper Ethernet is limited to 100 m.", a.name, b.name));
+                    push(Level::Error, None, lk, crate::i18n::trf("The cable {}–{} is {} m; copper Ethernet is limited to 100 m.", &[&a.name, &b.name, &format!("{:.0}", len)]));
                 }
             }
         }
         if !self.devices.iter().any(|d| d.kind == Kind::Internet) {
-            push(Level::Tip, None, None, "No internet connection in this plan. Add the Internet cloud and connect it to a router.".into());
+            push(Level::Tip, None, None, crate::i18n::tr("No internet connection in this plan. Add the Internet cloud and connect it to a router.").into());
         }
         self.check_more(&mut v);
         v.sort_by_key(|i| i.level);
