@@ -247,9 +247,27 @@ impl App {
             return;
         };
         let (good, usable, area) = (c.good, c.usable, c.area_m2);
+        let target = self.net.target;
+        let mut pick = target;
+        ui.horizontal(|ui| {
+            ui.label(tr("Good Wi-Fi means"));
+            let shown = plan::TARGETS.iter().find(|t| t.0 == target).map_or_else(|| format!("{target:.0} dBm"), |t| format!("{} ({:.0} dBm)", tr(t.1), t.0));
+            egui::ComboBox::from_id_salt("target").selected_text(shown).show_ui(ui, |ui| {
+                for (dbm, name) in plan::TARGETS {
+                    ui.selectable_value(&mut pick, dbm, format!("{} ({dbm:.0} dBm)", tr(name)));
+                }
+            });
+        });
+        if pick != target {
+            self.snapshot();
+            self.net.target = pick;
+            self.cov_cache = None;
+            self.heat_cache = None;
+            self.ap_hint = None;
+        }
         let col = if good >= 0.9 { pal().green } else if good >= 0.7 { pal().amber } else { pal().red };
         ui.label(RichText::new(trf("{}% of this storey (≈ {} m²) has good Wi-Fi, {}% at least usable.", &[&format!("{:.0}", good * 100.0), &format!("{:.0}", area), &format!("{:.0}", usable * 100.0)])).color(col))
-            .on_hover_text(trf("Good: {} dBm or better. Usable: {} dBm or better. Measured inside the outline of the walls on this storey.", &[&format!("{:.0}", plan::GOOD), &format!("{:.0}", plan::USABLE)]));
+            .on_hover_text(trf("Good: {} dBm or better. Usable: {} dBm or better. Measured inside the outline of the walls on this storey.", &[&format!("{:.0}", self.net.target), &format!("{:.0}", self.net.target - plan::USABLE_BELOW)]));
         ui.horizontal_wrapped(|ui| {
             if good < 0.98 && ui.small_button(format!("{} {}", ic::MAGNIFYING_GLASS, tr("Where would another access point help?"))).clicked() {
                 self.ap_hint = self.net.suggest_ap(self.floor).map(|(p, a, b)| (self.floor, p, a, b));

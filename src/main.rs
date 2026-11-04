@@ -335,6 +335,24 @@ fn plan_hash(net: &Network) -> u64 {
     h.finish()
 }
 
+fn recent_path() -> PathBuf {
+    extras::library_path().with_file_name("recent.json")
+}
+
+/// Plans opened or saved lately, newest first (only those still there).
+fn recent_files() -> Vec<PathBuf> {
+    let list: Vec<PathBuf> = std::fs::read_to_string(recent_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    list.into_iter().filter(|p| p.exists()).collect()
+}
+
+fn remember_file(path: &std::path::Path) {
+    let mut list = recent_files();
+    list.retain(|p| p != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(6);
+    let _ = std::fs::write(recent_path(), serde_json::to_string(&list).unwrap_or_default());
+}
+
 fn fetch_real(url: &str) -> Result<String, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(15))).build().into();
     let mut r = agent.get(url).header("User-Agent", "NetSketch/0.1 (network simulator)").call().map_err(|e| e.to_string())?;
@@ -705,6 +723,7 @@ impl App {
         match serde_json::to_string_pretty(&self.net).map_err(|e| e.to_string()).and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string())) {
             Ok(()) => {
                 self.say(ctx, trf("Saved {}", &[&(path.display())]));
+                remember_file(&path);
                 self.file = Some(path);
                 self.saved_hash = plan_hash(&self.net);
                 self.dirty = false;
@@ -731,6 +750,7 @@ impl App {
                     let msg = trf("Imported {} devices and {} connections{}. Save keeps it as a new plan; the .fls file is left untouched.", &[&(n.devices.len()), &(n.links.len()), &(if skipped > 0 { format!(" ({})", trf("{} connections couldn't be brought over", &[&skipped])) } else { String::new() })]);
                     self.load(n);
                     self.say(ctx, msg);
+                    remember_file(&path);
                     // Never write our format over the old project.
                     self.file = None;
                 }
@@ -742,6 +762,7 @@ impl App {
             Ok(n) => {
                 let newer = n.version > net::FORMAT;
                 self.load(n);
+                remember_file(&path);
                 self.say(ctx, if newer { trf("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", &[&(path.display())]) } else { trf("Opened {}", &[&(path.display())]) });
                 self.file = Some(path);
             }
@@ -894,9 +915,24 @@ impl App {
                 if ui.button(ic::FLOPPY_DISK_BACK).on_hover_text(tr("Save as a new file (Ctrl+Shift+S)")).clicked() {
                     self.save(&ctx, true);
                 }
-                if ui.button(lab(ic::FOLDER_OPEN, tr("Open"))).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O)")).clicked() {
+                if ui.button(lab(ic::FOLDER_OPEN, tr("Open"))).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O). Plans, phone surveys and floor-plan pictures can also be dropped on the window.")).clicked() {
                     self.open(&ctx);
                 }
+                ui.menu_button(ic::CARET_DOWN, |ui| {
+                    let files = recent_files();
+                    if files.is_empty() {
+                        ui.label(RichText::new(tr("No recent plans yet")).color(pal().dim));
+                    }
+                    for f in files {
+                        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        if ui.button(name).on_hover_text(f.display().to_string()).clicked() {
+                            self.open_path(&ctx, f);
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(tr("Recent plans"));
                 if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(ic::ARROW_CLOCKWISE)).on_hover_text(tr("Redo (Ctrl+Y)")).clicked() {
                     self.redo_once(&ctx);
                 }
@@ -1949,6 +1985,10 @@ impl App {
                         ui.label(tr("Price"));
                         ui.add(egui::DragValue::new(&mut d.price).range(0.0..=100000.0).prefix(currency.clone()).speed(5.0));
                     });
+                    let mut owned = d.owned();
+                    if ui.checkbox(&mut owned, tr("I already have this")).on_hover_text(tr("Left off the shopping list")).changed() {
+                        d.owned = Some(owned);
+                    }
                 }
                 ui.add(TextEdit::multiline(&mut d.notes).desired_rows(2).desired_width(f32::INFINITY).hint_text(tr("Notes: room, model, serial number…")));
             }
@@ -2604,7 +2644,7 @@ impl App {
                     ui.label(RichText::new(format!("{}{total:.0}", self.net.currency)).strong().color(pal().accent));
                     ui.end_row();
                 });
-                ui.label(RichText::new(tr("Prices are rough estimates — set your own per device.")).small().color(pal().dim));
+                ui.label(RichText::new(tr("Prices are rough estimates — set your own per device. Phones, computers and TVs count as already there; tick or untick \"I already have this\" on a device to change that.")).small().color(pal().dim));
             }
         });
     }
@@ -2811,11 +2851,17 @@ fn proto_color(p: &str) -> Color32 {
 /// (item, quantity, cost) rows and the total.
 fn shopping(n: &Network) -> (Vec<(String, usize, f32)>, f32) {
     let mut items: Vec<(String, usize, f32)> = vec![];
-    for k in Kind::SHELF {
-        let ds: Vec<_> = n.devices.iter().filter(|d| d.kind == k).collect();
-        if !ds.is_empty() && k != Kind::Internet && !k.foreign() {
-            items.push((k.label().to_string(), ds.len(), ds.iter().map(|d| d.price).sum()));
+    // One line per model picked (or per kind without one); what's already in the home is left out.
+    for k in Kind::SHELF.into_iter().filter(|k| *k != Kind::Internet && !k.foreign()) {
+        let mut models: Vec<(String, usize, f32)> = vec![];
+        for d in n.devices.iter().filter(|d| d.kind == k && !d.owned()) {
+            let what = if d.model.is_empty() { k.label().to_string() } else { format!("{} ({})", d.model, k.label()) };
+            match models.iter_mut().find(|m| m.0 == what) {
+                Some(m) => (m.1, m.2) = (m.1 + 1, m.2 + d.price),
+                None => models.push((what, 1, d.price)),
+            }
         }
+        items.extend(models);
     }
     for m in Medium::ALL.into_iter().filter(|m| !m.wireless()) {
         let ls: Vec<_> = n.links.iter().filter(|l| l.medium == m).collect();
@@ -2986,6 +3032,18 @@ impl eframe::App for App {
         }
         self.autosave(&ctx);
         self.phone_tick(&ctx);
+        // Files dropped on the window: plans open, surveys import, pictures go under the map.
+        for path in ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect::<Vec<_>>()) {
+            let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let survey = ext == "json" && std::fs::read_to_string(&path).is_ok_and(|t| t.contains("\"netsketch-survey\""));
+            match ext.as_str() {
+                "netsurvey" | "csv" | "tsv" | "txt" => self.import_measurements(&ctx, &path),
+                "json" if survey => self.import_measurements(&ctx, &path),
+                "netplan" | "json" | "fls" => self.open_path(&ctx, path),
+                "png" | "jpg" | "jpeg" => self.add_picture(&ctx, &path),
+                _ => self.say(&ctx, trf("NetSketch can't use {} files.", &[&ext])),
+            }
+        }
         if Self::now(&ctx) - self.dirty_at > 1.0 {
             self.dirty_at = Self::now(&ctx);
             self.dirty = plan_hash(&self.net) != self.saved_hash;

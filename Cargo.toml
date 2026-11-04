@@ -14,6 +14,7 @@ rfd = "0.16"
 zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 roxmltree = "0.21"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+base64 = "0.23"
 
 [profile.dev]
 opt-level = 1

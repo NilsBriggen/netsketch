@@ -1957,6 +1957,7 @@ dependencies = [
 name = "netsketch"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "eframe",
  "egui-phosphor",
  "image",

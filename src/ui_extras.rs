@@ -8,25 +8,26 @@ use crate::ports::{PortGroup, PortKind, SPEEDS};
 impl App {
     // ---------- floor plan pictures ----------
 
-    fn texture(&mut self, ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
-        if !self.textures.contains_key(path) {
-            let loaded = std::fs::read(path)
-                .map_err(|e| e.to_string())
+    fn texture(&mut self, ctx: &egui::Context, p: &FloorPlan) -> Option<egui::TextureHandle> {
+        let key = p.key();
+        if !self.textures.contains_key(&key) {
+            let loaded = p
+                .bytes()
                 .and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string()))
                 .map(|img| {
                     let rgba = img.to_rgba8();
                     let size = [rgba.width() as usize, rgba.height() as usize];
-                    ctx.load_texture(path, egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()), egui::TextureOptions::LINEAR)
+                    ctx.load_texture(&key, egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()), egui::TextureOptions::LINEAR)
                 });
-            self.textures.insert(path.to_string(), loaded);
+            self.textures.insert(key.clone(), loaded);
         }
-        self.textures.get(path).and_then(|t| t.as_ref().ok()).cloned()
+        self.textures.get(&key).and_then(|t| t.as_ref().ok()).cloned()
     }
 
     /// Draws this storey's floor plan picture under everything else.
     pub(crate) fn draw_plan(&mut self, ctx: &egui::Context, painter: &egui::Painter) {
         let Some(p) = self.net.plans.iter().find(|p| p.floor == self.floor).cloned() else { return };
-        let Some(tex) = self.texture(ctx, &p.path) else { return };
+        let Some(tex) = self.texture(ctx, &p) else { return };
         let [w, h] = tex.size();
         let width = p.width_m * PX_PER_M;
         let height = width * h as f32 / w.max(1) as f32;
@@ -51,6 +52,45 @@ impl App {
         tip
     }
 
+    /// Puts a picture under this storey's map (kept inside the plan), then asks for one known length to scale it.
+    pub(crate) fn add_picture(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| FloorPlan::embed(&b)) {
+            Ok(data) => {
+                let plan = FloorPlan { floor: self.floor, path: path.to_string_lossy().into_owned(), data, pos: [0.0, 0.0], width_m: 15.0, opacity: 0.5 };
+                self.snapshot();
+                match self.net.plans.iter().position(|p| p.floor == self.floor) {
+                    Some(i) => self.net.plans[i] = plan,
+                    None => self.net.plans.push(plan),
+                }
+                self.mode = Mode::Design;
+                self.tool = Tool::Measure;
+                self.measure = None;
+                self.fit_pending = true;
+                self.say(ctx, tr("Now click both ends of a wall whose length you know, then type its real length: the picture is scaled to fit."));
+            }
+            Err(e) => self.say(ctx, trf("Couldn't read that picture: {}", &[&e])),
+        }
+    }
+
+    /// A phone survey (.netsurvey/.json) or a text file of readings.
+    pub(crate) fn import_measurements(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        let companion = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("netsurvey") || e.eq_ignore_ascii_case("json"));
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string());
+        self.snapshot();
+        let msg = if companion {
+            match text.and_then(|t| self.net.import_companion(&t)) {
+                Ok((p, n)) => trf("Imported {} measuring points ({} readings). Drag each orange pin to where you stood.", &[&p, &n]),
+                Err(e) => trf("Couldn't import: {}", &[&e]),
+            }
+        } else {
+            match text.and_then(|t| self.net.import_survey(&t)) {
+                Ok(n) => trf("Imported {} readings.", &[&n]),
+                Err(e) => trf("Couldn't import: {}", &[&e]),
+            }
+        };
+        self.say(ctx, msg);
+    }
+
     /// Overview: floor plan picture, measurements and the model library.
     pub(crate) fn plan_extras(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -59,22 +99,7 @@ impl App {
         ui.horizontal(|ui| {
             if ui.button(format!("{}  {}", ic::IMAGE, if idx.is_some() { tr("Replace…") } else { tr("Choose a picture…") })).on_hover_text(tr("PNG or JPEG of this storey's plan, e.g. a scan or a screenshot of the architect's PDF")).clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter(tr("Picture"), &["png", "jpg", "jpeg"]).pick_file() {
-                    let path = path.to_string_lossy().into_owned();
-                    self.textures.remove(&path);
-                    match self.texture(&ctx, &path) {
-                        Some(_) => {
-                            let plan = FloorPlan { floor: self.floor, path, pos: [0.0, 0.0], width_m: 15.0, opacity: 0.5 };
-                            self.snapshot();
-                            match idx {
-                                Some(i) => self.net.plans[i] = plan,
-                                None => self.net.plans.push(plan),
-                            }
-                        }
-                        None => {
-                            let err = self.textures.get(&path).and_then(|t| t.as_ref().err()).cloned().unwrap_or_default();
-                            self.say(&ctx, trf("Couldn't read that picture: {}", &[&err]));
-                        }
-                    }
+                    self.add_picture(&ctx, &path);
                 }
             }
             if idx.is_some() && ui.small_button(ic::TRASH).on_hover_text(tr("Remove the picture")).clicked() {
@@ -82,7 +107,7 @@ impl App {
                 self.net.plans.retain(|p| p.floor != self.floor);
             }
         });
-        if let Some(Some(Err(e))) = self.net.plans.iter().find(|p| p.floor == self.floor).map(|p| self.textures.get(&p.path)) {
+        if let Some(Some(Err(e))) = self.net.plans.iter().find(|p| p.floor == self.floor).map(|p| self.textures.get(&p.key())) {
             ui.label(RichText::new(trf("{} The picture can't be shown ({}). Was it moved? Use Replace… to pick it again.", &[&(ic::WARNING), &e])).color(pal().amber));
         }
         if let Some(p) = self.net.plans.iter_mut().find(|p| p.floor == self.floor) {
@@ -111,23 +136,8 @@ impl App {
         }
         ui.horizontal(|ui| {
             if ui.button(format!("{}  {}", ic::DOWNLOAD_SIMPLE, tr("Import measurements…"))).on_hover_text(tr("A survey from the NetSketch Survey phone app, or a text file of readings")).clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Measurements", &["netsurvey", "json", "csv", "txt", "tsv"]).pick_file() {
-                    let companion = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("netsurvey") || e.eq_ignore_ascii_case("json"));
-                    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string());
-                    let msg = if companion {
-                        self.snapshot();
-                        match text.and_then(|t| self.net.import_companion(&t)) {
-                            Ok((p, n)) => trf("Imported {} measuring points ({} readings). Drag each orange pin to where you stood.", &[&p, &n]),
-                            Err(e) => trf("Couldn't import: {}", &[&e]),
-                        }
-                    } else {
-                        self.snapshot();
-                        match text.and_then(|t| self.net.import_survey(&t)) {
-                            Ok(n) => trf("Imported {} readings.", &[&n]),
-                            Err(e) => trf("Couldn't import: {}", &[&e]),
-                        }
-                    };
-                    self.say(&ctx, msg);
+                if let Some(path) = rfd::FileDialog::new().add_filter(tr("Measurements"), &["netsurvey", "json", "csv", "txt", "tsv"]).pick_file() {
+                    self.import_measurements(&ctx, &path);
                 }
             }
             if !self.net.survey.is_empty() {

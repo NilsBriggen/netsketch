@@ -593,11 +593,43 @@ impl Network {
 #[serde(default)]
 pub struct FloorPlan {
     pub floor: i8,
+    /// Where the picture came from (shown, and read by older saves that don't carry it).
     pub path: String,
+    /// The picture itself (JPEG, base64), so a plan sent to someone else keeps its floor plan.
+    pub data: String,
     /// Top-left corner on the map (px) and real width (m).
     pub pos: [f32; 2],
     pub width_m: f32,
     pub opacity: f32,
+}
+
+impl FloorPlan {
+    /// A picture file made small enough to keep in the plan: at most 2400 px wide, JPEG, base64.
+    pub fn embed(bytes: &[u8]) -> Result<String, String> {
+        use base64::Engine;
+        let mut img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+        if img.width() > 2400 {
+            img = img.resize(2400, u32::MAX, image::imageops::FilterType::Triangle);
+        }
+        let mut out = vec![];
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(out))
+    }
+
+    /// The picture's file contents: kept in the plan, or read from where it was picked.
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        use base64::Engine;
+        if self.data.is_empty() {
+            std::fs::read(&self.path).map_err(|e| e.to_string())
+        } else {
+            base64::engine::general_purpose::STANDARD.decode(&self.data).map_err(|e| e.to_string())
+        }
+    }
+
+    /// Names the loaded picture in the texture cache.
+    pub fn key(&self) -> String {
+        format!("{}#{}#{}", self.floor, self.path, self.data.len())
+    }
 }
 
 // ---------- model library ----------
@@ -659,6 +691,15 @@ mod tests {
 
     fn id(n: &Network, name: &str) -> u32 {
         n.devices.iter().find(|d| d.name == name).unwrap().id
+    }
+
+    #[test]
+    fn a_floor_plan_picture_travels_inside_the_plan() {
+        let mut png = vec![];
+        image::RgbImage::from_pixel(3000, 1000, image::Rgb([200, 30, 30])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let p = FloorPlan { data: FloorPlan::embed(&png).unwrap(), path: "/gone/plan.png".into(), ..Default::default() };
+        let img = image::load_from_memory(&p.bytes().unwrap()).unwrap();
+        assert_eq!((img.width(), img.height()), (2400, 800), "made smaller, same shape");
     }
 
     #[test]

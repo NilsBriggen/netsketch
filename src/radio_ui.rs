@@ -37,17 +37,15 @@ fn wall_width(k: WallKind) -> f32 {
         }
 }
 
+/// Lower edge (dBm) of each Wi-Fi map colour, for a plan whose good signal is `target`, with its name.
+pub fn heat_bands(target: f32) -> [(f32, &'static str); 5] {
+    [(target + 12.0, "excellent"), (target + 2.0, "good"), (target - 5.0, "fair"), (target - 13.0, "weak"), (target - 19.0, "barely")]
+}
+
 /// Colour for a signal strength on the Wi-Fi map.
-pub fn heat_color(rssi: f32) -> Option<Color32> {
-    let c = |r, g, b, a| Some(Color32::from_rgba_unmultiplied(r, g, b, a));
-    match rssi {
-        r if r >= -55.0 => c(34, 197, 94, 70),
-        r if r >= -65.0 => c(163, 230, 53, 60),
-        r if r >= -72.0 => c(250, 204, 21, 55),
-        r if r >= -80.0 => c(249, 115, 22, 50),
-        r if r >= -86.0 => c(239, 68, 68, 40),
-        _ => None,
-    }
+pub fn heat_color(rssi: f32, target: f32) -> Option<Color32> {
+    let cols = [(34, 197, 94, 70), (163, 230, 53, 60), (250, 204, 21, 55), (249, 115, 22, 50), (239, 68, 68, 40)];
+    heat_bands(target).iter().zip(cols).find(|(b, _)| rssi >= b.0).map(|(_, (r, g, b, a))| Color32::from_rgba_unmultiplied(r, g, b, a))
 }
 
 pub fn quality_color(rssi: f32) -> Color32 {
@@ -153,7 +151,7 @@ impl App {
         let fingerprint = || {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            serde_json::to_vec(&(&radios, &self.net.walls, self.net.slab, &self.net.storey_heights)).unwrap_or_default().hash(&mut h);
+            serde_json::to_vec(&(&radios, &self.net.walls, self.net.slab, &self.net.storey_heights, self.net.target)).unwrap_or_default().hash(&mut h);
             h.finish()
         };
         let mut stamp = 0;
@@ -184,7 +182,7 @@ impl App {
                             b => self.net.rssi_at(r, p, self.floor, crate::wifi::Band::ALL[b - 1]),
                         })
                         .fold(-120.0, f32::max);
-                    if let Some(c) = heat_color(best) {
+                    if let Some(c) = heat_color(best, self.net.target) {
                         cells.push((Rect::from_min_size(pos2(x, y), Vec2::splat(cell)), c));
                     }
                 }
@@ -199,21 +197,25 @@ impl App {
 
     /// The Wi-Fi map colour key, drawn on top of everything at the bottom left.
     pub(crate) fn heat_legend(&self, painter: &egui::Painter, rect: Rect) {
-        let items = [(-50.0, "excellent"), (-60.0, "good"), (-70.0, "fair"), (-76.0, "weak"), (-83.0, "barely")];
-        // Narrow canvas: lift the legend above the zoom buttons so they don't collide.
-        let lift = if rect.width() < 810.0 { 44.0 } else { 0.0 };
-        let r = Rect::from_min_size(rect.left_bottom() + vec2(12.0, -40.0 - lift), vec2(if rect.width() < 810.0 { 330.0f32 } else { 470.0 }.min(rect.width() - 24.0), 28.0));
+        let narrow = rect.width() < 810.0;
+        // Narrow canvas: lift the legend above the zoom buttons so they don't collide, and a short caption.
+        let lift = if narrow { 44.0 } else { 0.0 };
+        let caption = if narrow { tr("Signal:") } else { [tr("Wi-Fi map (best band):"), tr("Wi-Fi map (2.4 GHz):"), tr("Wi-Fi map (5 GHz):"), tr("Wi-Fi map (6 GHz):")][self.heat_band.min(3)] };
+        let cap = painter.layout_no_wrap(caption.into(), FontId::proportional(11.5), pal().dim);
+        // Each colour with its name and the weakest signal it stands for.
+        let items: Vec<_> = heat_bands(self.net.target)
+            .iter()
+            .map(|(v, t)| (*v, painter.layout_no_wrap(if narrow { tr(t).to_string() } else { format!("{} {v:.0}", tr(t)) }, FontId::proportional(11.0), pal().text)))
+            .collect();
+        let width = 20.0 + cap.size().x + items.iter().map(|i| 26.0 + i.1.size().x).sum::<f32>();
+        let r = Rect::from_min_size(rect.left_bottom() + vec2(12.0, -40.0 - lift), vec2(width.min(rect.width() - 24.0), 28.0));
         painter.rect_filled(r, 8, pal().card.gamma_multiply(0.92));
         let mut x = r.left() + 10.0;
-        // Narrow canvas: a short caption so the colours still fit.
-        let caption = if rect.width() < 810.0 { tr("Signal:") } else { [tr("Wi-Fi map (best band):"), tr("Wi-Fi map (2.4 GHz):"), tr("Wi-Fi map (5 GHz):"), tr("Wi-Fi map (6 GHz):")][self.heat_band.min(3)] };
-        let g = painter.layout_no_wrap(caption.into(), FontId::proportional(11.5), pal().dim);
-        let w = g.size().x;
-        painter.galley(pos2(x, r.center().y - g.size().y / 2.0), g, pal().dim);
+        let w = cap.size().x;
+        painter.galley(pos2(x, r.center().y - cap.size().y / 2.0), cap, pal().dim);
         x += w + 12.0;
-        for (v, t) in items {
-            painter.rect_filled(Rect::from_center_size(pos2(x + 5.0, r.center().y), Vec2::splat(10.0)), 2, heat_color(v).unwrap().gamma_multiply(2.5));
-            let g = painter.layout_no_wrap(tr(t).into(), FontId::proportional(11.0), pal().text);
+        for (v, g) in items {
+            painter.rect_filled(Rect::from_center_size(pos2(x + 5.0, r.center().y), Vec2::splat(10.0)), 2, heat_color(v, self.net.target).unwrap().gamma_multiply(2.5));
             let w = g.size().x;
             painter.galley(pos2(x + 14.0, r.center().y - g.size().y / 2.0), g, pal().text);
             x += 14.0 + w + 12.0;

@@ -488,6 +488,8 @@ pub struct Device {
     pub security: Security,
     pub price: f32,
     pub notes: String,
+    /// Already in the home, so not on the shopping list; None = by kind (see `Device::owned`).
+    pub owned: Option<bool>,
     /// Spanning tree on/off and bridge priority (lower wins the root election).
     pub stp: bool,
     pub priority: u16,
@@ -604,6 +606,7 @@ impl Default for Device {
             security: Security::Wpa3,
             price: 0.0,
             notes: String::new(),
+            owned: None,
             stp: false,
             priority: 32768,
             bands: [true, true, false],
@@ -657,6 +660,13 @@ impl Default for Device {
 }
 
 impl Device {
+    /// Already in the home (left off the shopping list). Unless set, phones, computers, TVs and
+    /// the like are; the network gear being planned is not.
+    pub fn owned(&self) -> bool {
+        use Kind::*;
+        self.owned.unwrap_or(matches!(self.kind, Desktop | Laptop | Phone | Server | Printer | Tv | SmartHome | Speaker | Console))
+    }
+
     /// The interface DHCP configures: WAN on a home router, the only one elsewhere.
     pub fn dhcp_iface(&self) -> usize {
         if self.kind == Kind::HomeRouter { 1 } else { 0 }
@@ -990,6 +1000,9 @@ pub struct Network {
     pub kwh_price: f32,
     /// Time of day (hours) the traffic is looked at; 20.5 = the evening busy hour.
     pub hour: f32,
+    /// Signal (dBm) that counts as good Wi-Fi in this home: −72 browsing, −67 video calls, −60 4K and gaming.
+    /// The coverage score, the Wi-Fi map colours and its legend all follow it.
+    pub target: f32,
     /// Simulation time (s) and whether live variation (fading, traffic) is on; not saved.
     #[serde(skip)]
     pub clock: f64,
@@ -1031,6 +1044,7 @@ impl Default for Network {
             outdoor: vec![],
             kwh_price: 0.30,
             hour: 20.5,
+            target: -67.0,
             clock: 0.0,
             live: false,
             arp_seen: HashMap::new(),
@@ -1127,6 +1141,9 @@ impl Network {
 
     /// Repairs a plan read from a file so nothing points at devices or ports that don't exist.
     pub fn sanitize(&mut self) {
+        if !(-80.0..=-50.0).contains(&self.target) {
+            self.target = -67.0;
+        }
         // Positions that aren't real numbers (1e39 reads as infinity) would blank the whole map.
         let ok = |p: &[f32; 2]| p.iter().all(|v| v.is_finite());
         self.devices.retain(|d| ok(&d.pos));
@@ -3037,6 +3054,25 @@ mod tests {
     fn run(n: &mut Network, name: &str, cmd: &str) -> String {
         let id = n.lookup_dev(name).unwrap().id;
         n.exec(id, cmd).lines.join("\n")
+    }
+
+    #[test]
+    fn the_shopping_list_leaves_out_what_is_already_there() {
+        let mut n = template("home");
+        let (items, total) = crate::shopping(&n);
+        assert!(!items.iter().any(|i| i.0.contains(Kind::Laptop.label())), "{items:?}");
+        let laptop = n.devices.iter().position(|d| d.kind == Kind::Laptop).unwrap();
+        n.devices[laptop].owned = Some(false);
+        assert!((crate::shopping(&n).1 - total - n.devices[laptop].price).abs() < 0.01);
+        // Two access points of the same model are one line.
+        let aps: Vec<usize> = (0..n.devices.len()).filter(|i| n.devices[*i].kind == Kind::AccessPoint).collect();
+        if aps.len() >= 2 {
+            for i in &aps {
+                n.devices[*i].model = "Test AP".into();
+            }
+            let row = crate::shopping(&n).0.into_iter().find(|i| i.0.starts_with("Test AP")).unwrap();
+            assert_eq!(row.1, aps.len());
+        }
     }
 
     #[test]

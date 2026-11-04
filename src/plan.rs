@@ -2,9 +2,11 @@
 //! access point would help most, and applying every one-click fix in one go.
 use crate::net::{Device, Kind, Network, PX_PER_M};
 
-/// Signal levels the coverage score counts: good enough for video calls, and still usable.
-pub const GOOD: f32 = -67.0;
-pub const USABLE: f32 = -75.0;
+/// How far below the plan's target (`Network::target`) a signal still counts as usable.
+pub const USABLE_BELOW: f32 = 8.0;
+
+/// What "good Wi-Fi" can mean, for the picker: (dBm, name).
+pub const TARGETS: [(f32, &str); 3] = [(-72.0, "Browsing and music"), (-67.0, "Video calls (recommended)"), (-60.0, "4K streaming and gaming")];
 
 /// A rectangle outside the building (two opposite corners, map pixels) where Wi-Fi should reach.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -71,7 +73,7 @@ impl Network {
         let radios = self.radios();
         let s: Vec<f32> = spots.iter().map(|p| self.best_at(&radios, *p, floor)).collect();
         let share = |t: f32| s.iter().filter(|x| **x >= t).count() as f32 / s.len() as f32;
-        Some(Coverage { good: share(GOOD), usable: share(USABLE), area_m2: s.len() as f32 * (cell / PX_PER_M).powi(2) })
+        Some(Coverage { good: share(self.target), usable: share(self.target - USABLE_BELOW), area_m2: s.len() as f32 * (cell / PX_PER_M).powi(2) })
     }
 
     /// Good and usable share of an outdoor area, sampled about every metre (walls of the house in between count).
@@ -90,7 +92,7 @@ impl Network {
             y += cell;
         }
         let share = |t: f32| if s.is_empty() { 0.0 } else { s.iter().filter(|x| **x >= t).count() as f32 / s.len() as f32 };
-        Coverage { good: share(GOOD), usable: share(USABLE), area_m2: (x1 - x0) * (y1 - y0) / (PX_PER_M * PX_PER_M) }
+        Coverage { good: share(self.target), usable: share(self.target - USABLE_BELOW), area_m2: (x1 - x0) * (y1 - y0) / (PX_PER_M * PX_PER_M) }
     }
 
     /// The spot on a storey where one more ordinary access point would give the most extra area good Wi-Fi.
@@ -102,7 +104,7 @@ impl Network {
         }
         let radios = self.radios();
         let now: Vec<f32> = spots.iter().map(|p| self.best_at(&radios, *p, floor)).collect();
-        let weak: Vec<[f32; 2]> = spots.iter().zip(&now).filter(|(_, s)| **s < GOOD).map(|(p, _)| *p).collect();
+        let weak: Vec<[f32; 2]> = spots.iter().zip(&now).filter(|(_, s)| **s < self.target).map(|(p, _)| *p).collect();
         let good_now = (spots.len() - weak.len()) as f32 / spots.len() as f32;
         if weak.is_empty() {
             return None;
@@ -116,7 +118,7 @@ impl Network {
         let mut best: Option<([f32; 2], usize)> = None;
         for c in spots.iter().step_by(4) {
             ap.pos = *c;
-            let gained = weak.iter().filter(|p| self.best_rssi(&ap, **p, floor) >= GOOD).count();
+            let gained = weak.iter().filter(|p| self.best_rssi(&ap, **p, floor) >= self.target).count();
             if best.is_none_or(|b| gained > b.1) {
                 best = Some((*c, gained));
             }
@@ -170,6 +172,16 @@ fn ray_hits(p: [f32; 2], d: [f32; 2], a: [f32; 2], b: [f32; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::net::template;
+
+    #[test]
+    fn a_stricter_target_lowers_the_score() {
+        let mut n = template("home");
+        let easy = { n.target = -72.0; n.coverage(0).unwrap().good };
+        let strict = { n.target = -60.0; n.coverage(0).unwrap().good };
+        assert!(easy > strict, "{easy} {strict}");
+        // The Wi-Fi map's colours move with it: -66 dBm is "good" for video calls, not for gaming.
+        assert_ne!(crate::radio_ui::heat_color(-66.0, -67.0), crate::radio_ui::heat_color(-66.0, -60.0));
+    }
 
     #[test]
     fn coverage_and_a_new_access_point_where_it_helps() {
