@@ -589,9 +589,9 @@ pub struct Link {
     pub unplugged: bool,
     /// Port number (0-based) the cable is plugged into at each end; None = wireless or no port free.
     #[serde(default)]
-    pub a_port: Option<u8>,
+    pub a_port: Option<u16>,
     #[serde(default)]
-    pub b_port: Option<u8>,
+    pub b_port: Option<u16>,
     /// Powerline links: the adapter kit (catalog::powerline), empty = a typical one.
     #[serde(default)]
     pub kit: String,
@@ -834,8 +834,17 @@ impl Network {
         for w in self.walls.iter_mut() {
             w.floor = w.floor.clamp(-3, 20);
         }
+        for p in self.points.iter_mut() {
+            p.floor = p.floor.clamp(-3, 20);
+        }
+        // Ids near the top of u32 would make next_id overflow; a real plan never gets there.
+        const MAX_ID: u32 = 1 << 30;
+        self.links.retain(|l| l.id < MAX_ID);
+        self.walls.retain(|w| w.id < MAX_ID);
+        self.points.retain(|p| p.id < MAX_ID);
+        self.labels.retain(|l| l.id < MAX_ID);
         let mut seen = std::collections::HashSet::new();
-        self.devices.retain(|d| seen.insert(d.id));
+        self.devices.retain(|d| d.id < MAX_ID && seen.insert(d.id));
         self.next_id = self.next_id.max(self.devices.iter().map(|d| d.id).max().unwrap_or(0)).max(self.walls.iter().map(|w| w.id).max().unwrap_or(0))
             .max(self.points.iter().map(|p| p.id).max().unwrap_or(0))
             .max(self.labels.iter().map(|l| l.id).max().unwrap_or(0));
@@ -871,7 +880,21 @@ impl Network {
         }
         let ifs: HashMap<u32, usize> = self.devices.iter().map(|d| (d.id, d.ifaces.len())).collect();
         self.links.retain(|l| l.a_if < ifs[&l.a] && l.b_if < ifs[&l.b]);
-        self.next_id = self.next_id.max(self.devices.iter().map(|d| d.id).chain(self.links.iter().map(|l| l.id)).chain(self.walls.iter().map(|w| w.id)).max().unwrap_or(0));
+        self.next_id = self.next_id.min(MAX_ID).max(self.devices.iter().map(|d| d.id).chain(self.links.iter().map(|l| l.id)).chain(self.walls.iter().map(|w| w.id)).max().unwrap_or(0));
+        // A repeated id would make one delete remove several things: give the copies new ids.
+        let mut fresh = |ids: &mut dyn Iterator<Item = &mut u32>| {
+            let mut seen = std::collections::HashSet::new();
+            for id in ids {
+                if !seen.insert(*id) {
+                    self.next_id += 1;
+                    *id = self.next_id;
+                }
+            }
+        };
+        fresh(&mut self.links.iter_mut().map(|l| &mut l.id));
+        fresh(&mut self.walls.iter_mut().map(|w| &mut w.id));
+        fresh(&mut self.points.iter_mut().map(|p| &mut p.id));
+        fresh(&mut self.labels.iter_mut().map(|l| &mut l.id));
         self.assign_ports();
     }
 
@@ -1021,6 +1044,13 @@ impl Network {
     }
 
     pub fn connect(&mut self, a: u32, b: u32, medium: Medium) -> Result<u32, String> {
+        let id = self.connect_unplugged(a, b, medium)?;
+        self.assign_ports();
+        Ok(id)
+    }
+
+    /// `connect` without choosing ports yet, for adding many cables at once; call `assign_ports` afterwards.
+    pub(crate) fn connect_unplugged(&mut self, a: u32, b: u32, medium: Medium) -> Result<u32, String> {
         if a == b {
             return Err("A device can't be connected to itself.".into());
         }
@@ -1051,7 +1081,6 @@ impl Network {
         self.next_id += 1;
         let id = self.next_id;
         self.links.push(Link { id, a, a_if, b, b_if, medium, length_m: None, unplugged: false, a_port: None, b_port: None, kit: String::new() });
-        self.assign_ports();
         Ok(id)
     }
 
@@ -1630,7 +1659,8 @@ impl Network {
             });
             if let Some((sid, (sip, p))) = server {
                 let o = sip.octets();
-                let mut n = 10u8;
+                // u16 and a stop at .254: a network with hundreds of fixed devices just runs out, it doesn't wrap.
+                let mut n = 10u16;
                 for m in members.iter() {
                     if m.0 == sid {
                         continue;
@@ -1638,7 +1668,7 @@ impl Network {
                     let d = self.dev_mut(m.0).unwrap();
                     if d.kind.is_host() && !matches!(d.kind, Kind::Server | Kind::Nas | Kind::Printer) {
                         d.dhcp_client = true;
-                    } else if d.kind.is_host() || d.kind == Kind::Router {
+                    } else if (d.kind.is_host() || d.kind == Kind::Router) && n <= 254 {
                         // Fixed address below the DHCP pool, so it never moves.
                         d.dhcp_client = false;
                         d.ifaces[m.1].ip = format!("{}.{}.{}.{n}", o[0], o[1], o[2]);
@@ -1652,12 +1682,11 @@ impl Network {
                 }
             } else {
                 subnet += 1;
-                let mut r = 1u8;
-                let mut h = 10u8;
+                let (mut r, mut h) = (1u16, 10u16);
                 let mut gw = String::new();
                 for m in members.iter() {
                     let d = self.dev_mut(m.0).unwrap();
-                    if d.kind.routes() {
+                    if d.kind.routes() && r <= 254 {
                         d.ifaces[m.1].ip = format!("10.0.{subnet}.{r}");
                         d.ifaces[m.1].prefix = 24;
                         if gw.is_empty() {
@@ -1668,10 +1697,11 @@ impl Network {
                 }
                 for m in members.iter() {
                     let d = self.dev_mut(m.0).unwrap();
-                    if d.kind.is_host() {
+                    // The interface on this network: a host with VLAN sub-interfaces is on several.
+                    if d.kind.is_host() && h <= 254 {
                         d.dhcp_client = false;
-                        d.ifaces[0].ip = format!("10.0.{subnet}.{h}");
-                        d.ifaces[0].prefix = 24;
+                        d.ifaces[m.1].ip = format!("10.0.{subnet}.{h}");
+                        d.ifaces[m.1].prefix = 24;
                         d.gateway = gw.clone();
                         h += 1;
                     }
@@ -2342,5 +2372,23 @@ mod tests {
         let inet = n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id;
         let out = n.exec(inet, "ping 192.168.1.10").lines.join("\n");
         assert!(out.contains("100%"), "{out}");
+    }
+
+    #[test]
+    fn a_damaged_save_with_repeated_or_huge_ids_is_repaired() {
+        let mut n = template("flat");
+        let w = n.walls[0].clone();
+        n.walls.push(w);
+        let mut l = n.links[0].clone();
+        n.links.push(l.clone());
+        l.id = u32::MAX;
+        n.links.push(l);
+        n.points.push(crate::companion::MeasurePoint { id: 7, floor: -128, ..Default::default() });
+        n.sanitize();
+        let walls: std::collections::HashSet<u32> = n.walls.iter().map(|w| w.id).collect();
+        let links: std::collections::HashSet<u32> = n.links.iter().map(|l| l.id).collect();
+        assert_eq!((walls.len(), links.len()), (n.walls.len(), n.links.len()), "every id is unique again");
+        assert!(n.links.iter().all(|l| l.id < u32::MAX) && n.points.iter().all(|p| p.floor >= -3));
+        n.add_device(Kind::Desktop, [0.0, 0.0]);
     }
 }

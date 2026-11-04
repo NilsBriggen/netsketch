@@ -93,10 +93,10 @@ impl Medium {
 }
 
 impl Link {
-    pub fn port_at(&self, id: u32) -> Option<u8> {
+    pub fn port_at(&self, id: u32) -> Option<u16> {
         if self.a == id { self.a_port } else { self.b_port }
     }
-    pub fn set_port_at(&mut self, id: u32, p: Option<u8>) {
+    pub fn set_port_at(&mut self, id: u32, p: Option<u16>) {
         if self.a == id { self.a_port = p } else { self.b_port = p }
     }
 }
@@ -106,7 +106,7 @@ impl Device {
         self.ports.iter().map(|g| g.n as usize).sum()
     }
     /// The group port `i` (0-based) belongs to.
-    pub fn port(&self, i: u8) -> Option<PortGroup> {
+    pub fn port(&self, i: u16) -> Option<PortGroup> {
         let mut i = i as usize;
         for g in &self.ports {
             if i < g.n as usize {
@@ -141,34 +141,34 @@ impl Network {
         self.dev(l.other(id).0).is_some_and(|o| o.kind == Kind::Internet) || (d.is_some_and(|d| d.kind == Kind::HomeRouter) && l.end_if(id) == 1)
     }
 
-    fn port_rank(&self, l: &Link, id: u32, p: u8) -> Option<(u8, u8, u32)> {
+    fn port_rank(&self, l: &Link, id: u32, p: u16) -> Option<(u8, u8, u32)> {
         rank(self.dev(id)?.port(p)?, l.medium, self.internet_end(l, id))
     }
 
     /// Whether a cable can go into this port at all.
-    pub fn fits_port(&self, l: &Link, id: u32, p: u8) -> bool {
+    pub fn fits_port(&self, l: &Link, id: u32, p: u16) -> bool {
         self.port_rank(l, id, p).is_some()
     }
 
     /// Who is plugged into which port of a device: (port, the device at the other end).
-    pub fn port_users(&self, id: u32) -> Vec<(u8, String)> {
+    pub fn port_users(&self, id: u32) -> Vec<(u16, String)> {
         self.links.iter().filter(|l| (l.a == id || l.b == id) && l.medium.takes_port()).filter_map(|l| Some((l.port_at(id)?, self.name(l.other(id).0)))).collect()
     }
 
     /// Ports of a device that no cable uses.
-    pub fn free_ports(&self, id: u32) -> Vec<u8> {
+    pub fn free_ports(&self, id: u32) -> Vec<u16> {
         let total = self.dev(id).map_or(0, |d| d.port_count()).min(256);
-        let used: Vec<u8> = self.links.iter().filter(|l| (l.a == id || l.b == id) && l.medium.takes_port()).filter_map(|l| l.port_at(id)).collect();
-        (0..total as u16).map(|p| p as u8).filter(|p| !used.contains(p)).collect()
+        let used: Vec<u16> = self.links.iter().filter(|l| (l.a == id || l.b == id) && l.medium.takes_port()).filter_map(|l| l.port_at(id)).collect();
+        (0..total as u16).filter(|p| !used.contains(p)).collect()
     }
 
     /// The free port a cable would be best off in.
-    pub fn best_free_port(&self, l: &Link, id: u32) -> Option<u8> {
+    pub fn best_free_port(&self, l: &Link, id: u32) -> Option<u16> {
         self.free_ports(id).into_iter().filter_map(|p| self.port_rank(l, id, p).map(|r| (r, Reverse(p), p))).max().map(|x| x.2)
     }
 
     /// A free port of the same kind and side that's faster, when this end's port is what holds the cable back.
-    pub fn faster_free_port(&self, l: &Link, id: u32) -> Option<u8> {
+    pub fn faster_free_port(&self, l: &Link, id: u32) -> Option<u16> {
         let now = self.port_rank(l, id, l.port_at(id)?)?;
         let cap = self.cable_mbps(l).min(self.end_mbps(l, l.other(id).0));
         if now.2 >= cap {
@@ -189,7 +189,7 @@ impl Network {
     /// Gives every cable end a port: cables stay where they are while they fit, the rest take the best free
     /// port (the internet line first, then the cables to the fastest devices). The internet cloud has no ports.
     pub fn assign_ports(&mut self) {
-        let mut set: Vec<(usize, u32, Option<u8>)> = vec![];
+        let mut set: Vec<(usize, u32, Option<u16>)> = vec![];
         for d in self.devices.iter().filter(|d| d.kind != Kind::Internet) {
             let total = d.port_count();
             let mut used = vec![false; total];
@@ -204,12 +204,12 @@ impl Network {
             todo.sort_by_key(|&i| (!self.internet_end(&self.links[i], d.id), Reverse(peer_speed(&self.links[i])), self.links[i].id));
             for i in todo {
                 let l = &self.links[i];
-                let best = (0..total).filter(|&p| !used[p]).filter_map(|p| self.port_rank(l, d.id, p as u8).map(|r| (r, Reverse(p), p))).max().map(|x| x.2);
+                let best = (0..total).filter(|&p| !used[p]).filter_map(|p| self.port_rank(l, d.id, p as u16).map(|r| (r, Reverse(p), p))).max().map(|x| x.2);
                 if let Some(p) = best {
                     used[p] = true;
                 }
-                if best.map(|p| p as u8) != l.port_at(d.id) {
-                    set.push((i, d.id, best.map(|p| p as u8)));
+                if best.map(|p| p as u16) != l.port_at(d.id) {
+                    set.push((i, d.id, best.map(|p| p as u16)));
                 }
             }
         }
@@ -227,7 +227,7 @@ impl Network {
     }
 
     /// Moves a cable end to another port of its device; a cable already there swaps into the old one.
-    pub fn move_port(&mut self, link: u32, id: u32, to: u8) {
+    pub fn move_port(&mut self, link: u32, id: u32, to: u16) {
         let from = self.links.iter().find(|l| l.id == link).and_then(|l| l.port_at(id));
         if let Some(other) = self.links.iter_mut().find(|l| l.id != link && (l.a == id || l.b == id) && l.medium.takes_port() && l.port_at(id) == Some(to)) {
             other.set_port_at(id, from);
@@ -238,7 +238,7 @@ impl Network {
     }
 
     /// "port 3 · 1G RJ45"
-    pub fn port_name(&self, id: u32, p: u8) -> String {
+    pub fn port_name(&self, id: u32, p: u16) -> String {
         match self.dev(id).and_then(|d| d.port(p)) {
             Some(g) => format!("port {} · {} {}{}", p as u16 + 1, short_speed(g.mbps), g.kind.label(), if g.wan { " WAN" } else { "" }),
             None => format!("port {}", p as u16 + 1),
@@ -288,11 +288,11 @@ mod tests {
     fn cables_keep_their_port_and_moving_onto_a_used_port_swaps() {
         let mut n = template_seeded("home", 3);
         n.assign_ports();
-        let before: Vec<(Option<u8>, Option<u8>)> = n.links.iter().map(|l| (l.a_port, l.b_port)).collect();
+        let before: Vec<(Option<u16>, Option<u16>)> = n.links.iter().map(|l| (l.a_port, l.b_port)).collect();
         n.assign_ports();
         assert_eq!(before, n.links.iter().map(|l| (l.a_port, l.b_port)).collect::<Vec<_>>(), "stable");
         let sw = n.devices.iter().find(|d| d.kind == Kind::Switch).unwrap().id;
-        let mine: Vec<(u32, u8)> = n.links.iter().filter(|l| (l.a == sw || l.b == sw) && l.medium.takes_port()).map(|l| (l.id, l.port_at(sw).unwrap())).collect();
+        let mine: Vec<(u32, u16)> = n.links.iter().filter(|l| (l.a == sw || l.b == sw) && l.medium.takes_port()).map(|l| (l.id, l.port_at(sw).unwrap())).collect();
         assert!(mine.len() >= 2);
         let ((l1, p1), (l2, p2)) = (mine[0], mine[1]);
         n.move_port(l1, sw, p2);

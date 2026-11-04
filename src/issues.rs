@@ -20,7 +20,8 @@ pub enum Fix {
     /// Give an extender the main network's name.
     SameSsid(u32, String),
     /// Make a switch supply PoE+ with enough budget.
-    GivePoe(u32, f32),
+    /// The switch, the total budget it needs (W) and the per-port class (index into extras::POE).
+    GivePoe(u32, f32, u8),
     /// Turn on smart queueing on a home router.
     Sqm(u32),
     /// Move a cable's end (link, device) to the fastest free port.
@@ -38,6 +39,7 @@ impl Fix {
             Fix::FastRoamEverywhere => "Turn on fast roaming",
             Fix::Reconnect(_) => "Reconnect to the best",
             Fix::SameSsid(..) => "Use the same name",
+            Fix::GivePoe(_, _, c) if *c >= 3 => "Make it a PoE++ switch",
             Fix::GivePoe(..) => "Make it a PoE+ switch",
             Fix::Sqm(_) => "Turn on smart queueing",
             Fix::MovePort(..) => "Use the faster port",
@@ -132,7 +134,8 @@ impl Network {
                 } else {
                     format!("{} can't hear {} at all ({:.0} dBm{walls}). Move it, or add a Wi-Fi point on this side.", cl.name, ap.name, s.rssi)
                 };
-                v.push(issue(Level::Error, Some(cl.id), Some(l.id), text, Some(Fix::Reconnect(cl.id))));
+                let other = self.roam_candidates(cl, Network::joined(cl, ap)).iter().any(|c| c.0 != ap.id);
+                v.push(issue(Level::Error, Some(cl.id), Some(l.id), text, other.then_some(Fix::Reconnect(cl.id))));
                 continue;
             }
             let hidden = self.hidden(l);
@@ -232,14 +235,25 @@ impl Network {
         }
 
         // --- Power over Ethernet ---
-        let mut need: HashMap<u32, f32> = HashMap::new();
+        // Per switch: the total its devices need and the most one port must give (with cable loss and some headroom).
+        let mut need: HashMap<u32, (f32, f32)> = HashMap::new();
         for d in self.devices.iter().filter(|d| d.poe_draw > 0.0) {
             if let Some(l) = self.links.iter().find(|l| (l.a == d.id || l.b == d.id) && !l.medium.wireless()) {
-                *need.entry(l.other(d.id).0).or_default() += d.poe_draw * 1.2;
+                let e = need.entry(l.other(d.id).0).or_default();
+                e.0 += d.poe_draw * 1.2;
+                e.1 = e.1.max(d.poe_draw * 1.2);
             }
         }
         for (dev, text, sw) in self.poe_problems() {
-            let fix = sw.map(|s| Fix::GivePoe(s, (need.get(&s).copied().unwrap_or(30.0) / 10.0).ceil() * 10.0 + 10.0));
+            // An over-budget switch is the device itself (poe_problems names no other supplier then).
+            let sw = sw.or_else(|| self.dev(dev).filter(|d| d.poe_class > 0).map(|d| d.id));
+            let fix = sw.map(|s| {
+                let (total, port) = need.get(&s).copied().unwrap_or((30.0, 30.0));
+                // The smallest standard whose port carries the hungriest device, never less than it has (PoE+ at least).
+                let class = (2..crate::extras::POE.len()).find(|&c| crate::extras::POE[c].1 >= port).unwrap_or(crate::extras::POE.len() - 1) as u8;
+                let class = class.max(self.dev(s).map_or(0, |d| d.poe_class));
+                Fix::GivePoe(s, (total / 10.0).ceil() * 10.0 + 10.0, class)
+            });
             v.push(issue(Level::Error, Some(dev), None, text, fix));
         }
 
@@ -430,15 +444,15 @@ impl Network {
                 d.sqm = true;
                 format!("{} now runs smart queueing: the line stays responsive when it's full.", d.name)
             }
-            Fix::GivePoe(id, w) => {
+            Fix::GivePoe(id, w, class) => {
                 let d = self.dev_mut(*id).unwrap();
-                // The upgrade costs extra once, not every time the fix is offered.
-                if d.poe_class < 2 {
-                    d.price += 60.0;
-                }
-                d.poe_class = d.poe_class.max(2);
+                // What a switch with each PoE standard costs on top of a plain one: the upgrade is paid once.
+                const EXTRA: [f32; 5] = [0.0, 40.0, 60.0, 120.0, 160.0];
+                let class = (*class).min(4).max(d.poe_class);
+                d.price += EXTRA[class as usize] - EXTRA[d.poe_class.min(4) as usize];
+                d.poe_class = class;
                 d.poe_budget = d.poe_budget.max(*w);
-                format!("{} now supplies PoE+ (30 W per port, {:.0} W in total).", d.name, d.poe_budget)
+                format!("{} now supplies {} ({:.0} W in total).", d.name, crate::extras::POE[class as usize].0, d.poe_budget)
             }
             Fix::SameSsid(id, ssid) => {
                 let d = self.dev_mut(*id).unwrap();
@@ -459,6 +473,8 @@ impl Network {
                 x.1 -= 6.0;
             }
         });
+        // Staying put isn't a reconnect.
+        c.retain(|x| x.0 != ap.id);
         c.sort_by(|a, b| b.1.total_cmp(&a.1));
         let Some(&(best, _)) = c.first() else { return "No other access point in reach.".into() };
         let l = self.links.iter_mut().find(|x| x.id == link.id).unwrap();

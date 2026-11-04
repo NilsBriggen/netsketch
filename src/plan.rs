@@ -94,24 +94,27 @@ impl Network {
     }
 
     /// Apply every one-click fix the checks offer (fixes can reveal new ones, so a few passes), then
-    /// hand out addresses again. Returns what was done.
+    /// hand out addresses again. Returns what was done: only fixes whose problem went away count.
     pub fn fix_all(&mut self) -> Vec<String> {
-        let mut done = vec![];
+        let offered = |n: &Network| n.check().into_iter().filter_map(|i| i.fix).map(|f| (format!("{f:?}"), f)).collect::<Vec<_>>();
+        let (mut done, mut stuck) = (vec![], std::collections::HashSet::new());
         for _ in 0..3 {
-            let mut fixes: Vec<_> = self.check().into_iter().filter_map(|i| i.fix).collect();
+            let mut fixes = offered(self);
             // Several problems can offer the same fix (one PoE switch for three cameras): apply it once.
-            let mut seen = vec![];
-            fixes.retain(|f| {
-                let k = format!("{f:?}");
-                let new = !seen.contains(&k);
-                seen.push(k);
-                new
-            });
+            // A fix that didn't help last pass isn't tried again.
+            let mut seen = std::collections::HashSet::new();
+            fixes.retain(|(k, _)| !stuck.contains(k) && seen.insert(k.clone()));
             if fixes.is_empty() {
                 break;
             }
-            for f in fixes {
-                done.push(self.apply_fix(&f));
+            let applied: Vec<(String, String)> = fixes.into_iter().map(|(k, f)| (k, self.apply_fix(&f))).collect();
+            let still: std::collections::HashSet<String> = offered(self).into_iter().map(|(k, _)| k).collect();
+            for (k, msg) in applied {
+                if still.contains(&k) {
+                    stuck.insert(k);
+                } else {
+                    done.push(msg);
+                }
             }
         }
         self.run_dhcp();
@@ -167,5 +170,36 @@ mod tests {
         let mut n = template("nightmare");
         assert!(!n.fix_all().is_empty());
         assert!(!n.check().iter().any(|i| i.text.contains("broadcast storm")));
+    }
+
+    #[test]
+    fn a_hungry_poe_device_gets_poe_plus_plus_and_the_problem_goes_away() {
+        use crate::net::{Kind, Medium};
+        let mut n = template("home");
+        let sw = n.add_device(Kind::Switch, [300.0, 300.0]);
+        let ap = n.add_device(Kind::AccessPoint, [340.0, 300.0]);
+        n.connect(sw, ap, Medium::Cat6).unwrap();
+        n.dev_mut(sw).unwrap().poe_class = 2;
+        n.dev_mut(ap).unwrap().poe_draw = 45.0;
+        let fix = n.check().into_iter().filter_map(|i| i.fix).find(|f| matches!(f, crate::issues::Fix::GivePoe(s, ..) if *s == sw)).expect("a PoE fix");
+        assert!(matches!(fix, crate::issues::Fix::GivePoe(_, _, c) if c >= 3), "{fix:?}");
+        n.apply_fix(&fix);
+        assert!(n.poe_problems().iter().all(|p| p.0 != ap), "{:?}", n.poe_problems());
+    }
+
+    #[test]
+    fn reconnect_moves_to_another_access_point_and_fix_all_counts_only_what_helped() {
+        let mut n = template("roaming");
+        for d in n.devices.iter().filter(|d| d.kind.wifi_client() && !d.kind.radio()).map(|d| d.id).collect::<Vec<_>>() {
+            let Some(l) = n.wifi_link_of(d).cloned() else { continue };
+            let Some((ap, _)) = n.wifi_ends(&l).map(|(a, c)| (a.id, c.id)) else { continue };
+            n.reconnect(d);
+            let now = n.wifi_link_of(d).cloned().unwrap();
+            let moved = n.wifi_ends(&now).unwrap().0.id;
+            assert!(moved != ap || n.reconnect(d).starts_with("No other"), "reconnect stayed on the same access point");
+        }
+        let before = n.check().iter().filter(|i| i.fix.is_some()).count();
+        let done = n.fix_all();
+        assert!(done.len() <= before.max(1) * 3, "{done:?}");
     }
 }

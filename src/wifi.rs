@@ -796,11 +796,25 @@ impl Network {
             .devices
             .iter()
             .filter(|a| a.kind.radio() && !a.off && Network::names_of(a).iter().any(|n| n.0 == ssid) && a.id != client.id && self.upstream(client).map(|u| u.id) != Some(a.id))
-            .filter(|a| a.kind != Kind::Extender || self.upstream(a).is_some())
+            // An extender only counts when it reaches the router, and not through this client (two extenders feeding each other).
+            .filter(|a| a.kind != Kind::Extender || (self.upstream(a).is_some() && !self.feeds_from(a, client.id)))
             .map(|a| (a.id, self.best_rssi(a, client.pos, client.floor)))
             .collect();
         v.sort_by(|a, b| b.1.total_cmp(&a.1));
         v
+    }
+
+    /// Whether `dev` gets its Wi-Fi through `via` (directly or further up a chain of extenders).
+    fn feeds_from(&self, dev: &Device, via: u32) -> bool {
+        let mut cur = self.upstream(dev);
+        for _ in 0..8 {
+            match cur {
+                Some(u) if u.id == via => return true,
+                Some(u) => cur = self.upstream(u),
+                None => return false,
+            }
+        }
+        false
     }
 
     /// One step of a client's roaming logic. Returns what happened when it switched.

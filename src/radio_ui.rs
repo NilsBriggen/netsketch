@@ -87,8 +87,8 @@ pub fn issue_row(ui: &mut egui::Ui, i: &Issue) -> (bool, Option<Fix>) {
     (clicked, fix)
 }
 
-/// Search box over the built-in product catalog; picking a product copies its hardware onto the device (returns true then).
-pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut String) -> bool {
+/// Search box over the built-in product catalog; picking a product copies its hardware onto the device and returns the device as it was.
+pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut String) -> Option<Device> {
     const SHOWN: usize = 8;
     if let Some(p) = crate::catalog::find(&d.model) {
         ui.label(RichText::new(format!("{} {}", p.year, p.note)).small().color(DIM)).on_hover_text(format!("{}\nSpecs from {}", p.summary(), p.source));
@@ -97,9 +97,9 @@ pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut Stri
     ui.add(TextEdit::singleline(query).hint_text(format!("{}  Find a real model ({total} in the catalog)", ic::MAGNIFYING_GLASS)).desired_width(ui.available_width() - 8.0))
         .on_hover_text("Type a brand or name — Swisscom, Internet-Box, FRITZ!Box, Deco, Orbi, UniFi… — and pick it to copy its radio, ports, power use and price");
     if query.trim().is_empty() {
-        return false;
+        return None;
     }
-    let mut applied = false;
+    let mut applied = None;
     let hits = crate::catalog::search(d.kind, query);
     if hits.is_empty() {
         ui.label(RichText::new("No model matches. Try just the brand, or pick a generic type below.").small().color(DIM));
@@ -110,9 +110,9 @@ pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut Stri
         job.append(&format!("\n{}", p.summary()), 0.0, egui::TextFormat { font_id: FontId::proportional(11.5), color: DIM, ..Default::default() });
         let r = ui.selectable_label(d.model == p.title(), job).on_hover_text(&p.note);
         if r.clicked() {
+            applied = Some(d.clone());
             p.apply(d);
             query.clear();
-            applied = true;
         }
     }
     if hits.len() > SHOWN {
@@ -144,14 +144,37 @@ impl App {
         // About 14 screen pixels per cell, never finer than 25 cm.
         let cell = (14.0 / self.zoom).max(PX_PER_M / 4.0).round();
         let (tl, br) = (self.to_world(rect.min), self.to_world(rect.max));
-        let key = (self.floor, cell as i32, [(tl.x / cell).floor() as i32, (tl.y / cell).floor() as i32, (br.x / cell).ceil() as i32, (br.y / cell).ceil() as i32], self.heat_band);
-        // Recompute when the view changed or every half second (devices may have moved).
-        let fresh = self.heat_cache.as_ref().is_some_and(|c| c.0 == key && now - c.2 < 0.5);
+        let key = (self.floor, cell as i32, self.heat_band);
+        let view = [(tl.x / cell).floor() as i32, (tl.y / cell).floor() as i32, (br.x / cell).ceil() as i32, (br.y / cell).ceil() as i32];
+        let radios: Vec<&Device> = self.net.devices.iter().filter(|d| d.kind.radio() && !d.off && d.bands.iter().any(|b| *b)).collect();
+        // Panning stays inside the area already worked out (a quarter view extra each side); twice a second the
+        // radios and walls are compared, and only a change redraws.
+        let inside = |c: &((i8, i32, usize), [i32; 4], Vec<(Rect, Color32)>, f64, u64)| c.0 == key && c.1[0] <= view[0] && c.1[1] <= view[1] && c.1[2] >= view[2] && c.1[3] >= view[3];
+        let fingerprint = || {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_vec(&(&radios, &self.net.walls, self.net.slab)).unwrap_or_default().hash(&mut h);
+            h.finish()
+        };
+        let mut stamp = 0;
+        let fresh = match self.heat_cache.as_mut() {
+            Some(c) if inside(c) && now - c.3 < 0.5 => true,
+            Some(c) if inside(c) => {
+                stamp = fingerprint();
+                c.3 = now;
+                c.4 == stamp
+            }
+            _ => false,
+        };
         if !fresh {
-            let radios: Vec<&Device> = self.net.devices.iter().filter(|d| d.kind.radio() && !d.off && d.bands.iter().any(|b| *b)).collect();
+            if stamp == 0 {
+                stamp = fingerprint();
+            }
+            let (mx, my) = ((view[2] - view[0]) / 4 + 1, (view[3] - view[1]) / 4 + 1);
+            let area = [view[0] - mx, view[1] - my, view[2] + mx, view[3] + my];
             let mut cells = vec![];
-            for cy in key.2[1]..key.2[3] {
-                for cx in key.2[0]..key.2[2] {
+            for cy in area[1]..area[3] {
+                for cx in area[0]..area[2] {
                     let (x, y) = (cx as f32 * cell, cy as f32 * cell);
                     let p = [x + cell / 2.0, y + cell / 2.0];
                     let best = radios
@@ -166,9 +189,9 @@ impl App {
                     }
                 }
             }
-            self.heat_cache = Some((key, cells, now));
+            self.heat_cache = Some((key, area, cells, now, stamp));
         }
-        for (r, c) in &self.heat_cache.as_ref().unwrap().1 {
+        for (r, c) in &self.heat_cache.as_ref().unwrap().2 {
             let min = self.to_screen(r.min.to_vec2());
             painter.rect_filled(Rect::from_min_size(min, r.size() * self.zoom + Vec2::splat(0.6)), 0, *c);
         }
@@ -406,13 +429,17 @@ impl App {
         }
         let speaker = kind == Kind::Speaker;
         if Self::section(ui, if kind == Kind::Neighbor { "Their Wi-Fi" } else if speaker { "Speaker mesh radio" } else { "Wi-Fi hardware" }) {
-        if !speaker && catalog_picker(ui, d, &mut self.catalog_query) {
-            self.replug = Some(id);
+        if !speaker {
+            if let Some(old) = catalog_picker(ui, d, &mut self.catalog_query) {
+                self.before = Some(crate::Before::Device(old));
+                self.replug = Some(id);
+            }
         }
         egui::ComboBox::from_id_salt(("preset", id)).selected_text(if d.model.is_empty() { "Custom".to_string() } else { d.model.clone() }).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
             // Speakers have their own radio; routers and access points can't be a speaker.
             for p in RADIO_PRESETS.iter().filter(|p| p.name.starts_with("Multi-room speaker") == speaker) {
                 if ui.selectable_label(d.model == p.name, p.name).clicked() {
+                    self.before = Some(crate::Before::Device(d.clone()));
                     p.apply(d);
                 }
             }
@@ -555,6 +582,7 @@ impl App {
             egui::ComboBox::from_id_salt(("cpreset", id)).selected_text(if d.model.is_empty() { "Choose a typical device…".to_string() } else { d.model.clone() }).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
                 for p in CLIENT_PRESETS {
                     if ui.selectable_label(d.model == p.name, p.name).clicked() {
+                        self.before = Some(crate::Before::Device(d.clone()));
                         p.apply(d);
                     }
                 }

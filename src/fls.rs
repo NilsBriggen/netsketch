@@ -10,8 +10,10 @@ use std::io::Read;
 pub fn import(bytes: &[u8]) -> Result<(Network, usize), String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| "This isn't a valid .fls project (not a zip archive).")?;
     let mut xml = String::new();
+    // A real project is a few hundred KB; the cap keeps a zip bomb from filling the memory.
     zip.by_name("projekt/konfiguration.xml")
         .map_err(|_| "This .fls file has no project configuration inside.".to_string())?
+        .take(50 << 20)
         .read_to_string(&mut xml)
         .map_err(|e| format!("Couldn't unpack the project: {e}"))?;
     from_xml(&xml)
@@ -52,6 +54,7 @@ fn rect_field(n: Node, name: &str) -> Option<f32> {
         .trim()
         .parse()
         .ok()
+        .filter(|v: &f32| v.is_finite() && v.abs() < 1e6)
 }
 
 pub fn from_xml(xml: &str) -> Result<(Network, usize), String> {
@@ -145,7 +148,7 @@ pub fn from_xml(xml: &str) -> Result<(Network, usize), String> {
             continue;
         };
         let wireless = prop(*c, |p| p == "wireless").as_deref() == Some("true");
-        let Ok(link) = net.connect(new_ids[a.0], new_ids[b.0], if wireless { Medium::WiFi } else { Medium::Cat6 }) else {
+        let Ok(link) = net.connect_unplugged(new_ids[a.0], new_ids[b.0], if wireless { Medium::WiFi } else { Medium::Cat6 }) else {
             skipped += 1;
             continue;
         };
@@ -169,6 +172,7 @@ pub fn from_xml(xml: &str) -> Result<(Network, usize), String> {
             }
         }
     }
+    net.assign_ports();
     Ok((net, skipped))
 }
 

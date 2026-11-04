@@ -221,15 +221,16 @@ impl App {
 
     /// Coverage score of the shown storey and a suggestion where one more access point helps most.
     fn coverage_section(&mut self, ui: &mut egui::Ui) {
+        // No walls, no rooms to score; a closed section isn't worked out at all.
+        if !self.net.walls.iter().any(|w| w.floor == self.floor) || !Self::section(ui, "Wi-Fi coverage") {
+            return;
+        }
         let now = ui.input(|i| i.time);
         if !self.cov_cache.as_ref().is_some_and(|c| c.0 == self.floor && now - c.1 < 1.0) {
             self.cov_cache = Some((self.floor, now, self.net.coverage(self.floor)));
         }
         let Some(Some(c)) = self.cov_cache.as_ref().map(|c| c.2.as_ref()) else { return };
         let (good, usable, area) = (c.good, c.usable, c.area_m2);
-        if !Self::section(ui, "Wi-Fi coverage") {
-            return;
-        }
         let col = if good >= 0.9 { GREEN } else if good >= 0.7 { AMBER } else { RED };
         ui.label(RichText::new(format!("{:.0}% of this storey (≈ {area:.0} m²) has good Wi-Fi, {:.0}% at least usable.", good * 100.0, usable * 100.0)).color(col))
             .on_hover_text(format!("Good: {:.0} dBm or better. Usable: {:.0} dBm or better. Measured inside the outline of the walls on this storey.", plan::GOOD, plan::USABLE));

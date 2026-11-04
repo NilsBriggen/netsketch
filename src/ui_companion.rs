@@ -51,22 +51,24 @@ impl App {
         let now = Self::now(ctx);
         if now - self.phone_plan_at > 1.5 {
             self.phone_plan_at = now;
-            link.set_plan(self.net.plan_pack());
+            link.set_plan(self.net.plan_pack(), &self.net.title);
         }
         let got = link.take();
         if got.is_empty() {
             return;
         }
-        self.snapshot();
+        // Undo only gets a step when something actually arrived.
+        let mut next = self.net.clone();
         let mut added = 0;
         for body in got {
-            match self.net.import_companion(&body) {
+            match next.import_companion(&body) {
                 Ok((p, _)) => added += p,
                 Err(e) => self.say(ctx, format!("The phone sent something unreadable: {e}")),
             }
         }
         if added > 0 {
-            self.issues = None;
+            self.snapshot();
+            self.net = next;
             let last = self.net.points.last().map(|p| (p.name.clone(), p.placed, p.floor));
             if let Some((name, placed, floor)) = last {
                 self.floor = floor;
@@ -85,7 +87,7 @@ impl App {
                     let code = format!("{:04}", crate::sim::new_seed() % 10_000);
                     match phone_link::PhoneLink::start(phone_link::TCP_PORT, phone_link::UDP_PORT, code, self.net.title.clone()) {
                         Ok(l) => {
-                            l.set_plan(self.net.plan_pack());
+                            l.set_plan(self.net.plan_pack(), &self.net.title);
                             self.phone = Some(l);
                         }
                         Err(e) => self.say(&ctx, format!("Couldn't start the phone link: {e}")),

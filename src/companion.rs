@@ -133,7 +133,9 @@ impl Network {
         if f.points.iter().any(|p| [p.x, p.y].iter().flatten().any(|v| !v.is_finite() || v.abs() > 10_000.0) || p.networks.iter().any(|s| !s.rssi.is_finite())) {
             return Err("the file has impossible positions or readings".into());
         }
-        for (i, p) in f.points.into_iter().enumerate() {
+        for (i, mut p) in f.points.into_iter().enumerate() {
+            // The same storeys a plan allows (Network::sanitize).
+            p.floor = p.floor.clamp(-3, 20);
             let placed = p.x.is_some() && p.y.is_some();
             let pos = match (p.x, p.y) {
                 (Some(x), Some(y)) => [x * PX_PER_M, y * PX_PER_M],

@@ -134,6 +134,12 @@ enum Sel {
     Label(u32),
 }
 
+/// What an in-place edit replaced, for its undo step (App::snapshot_before).
+enum Before {
+    Device(net::Device),
+    Link(net::Link),
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Bottom {
     Problems,
@@ -247,17 +253,22 @@ struct App {
     catalog_query: String,
     /// A device that got new hardware: its cables go into the best of its new ports.
     replug: Option<u32>,
+    /// A device or cable as it was before an edit rewrote it in place (new hardware, cable type, ports); next frame makes it an undo step.
+    before: Option<Before>,
     reading: f32,
     issues: Option<Vec<Issue>>,
     undo: Vec<Network>,
     issues_at: f64,
+    /// Fingerprint of the plan the problem list was made from: in Design an unchanged plan isn't checked again.
+    issues_key: u64,
     /// Each device's real speed to the internet (whole path) and what limits it; refreshed with the problem list.
     e2e: HashMap<u32, (f32, String)>,
     /// Spanning tree as of the last refresh (it's costly to work out on big plans every frame).
     stp_cache: Option<crate::stp::Stp>,
     load_cache: Option<extras::Load>,
     /// Wi-Fi map cells in map coordinates, with what they were computed for and when.
-    heat_cache: Option<((i8, i32, [i32; 4], usize), Vec<(Rect, Color32)>, f64)>,
+    /// (storey, cell size, band), the area covered in cells, the cells, when it was checked, and a fingerprint of the radios and walls.
+    heat_cache: Option<((i8, i32, usize), [i32; 4], Vec<(Rect, Color32)>, f64, u64)>,
     /// Wi-Fi map: 0 = best band, 1..=3 = 2.4 / 5 / 6 GHz only.
     heat_band: usize,
     /// Coverage score of the shown storey (storey, when computed, score).
@@ -353,10 +364,12 @@ impl App {
             model_name: String::new(),
             catalog_query: String::new(),
             replug: None,
+            before: None,
             reading: -65.0,
             issues: None,
             undo: vec![],
             issues_at: 0.0,
+            issues_key: 0,
             e2e: HashMap::new(),
             stp_cache: None,
             load_cache: None,
@@ -418,6 +431,25 @@ impl App {
             self.undo.remove(0);
         }
         self.issues = None;
+    }
+
+    /// An undo step for an edit already made in place: the plan as it was, with that device or cable put back.
+    fn snapshot_before(&mut self, old: Before) {
+        let now = self.net.clone();
+        match old {
+            Before::Device(o) => {
+                if let Some(d) = self.net.dev_mut(o.id) {
+                    *d = o;
+                }
+            }
+            Before::Link(o) => {
+                if let Some(l) = self.net.links.iter_mut().find(|l| l.id == o.id) {
+                    *l = o;
+                }
+            }
+        }
+        self.snapshot();
+        self.net = now;
     }
 
     fn load(&mut self, mut n: Network) {
@@ -1545,9 +1577,12 @@ impl App {
             }
             // The internet cloud is the outside world: no ports or storey to plan.
             if kind != Kind::Internet && Self::section(ui, "Hardware") {
-            // Wired routers and firewalls come from the catalog here (Wi-Fi gear does in "Wi-Fi hardware").
-            if kind == Kind::Router && radio_ui::catalog_picker(ui, d, &mut self.catalog_query) {
-                self.replug = Some(id);
+            // Plain wired routers come from the catalog here (Wi-Fi gear does in "Wi-Fi hardware").
+            if kind == Kind::Router {
+                if let Some(old) = radio_ui::catalog_picker(ui, d, &mut self.catalog_query) {
+                    self.before = Some(Before::Device(old));
+                    self.replug = Some(id);
+                }
             }
             egui::Grid::new(("hw", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
                 // Phones and gadgets have no socket; hosts have one, so just its speed.
@@ -1572,7 +1607,10 @@ impl App {
             if !kind.foreign() && !kind.is_host() {
                 ui.add_space(4.0);
                 ui.label(RichText::new("Ports").color(DIM));
-                ui_extras::port_editor(ui, id, &mut d.ports, &plugged);
+                let old = d.clone();
+                if ui_extras::port_editor(ui, id, &mut d.ports, &plugged) {
+                    self.before = Some(Before::Device(old));
+                }
             }
             }
             if Self::section(ui, "Price and notes") {
@@ -1630,6 +1668,7 @@ impl App {
             (self.net.dev(l.a).unwrap().kind, self.net.dev(l.b).unwrap().kind)
         };
         let l = self.net.links.iter_mut().find(|l| l.id == id).unwrap();
+        let old = l.clone();
         Self::header(ui, if l.medium == Medium::WiFi { ic::WIFI_HIGH } else { ic::LINK }, medium_color(l.medium), "Connection", &format!("{a}  {}  {b}", ic::ARROWS_LEFT_RIGHT));
         // Only link types these two devices can actually use.
         let (ka, kb) = (kinds.0, kinds.1);
@@ -1648,6 +1687,9 @@ impl App {
                     ui.selectable_value(&mut l.medium, m, format!("{} — {}", m.label(), m.speed()));
                 }
             });
+            if l.medium != old.medium {
+                self.before = Some(Before::Link(old.clone()));
+            }
             ui.end_row();
             if l.medium == Medium::Powerline && !catalog::powerline().is_empty() {
                 ui.label(RichText::new("Kit").color(DIM));
@@ -2398,6 +2440,9 @@ impl eframe::App for App {
             self.shown_title = title;
         }
 
+        if let Some(old) = self.before.take() {
+            self.snapshot_before(old);
+        }
         // Cables follow port edits and new hardware before anything reads their speed.
         if let Some(id) = self.replug.take() {
             self.net.replug(id);
@@ -2405,12 +2450,25 @@ impl eframe::App for App {
         self.net.assign_ports();
         // The problem list and busy-hour traffic refresh a few times a second, not every frame (big plans stay smooth).
         let now = Self::now(&ctx);
-        if self.issues_at + 0.3 <= now || self.issues.is_none() {
+        let due = self.issues_at + 0.3 <= now || self.issues.is_none();
+        // Simulate moves things that aren't saved (walks, roaming), so it always refreshes; Design only after an edit.
+        let key = if due && self.mode != Mode::Simulate {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_vec(&self.net).unwrap_or_default().hash(&mut h);
+            h.finish()
+        } else {
+            0
+        };
+        if due && (key == 0 || key != self.issues_key || self.issues.is_none()) {
+            self.issues_key = key;
             self.issues = Some(self.net.check());
             self.load_cache = (self.mode == Mode::Simulate).then(|| self.net.loads());
             let stp = self.net.stp();
             self.stp_cache = Some(stp.clone());
             self.e2e = self.net.devices.iter().filter(|d| d.kind.is_host() && !d.off).filter_map(|d| Some((d.id, self.net.internet_rate(d.id, &stp)?))).collect();
+        }
+        if due {
             self.issues_at = now;
         }
         let issues = self.issues.clone().unwrap_or_default();

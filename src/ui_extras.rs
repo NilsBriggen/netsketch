@@ -265,6 +265,7 @@ impl App {
             }
         });
         if let Some(m) = apply {
+            self.snapshot();
             m.apply(self.net.dev_mut(id).unwrap());
             self.net.replug(id);
             if !self.net.models.iter().any(|x| x.name == m.name) {
@@ -392,8 +393,8 @@ pub(crate) fn speed_combo(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::f
     });
 }
 
-/// A device's ports as groups ("4 × 1 Gbit/s RJ45"), and who is plugged into which port.
-pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>, plugged: &[(u8, String)]) {
+/// A device's ports as groups ("4 × 1 Gbit/s RJ45"), and who is plugged into which port. True when a group was added or removed.
+pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>, plugged: &[(u16, String)]) -> bool {
     ui.vertical(|ui| {
         let mut remove = None;
         let mut first = 0u16;
@@ -417,7 +418,7 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
                 }
             });
             let end = first + g.n as u16;
-            let users: Vec<String> = plugged.iter().filter(|(p, _)| (first..end).contains(&(*p as u16))).map(|(p, who)| format!("{} {who}", *p as u16 + 1)).collect();
+            let users: Vec<String> = plugged.iter().filter(|(p, _)| (first..end).contains(p)).map(|(p, who)| format!("{} {who}", *p + 1)).collect();
             if !users.is_empty() {
                 ui.label(RichText::new(format!("{} {}", ic::PLUGS_CONNECTED, users.join(" · "))).small().color(DIM));
             }
@@ -426,10 +427,13 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
         if let Some(i) = remove {
             ports.remove(i);
         }
-        if ui.small_button(format!("{} Add ports", ic::PLUS)).clicked() {
+        let add = ui.small_button(format!("{} Add ports", ic::PLUS)).clicked();
+        if add {
             ports.push(PortGroup::rj45(1, 1000));
         }
-    });
+        remove.is_some() || add
+    })
+    .inner
 }
 
 impl App {
@@ -448,7 +452,7 @@ impl App {
                 ui.label(RichText::new(self.net.name(e)).color(DIM));
                 egui::ComboBox::from_id_salt(("lport", id, e)).selected_text(now.map_or("no port free".into(), |p| self.net.port_name(e, p))).width(210.0).show_ui(ui, |ui| {
                     let count = self.net.dev(e).map_or(0, |d| d.port_count()).min(256);
-                    for p in (0..count as u16).map(|p| p as u8).filter(|p| self.net.fits_port(&l, e, *p)) {
+                    for p in (0..count as u16).filter(|p| self.net.fits_port(&l, e, *p)) {
                         let who = users.iter().find(|(q, _)| *q == p && Some(p) != now).map_or(String::new(), |(_, w)| format!(" — {w}"));
                         if ui.selectable_label(now == Some(p), format!("{}{who}", self.net.port_name(e, p))).clicked() {
                             pick = Some((e, p));
