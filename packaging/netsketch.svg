@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- NetSketch: a small network (router, two devices) with Wi-Fi waves, in the app's slate and teal. -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#0F172A"/>
+  <g stroke="#2DD4BF" stroke-width="10" stroke-linecap="round" fill="none">
+    <path d="M128 150 L70 200 M128 150 L186 200"/>
+    <path d="M88 92 a56 56 0 0 1 80 0"/>
+    <path d="M104 110 a32 32 0 0 1 48 0"/>
+  </g>
+  <circle cx="128" cy="138" r="22" fill="#2DD4BF"/>
+  <circle cx="70" cy="200" r="16" fill="#60A5FA"/>
+  <circle cx="186" cy="200" r="16" fill="#60A5FA"/>
+</svg>

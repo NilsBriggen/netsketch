@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=NetSketch
+GenericName=Network planner
+Comment=Plan, simulate and learn networks: home Wi-Fi coverage, walls, cost and classroom exercises
+Comment[de]=Netzwerke planen, simulieren und lernen: WLAN-Abdeckung zu Hause, Wände, Kosten und Übungen für den Unterricht
+Exec=netsketch %f
+Icon=netsketch
+Categories=Education;ComputerScience;
+Keywords=network;wifi;wlan;filius;router;planner;
+StartupWMClass=netsketch
+Terminal=false

@@ -64,7 +64,16 @@ Old Filius projects (`.fls`) can be opened too.
 
 ## Getting started
 
-You need a recent stable [Rust toolchain](https://rustup.rs/).
+Download the latest version from the [releases page](https://github.com/NilsBriggen/netsketch/releases):
+
+| | |
+|---|---|
+| **Windows** | `NetSketch-…-x64.msi` installs it with a Start-menu entry and opens `.netplan` files; `…-portable.exe` runs without installing. Windows may warn that the publisher is unknown (the builds aren't code-signed): choose *More info → Run anyway*. |
+| **Linux** | `NetSketch-x86_64.AppImage`: make it executable (`chmod +x`) and run it. It needs GTK 3, which desktop Linux systems have. |
+| **macOS** (Apple silicon) | `netsketch-macos-arm64.tar.gz`: unpack it and run `netsketch`. It isn't notarised: if macOS refuses, run `xattr -d com.apple.quarantine netsketch` once. |
+| **Android** | `NetSketch-Survey-….apk`, the companion phone app (see below). |
+
+To build it yourself you need a recent stable [Rust toolchain](https://rustup.rs/).
 
 ```bash
 git clone https://github.com/NilsBriggen/netsketch.git
@@ -74,7 +83,7 @@ cargo run --release
 
 Plans are saved as `.netplan` files (JSON). Your own saved device models and the autosave live in `~/.config/netsketch/` (or `$XDG_CONFIG_HOME/netsketch/`).
 
-NetSketch is built with [egui/eframe](https://github.com/emilk/egui). It's developed and tested on Linux; eframe also supports Windows and macOS, but those haven't been tried.
+NetSketch is built with [egui/eframe](https://github.com/emilk/egui). It's developed and tested on Linux; the Windows and macOS builds pass the same tests in CI, but haven't been tried by hand yet.
 
 ### Development
 
@@ -84,7 +93,7 @@ cargo test ports                            # tests whose name contains "ports"
 cargo run -- --screenshot shots/now.png     # render the app to a PNG and exit
 ```
 
-GitHub Actions builds and tests every push on Linux, Windows and macOS; tagging a version (`v0.2.0`) attaches release builds for all three. German text lives in `data/de.json` (interface) and `data/lessons_de.json` (lessons): English text is the key, and anything missing stays English.
+GitHub Actions builds and tests every push on Linux, Windows and macOS. Tagging a version (`v0.2.0`) builds the AppImage, the Windows installer and portable exe, the macOS archive and the phone app, and publishes them as a GitHub release with the notes in `.github/release-notes/<tag>.md` (tags with a dash, like `v0.1-beta`, become pre-releases). The installer and desktop files are in `packaging/`. German text lives in `data/de.json` (interface) and `data/lessons_de.json` (lessons): English text is the key, and anything missing stays English.
 
 `CLAUDE.md` describes the architecture in more detail.
 
@@ -95,9 +104,11 @@ GitHub Actions builds and tests every push on Linux, Windows and macOS; tagging 
 - **Linked (recommended):** in NetSketch, choose *Real measurements → Link a phone (live)* and enter the 4-digit code on the phone. Your floor plan appears on the phone. Tap where you stand, press *Measure here*, and the reading lands in NetSketch, pinned in place.
 - **Offline:** measure anyway, then share the file and import it under *Real measurements → Import measurements…*.
 
+On the phone, each spot gets a plain-language verdict (weak signal, a sticky connection, the slow band, a crowded channel and which one to try), a channel chart and an optional speed test (download, upload, delay). The plan can be zoomed, and your points show in colour by signal strength. The app follows the phone's language (English or German) and its dark or light setting.
+
 Measured networks named like yours are matched to your access points. The others can be added as neighbours, positioned where their signal fits your readings. If the phone can't connect, allow TCP 47878 and UDP 47879 through the computer's firewall.
 
-Build the app with `./build.sh` (JDK 17+ and the Android SDK, no Gradle). CI builds it on every push, and from the first tagged release on, a ready-built `NetSketch-Survey.apk` is attached to each [GitHub release](https://github.com/NilsBriggen/netsketch/releases). [`INSTALL.txt`](companion-android/INSTALL.txt) walks through installing and linking it.
+Download `NetSketch-Survey-….apk` from the [releases](https://github.com/NilsBriggen/netsketch/releases), or build it with `./build.sh` (JDK 17+ and the Android SDK, no Gradle). CI builds it on every push. [`INSTALL.txt`](companion-android/INSTALL.txt) walks through installing and linking it.
 
 ## Adding hardware to the catalog
 

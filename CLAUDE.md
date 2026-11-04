@@ -21,7 +21,9 @@ cargo run -- --screenshot shots/now.png    # renders ~120 frames, saves a PNG, e
 
 The `--screenshot` mode is what the Craft Anything build checks use. It also turns autosave off.
 
-Android companion (`companion-android/`): `./build.sh` needs JDK 17+ and the Android SDK (platform 35, build-tools). It uses no Gradle: javac + aapt2 + d8 + apksigner. Its first step compiles `Survey.java`/`Link.java` with `test/SurveyJsonTest.java` on the host and **regenerates `sample.netsurvey`**. The Rust test in `companion.rs` reads that file with `include_str!`, so a change to the phone's file format must be checked from both sides.
+Android companion (`companion-android/`): `./build.sh` needs JDK 17+ and the Android SDK (platform 35, build-tools). It uses no Gradle: javac + aapt2 + d8 + apksigner. Its first step compiles the plain-Java parts (`Survey.java`, `Link.java`, `T.java`) with `test/SurveyJsonTest.java` on the host and **regenerates `sample.netsurvey`**. The Rust test in `companion.rs` reads that file with `include_str!`, so a change to the phone's file format must be checked from both sides. Phone text goes through `T.t("English")` / `T.f(template, args)`; German is the table in `T.java` (a host check compares placeholders).
+
+Releases: pushing a tag `v*` makes CI build the AppImage, MSI (WiX 5, `packaging/netsketch.wxs`), portable exe, macOS tarball and APK, and publish them with `.github/release-notes/<tag>.md` as the description. Write that file before tagging. The APK is signed with the `ANDROID_KEYSTORE` repo secret (base64 of the local `signing.keystore`).
 
 ## Architecture
 

@@ -1,0 +1,31 @@
+<!-- The Windows installer (WiX 5): NetSketch in Program Files, a Start-menu entry, and .netplan files opening in it.
+     Built by the release job: wix build packaging/netsketch.wxs -d Version=x.y.z -d Exe=path\to\netsketch.exe -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="NetSketch" Manufacturer="NetSketch" Version="$(var.Version)" UpgradeCode="578E3B74-25BD-4F46-A5AD-F7DB62D43C51" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of NetSketch is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="netsketch.ico" SourceFile="packaging\netsketch.ico" />
+    <Property Id="ARPPRODUCTICON" Value="netsketch.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/NilsBriggen/netsketch" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="NetSketch">
+        <Component Id="App">
+          <File Id="NetSketchExe" Source="$(var.Exe)" Name="netsketch.exe" KeyPath="yes">
+            <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="NetSketch" Description="Plan, simulate and learn networks" Icon="netsketch.ico" Advertise="yes" />
+          </File>
+          <File Id="License" Source="LICENSE" Name="LICENSE.txt" />
+          <ProgId Id="NetSketch.Plan" Description="NetSketch network plan" Icon="netsketch.ico">
+            <Extension Id="netplan" ContentType="application/x-netsketch-plan">
+              <Verb Id="open" Command="Open" TargetFile="NetSketchExe" Argument="&quot;%1&quot;" />
+            </Extension>
+          </ProgId>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="NetSketch">
+      <ComponentRef Id="App" />
+    </Feature>
+  </Package>
+</Wix>
