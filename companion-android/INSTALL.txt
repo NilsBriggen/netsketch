@@ -1,7 +1,8 @@
 NetSketch Survey — the companion app for Android phones (Android 10 or newer)
 
 Install
-  1. Copy NetSketch-Survey.apk to your phone (USB cable, cloud drive, or e-mail it to yourself).
+  1. Download NetSketch-Survey.apk from the project's GitHub releases (or build it with ./build.sh)
+     and copy it to your phone (USB cable, cloud drive, or e-mail it to yourself).
   2. Open it on the phone. Android asks to allow installing apps from this source — allow it once.
   3. Open "NetSketch Survey". The first measurement asks for permission to see nearby Wi-Fi networks
      (Android files this under location), and Location has to be switched on while you measure.

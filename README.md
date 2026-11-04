@@ -84,7 +84,7 @@ cargo run -- --screenshot shots/now.png     # render the app to a PNG and exit
 
 Measured networks named like yours are matched to your access points. The others can be added as neighbours, positioned where their signal fits your readings. If the phone can't connect, allow TCP 47878 and UDP 47879 through the computer's firewall.
 
-A ready-built `NetSketch-Survey.apk` is in that folder, and [`INSTALL.txt`](companion-android/INSTALL.txt) walks through installing and linking it. To build it yourself, run `./build.sh`. It needs JDK 17+ and the Android SDK, but no Gradle.
+A ready-built `NetSketch-Survey.apk` is attached to each [GitHub release](https://github.com/NilsBriggen/netsketch/releases), and [`INSTALL.txt`](companion-android/INSTALL.txt) walks through installing and linking it. To build it yourself, run `./build.sh`. It needs JDK 17+ and the Android SDK, but no Gradle.
 
 ## Adding hardware to the catalog
 

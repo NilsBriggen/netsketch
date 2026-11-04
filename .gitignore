@@ -3,5 +3,7 @@
 /companion-android/build/
 # A local debug key; build.sh makes a new one when it is missing.
 /companion-android/signing.keystore
+# Built by build.sh; published as a release asset instead.
+/companion-android/NetSketch-Survey.apk
 # Claude Code worktrees and local settings.
 /.claude/
