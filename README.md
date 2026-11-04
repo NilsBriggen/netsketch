@@ -32,7 +32,7 @@ Each entry links to the page its specs come from. Values that had to be estimate
 - A coverage heat map per storey and band (2.4, 5 and 6 GHz), from a multi-wall path-loss model: free-space distance plus each wall's material (hit at an angle costs more) and the floors in between.
 - European rules built in: 5 GHz channels 36–64 and 100–140 (30 dBm on the upper ones), 6 GHz up to 6425 MHz, radar (DFS) channel checks, and the 1/5/9/13 plan on 2.4 GHz.
 - Channel planning, neighbours' networks and interference, roaming and band steering. You can take a phone for a walk through the house and watch it hand over.
-- "Where would another access point help most?", a coverage score for every storey, and outdoor areas (garden, terrace) with their own score.
+- "Where would another access point help most?", a coverage score for every storey, and outdoor areas (garden, terrace) with their own score. You choose what good Wi-Fi means for you (browsing, video calls, or 4K and gaming), and the score, the map colours and its dBm legend follow.
 - Calibrate the model with real measurements: import survey files, or use the companion phone app (below).
 
 ### Simulate
@@ -44,10 +44,11 @@ Each entry links to the page its specs come from. Values that had to be estimate
 - Mail that follows MX records and is relayed between servers (`mail`, `inbox`), ARP and switch MAC tables, and RIP dynamic routing that spreads one 30-second update at a time.
 
 ### Plan the practical side
-- A shopping list with prices, the cable you'll need to lay, and yearly power use and running cost (TVs and PCs count their typical hours, not 24/7).
+- A shopping list with prices, one line per model, leaving out what you already own (phones, computers and TVs by default). It also gives the cable you'll need to lay, and yearly power use and running cost (TVs and PCs count their typical hours, not 24/7).
 - Compare two saved options side by side: cost, cable, power, Wi-Fi coverage and open problems.
-- Export the plan, its addresses and the shopping list as a document, or the map as a picture.
-- Undo and redo, autosave, and "Recover last session".
+- Export a printable report, a web page that any browser saves as PDF. It has each storey's Wi-Fi map, the access points and channels, the shopping list, open problems and the addresses. You can also save the map as a picture.
+- Floor-plan pictures are saved inside the plan file, so a plan you send keeps them.
+- Undo and redo, autosave, "Recover last session", Save as, and recent plans. NetSketch asks before closing with unsaved changes. Plans, phone surveys and pictures can be dropped on the window.
 
 ### Learn
 **Learn** mode has 19 short, up-to-date lessons, from "How a network fits together" through IPv6, Wi-Fi security, mesh and roaming to VLANs, each with a hands-on "try it". There are also ready-made scenarios that each show a real problem:
@@ -104,7 +105,7 @@ GitHub Actions builds and tests every push on Linux, Windows and macOS. Tagging 
 - **Linked (recommended):** in NetSketch, choose *Real measurements → Link a phone (live)* and enter the 4-digit code on the phone. Your floor plan appears on the phone. Tap where you stand, press *Measure here*, and the reading lands in NetSketch, pinned in place.
 - **Offline:** measure anyway, then share the file and import it under *Real measurements → Import measurements…*.
 
-On the phone, each spot gets a plain-language verdict (weak signal, a sticky connection, the slow band, a crowded channel and which one to try), a channel chart and an optional speed test (download, upload, delay). The plan can be zoomed, and your points show in colour by signal strength. The app follows the phone's language (English or German) and its dark or light setting.
+On the phone, each spot gets a plain-language verdict (weak signal, a sticky connection, the slow band, a crowded channel and which one to try), a channel chart and an optional speed test (download, upload, delay), always over Wi-Fi, never mobile data. *Quick point* records just your own network's signal without a scan. That's fast for many spots, because Android allows only 4 scans every 2 minutes. A ping test checks the delay to your router, *Measure again here* replaces a point, and a measurement can be cancelled. The plan can be zoomed, and your points show in colour by signal strength. The app follows the phone's language (English or German) and its dark or light setting.
 
 Measured networks named like yours are matched to your access points. The others can be added as neighbours, positioned where their signal fits your readings. If the phone can't connect, allow TCP 47878 and UDP 47879 through the computer's firewall.
 
