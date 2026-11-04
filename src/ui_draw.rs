@@ -86,7 +86,7 @@ impl App {
             }
             ui.close();
         }
-        if ui.button(format!("{}  {}", ic::POWER, if off { "Switch on" } else { "Switch off" })).clicked() {
+        if ui.button(format!("{}  {}", ic::POWER, if off { tr("Switch on") } else { tr("Switch off") })).clicked() {
             self.net.dev_mut(id).unwrap().off = !off;
             self.issues = None;
             ui.close();

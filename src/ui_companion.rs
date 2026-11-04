@@ -25,7 +25,7 @@ impl App {
             if resp.clicked() {
                 self.sel = Sel::Point(id);
             }
-            if resp.drag_started() {
+            if resp.drag_started() && self.mode == Mode::Design {
                 self.snapshot();
             }
             if resp.dragged() && self.mode == Mode::Design {
@@ -40,7 +40,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
             let p = self.net.points.iter().find(|p| p.id == id).unwrap();
-            let top: Vec<String> = p.networks.iter().take(5).map(|s| format!("{:>4.0} dBm  {}", s.rssi, if s.ssid.is_empty() { "(hidden)" } else { &s.ssid })).collect();
+            let top: Vec<String> = p.networks.iter().take(5).map(|s| format!("{:>4.0} dBm  {}", s.rssi, if s.ssid.is_empty() { tr("(hidden)") } else { &s.ssid })).collect();
             resp.on_hover_text(trf("{} — {} networks measured\n{}", &[&p.name, &(p.networks.len()), &(top.join("\n"))]));
         }
     }
@@ -155,13 +155,13 @@ impl App {
                     ui.horizontal(|ui| {
                     ui.add_sized([34.0, 18.0], egui::Label::new(RichText::new(format!("{:.0}", m.best)).monospace().color(quality_color(m.best))));
                     let chans: Vec<String> = m.radios.iter().map(|(b, c, _)| format!("{} ch {c}", b.label())).collect();
-                    let busy = m.utilization.map(|u| format!(" · {:.0}% busy", u * 100.0)).unwrap_or_default();
+                    let busy = m.utilization.map(|u| format!(" · {}", trf("{}% busy", &[&format!("{:.0}", u * 100.0)]))).unwrap_or_default();
                     ui.vertical(|ui| {
                         ui.set_width((ui.available_width() - 170.0).max(90.0));
-                        ui.label(if m.ssid.is_empty() { "(hidden)" } else { &m.ssid });
+                        ui.label(if m.ssid.is_empty() { tr("(hidden)") } else { &m.ssid });
                         ui.label(RichText::new(format!("{}{busy}", chans.join(" · "))).small().color(pal().dim));
                     });
-                    let current = m.dev.and_then(|d| targets.iter().find(|t| t.0 == d)).map(|t| t.1.clone()).unwrap_or_else(|| "Not in the plan".into());
+                    let current = m.dev.and_then(|d| targets.iter().find(|t| t.0 == d)).map(|t| t.1.clone()).unwrap_or_else(|| tr("Not in the plan").into());
                     egui::ComboBox::from_id_salt(("belongs", &m.key)).selected_text(current).width(150.0).show_ui(ui, |ui| {
                         if ui.selectable_label(m.dev.is_none(), tr("Not in the plan")).clicked() {
                             link = Some((m.key.clone(), None));
@@ -249,7 +249,7 @@ impl App {
                     ui.add_sized([34.0, 18.0], egui::Label::new(RichText::new(format!("{:.0}", s.rssi)).monospace().color(quality_color(s.rssi))));
                     ui.vertical(|ui| {
                         ui.set_width((ui.available_width() - 110.0).max(90.0));
-                        ui.label(if s.ssid.is_empty() { "(hidden)" } else { &s.ssid });
+                        ui.label(if s.ssid.is_empty() { tr("(hidden)") } else { &s.ssid });
                         ui.label(RichText::new(trf("{} ch {} · {} MHz", &[&(band_of(s.freq).label()), &s.channel, &s.width])).small().color(pal().dim));
                     });
                     let key = crate::companion::key_of(s);

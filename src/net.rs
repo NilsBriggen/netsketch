@@ -1067,6 +1067,12 @@ pub struct RoomLabel {
 }
 
 impl Network {
+    /// Storeys with anything on them: devices, walls, labels, pins, a floor-plan picture or an outdoor area.
+    pub fn used_floors(&self) -> std::collections::BTreeSet<i8> {
+        let n = self;
+        n.devices.iter().map(|d| d.floor).chain(n.walls.iter().map(|w| w.floor)).chain(n.labels.iter().map(|l| l.floor)).chain(n.points.iter().map(|p| p.floor)).chain(n.plans.iter().map(|p| p.floor)).chain(n.outdoor.iter().map(|o| o.floor)).collect()
+    }
+
     /// A storey's own name if someone gave it one, else "Ground floor", "1st floor"…
     pub fn storey(&self, f: i8) -> String {
         self.storey_names.iter().find(|s| s.0 == f && !s.1.trim().is_empty()).map(|s| s.1.clone()).unwrap_or_else(|| floor_name(f))

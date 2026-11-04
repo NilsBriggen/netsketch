@@ -206,14 +206,14 @@ impl App {
         painter.rect_filled(r, 8, pal().card.gamma_multiply(0.92));
         let mut x = r.left() + 10.0;
         // Narrow canvas: a short caption so the colours still fit.
-        let caption = if rect.width() < 810.0 { "Signal:" } else { [tr("Wi-Fi map (best band):"), tr("Wi-Fi map (2.4 GHz):"), tr("Wi-Fi map (5 GHz):"), tr("Wi-Fi map (6 GHz):")][self.heat_band.min(3)] };
+        let caption = if rect.width() < 810.0 { tr("Signal:") } else { [tr("Wi-Fi map (best band):"), tr("Wi-Fi map (2.4 GHz):"), tr("Wi-Fi map (5 GHz):"), tr("Wi-Fi map (6 GHz):")][self.heat_band.min(3)] };
         let g = painter.layout_no_wrap(caption.into(), FontId::proportional(11.5), pal().dim);
         let w = g.size().x;
         painter.galley(pos2(x, r.center().y - g.size().y / 2.0), g, pal().dim);
         x += w + 12.0;
         for (v, t) in items {
             painter.rect_filled(Rect::from_center_size(pos2(x + 5.0, r.center().y), Vec2::splat(10.0)), 2, heat_color(v).unwrap().gamma_multiply(2.5));
-            let g = painter.layout_no_wrap(t.into(), FontId::proportional(11.0), pal().text);
+            let g = painter.layout_no_wrap(tr(t).into(), FontId::proportional(11.0), pal().text);
             let w = g.size().x;
             painter.galley(pos2(x + 14.0, r.center().y - g.size().y / 2.0), g, pal().text);
             x += 14.0 + w + 12.0;
@@ -460,7 +460,7 @@ impl App {
                 self.replug = Some(id);
             }
         }
-        egui::ComboBox::from_id_salt(("preset", id)).selected_text(if d.model.is_empty() { "Custom".to_string() } else { d.model.clone() }).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt(("preset", id)).selected_text(if d.model.is_empty() { tr("Custom").to_string() } else { d.model.clone() }).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
             // Speakers have their own radio; routers and access points can't be a speaker.
             for p in RADIO_PRESETS.iter().filter(|p| p.name.starts_with("Multi-room speaker") == speaker) {
                 if ui.selectable_label(d.model == p.name, p.name).clicked() {
@@ -567,7 +567,7 @@ impl App {
             ui.add(egui::Slider::new(&mut d.aim, 0.0..=359.0).text(tr("points to")).suffix("°"));
             let me = id;
             let others: Vec<(u32, String)> = self_targets.iter().filter(|t| t.0 != me).cloned().collect();
-            egui::ComboBox::from_id_salt(("aim", id)).selected_text("Aim at…").width(200.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("aim", id)).selected_text(tr("Aim at…")).width(200.0).show_ui(ui, |ui| {
                 for (t, name) in &others {
                     if ui.selectable_label(false, name).clicked() {
                         aim_target = Some(*t);
@@ -985,7 +985,7 @@ impl App {
         let y = |r: f32| rect.bottom() - (r.clamp(-95.0, -30.0) + 95.0) / 65.0 * rect.height();
         let x = |t: f64| rect.right() - ((now - t) as f32 / 45.0) * rect.width();
         let th = self.net.wifi_link_of(id).and_then(|l| self.net.wifi_ends(l)).map(|(ap, cl)| crate::wifi::roam_threshold(ap, cl)).unwrap_or(-75.0);
-        for (lvl, txt) in [(-67.0, "good"), (th, tr("starts looking for another access point"))] {
+        for (lvl, txt) in [(-67.0, tr("good")), (th, tr("starts looking for another access point"))] {
             p.extend(Shape::dashed_line(&[pos2(rect.left(), y(lvl)), pos2(rect.right(), y(lvl))], Stroke::new(1.0, pal().dim.gamma_multiply(0.6)), 4.0, 4.0));
             p.text(pos2(rect.left() + 4.0, y(lvl) - 2.0), Align2::LEFT_BOTTOM, format!("{lvl:.0} {txt}"), FontId::proportional(10.0), pal().dim);
         }
@@ -993,7 +993,7 @@ impl App {
         p.add(Shape::line(pts, Stroke::new(2.0, pal().accent)));
         for s in h.iter().filter(|s| s.2) {
             p.line_segment([pos2(x(s.0), rect.top()), pos2(x(s.0), rect.bottom())], Stroke::new(1.5, pal().amber));
-            p.text(pos2(x(s.0) + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, "hand-over", FontId::proportional(10.0), pal().amber);
+            p.text(pos2(x(s.0) + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, tr("hand-over"), FontId::proportional(10.0), pal().amber);
         }
         p.text(rect.right_top() + vec2(-6.0, 4.0), Align2::RIGHT_TOP, tr("signal, last 45 s"), FontId::proportional(10.0), pal().dim);
     }

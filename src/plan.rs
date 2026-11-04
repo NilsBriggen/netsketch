@@ -17,6 +17,7 @@ pub struct Outdoor {
     pub b: [f32; 2],
 }
 
+#[derive(Clone)]
 pub struct Coverage {
     pub good: f32,
     pub usable: f32,

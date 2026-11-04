@@ -243,7 +243,7 @@ impl Network {
         let at = self.points.iter().find(|p| p.id == m.best_point)?.clone();
         let id = self.add_device(Kind::Neighbor, [at.pos[0] + 4.0 * PX_PER_M, at.pos[1]]);
         let d = self.dev_mut(id).unwrap();
-        d.name = if m.ssid.is_empty() { "Hidden network".into() } else { m.ssid.clone() };
+        d.name = if m.ssid.is_empty() { crate::i18n::tr("Hidden network").into() } else { m.ssid.clone() };
         d.ssid = m.ssid.clone();
         d.floor = at.floor;
         d.wifi = match m.standard.as_str() {
@@ -348,8 +348,8 @@ impl Network {
             }
         }
         match self.measured_error() {
-            Some(e) => format!("Fitted {done} access points to the measurements — the model is now off by {e:.1} dB on average."),
-            None => "Place the measuring pins on the map first (drag them to where you stood).".into(),
+            Some(e) => crate::i18n::trf("Fitted {} access points to the measurements — the model is now off by {} dB on average.", &[&done, &format!("{e:.1}")]),
+            None => crate::i18n::tr("Place the measuring pins on the map first (drag them to where you stood).").into(),
         }
     }
 

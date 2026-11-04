@@ -57,8 +57,8 @@ impl App {
         if Self::section_hint(ui, "Floor plan picture", "A picture of this storey's plan under the map (PNG or JPEG, e.g. a scan or a screenshot of the architect's PDF). Trace the walls over it with the Walls tool, then the Wi-Fi map is your real home.") {
         let idx = self.net.plans.iter().position(|p| p.floor == self.floor);
         ui.horizontal(|ui| {
-            if ui.button(format!("{}  {}", ic::IMAGE, if idx.is_some() { "Replace…" } else { "Choose a picture…" })).on_hover_text(tr("PNG or JPEG of this storey's plan, e.g. a scan or a screenshot of the architect's PDF")).clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Picture", &["png", "jpg", "jpeg"]).pick_file() {
+            if ui.button(format!("{}  {}", ic::IMAGE, if idx.is_some() { tr("Replace…") } else { tr("Choose a picture…") })).on_hover_text(tr("PNG or JPEG of this storey's plan, e.g. a scan or a screenshot of the architect's PDF")).clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter(tr("Picture"), &["png", "jpg", "jpeg"]).pick_file() {
                     let path = path.to_string_lossy().into_owned();
                     self.textures.remove(&path);
                     match self.texture(&ctx, &path) {
@@ -322,7 +322,7 @@ impl App {
         let models: Vec<Model> = self.net.models.iter().chain(self.library.as_ref().unwrap().iter()).filter(|m| m.spec.kind == kind).cloned().collect();
         let mut apply = None;
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt(("model", id)).selected_text("Apply a saved model…").width(200.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("model", id)).selected_text(tr("Apply a saved model…")).width(200.0).show_ui(ui, |ui| {
                 if models.is_empty() {
                     ui.label(RichText::new(tr("No saved models for this kind yet")).color(pal().dim));
                 }
@@ -413,7 +413,7 @@ impl App {
                 ("routed", pal().dim)
             };
             let u = self.net.utilisation(&load, l.id);
-            let mut state = format!("{role} · {:.0}% busy", u * 100.0);
+            let mut state = format!("{role} · {}", trf("{}% busy", &[&format!("{:.0}", u * 100.0)]));
             if other.poe_draw > 0.0 && d.poe_class > 0 && !l.medium.wireless() {
                 poe_total += other.poe_draw;
                 state += &trf(" · powers it ({} W)", &[&format!("{:.1}", other.poe_draw)]);
@@ -553,7 +553,7 @@ impl App {
                 let users = self.net.port_users(e);
                 let now = l.port_at(e);
                 ui.label(RichText::new(self.net.name(e)).color(pal().dim));
-                egui::ComboBox::from_id_salt(("lport", id, e)).selected_text(now.map_or("no port free".into(), |p| self.net.port_name(e, p))).width(210.0).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("lport", id, e)).selected_text(now.map_or(tr("no port free").into(), |p| self.net.port_name(e, p))).width(210.0).show_ui(ui, |ui| {
                     let count = self.net.dev(e).map_or(0, |d| d.port_count()).min(256);
                     for p in (0..count as u16).filter(|p| self.net.fits_port(&l, e, *p)) {
                         let who = users.iter().find(|(q, _)| *q == p && Some(p) != now).map_or(String::new(), |(_, w)| format!(" — {w}"));

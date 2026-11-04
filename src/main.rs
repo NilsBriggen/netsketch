@@ -422,6 +422,8 @@ struct App {
     heat_cache: Option<((i8, i32, usize), [i32; 4], Vec<(Rect, Color32)>, f64, u64)>,
     /// Wi-Fi map: 0 = best band, 1..=3 = 2.4 / 5 / 6 GHz only.
     heat_band: usize,
+    /// Outdoor areas' coverage on the shown storey, and when it was worked out.
+    outdoor_cache: Option<(f64, Vec<(u32, plan::Coverage)>)>,
     /// Coverage score of the shown storey (storey, when computed, score).
     cov_cache: Option<(i8, f64, Option<plan::Coverage>)>,
     /// Suggested spot for one more access point: storey, position, good share before → after.
@@ -518,6 +520,7 @@ impl App {
             heat_cache: None,
             heat_band: 0,
             cov_cache: None,
+            outdoor_cache: None,
             ap_hint: None,
             redo: vec![],
             snap: true,
@@ -927,7 +930,8 @@ impl App {
                         }
                     }
                 });
-                let used: std::collections::BTreeSet<i8> = self.net.devices.iter().map(|d| d.floor).chain(self.net.walls.iter().map(|w| w.floor)).chain([0, self.floor]).collect();
+                let mut used = self.net.used_floors();
+                used.extend([0, self.floor]);
                 let (lo, hi) = (*used.first().unwrap(), *used.last().unwrap());
                 egui::ComboBox::from_id_salt("floor").selected_text(format!("{}  {}", ic::STACK, self.net.storey(self.floor))).width(if compact { 120.0 } else { 150.0 }).show_ui(ui, |ui| {
                     for f in (lo..=hi).rev() {
@@ -1228,7 +1232,7 @@ impl App {
                 painter.galley(r.min + vec2(5.0, 2.0), g, c);
             } else if let Some(u) = load.as_ref().map(|ld| self.net.utilisation(ld, l.id)).filter(|u| *u > 0.5 && sig.is_none() && !(selected || near)) {
                 let c = if u > 1.0 { pal().red } else if u > 0.8 { pal().amber } else { pal().dim };
-                painter.text(m, Align2::CENTER_CENTER, format!("{:.0}% busy", u * 100.0), FontId::proportional(10.0 * z.max(0.8)), c);
+                painter.text(m, Align2::CENTER_CENTER, trf("{}% busy", &[&format!("{:.0}", u * 100.0)]), FontId::proportional(10.0 * z.max(0.8)), c);
             }
             if selected || near {
                 let mut txt = format!("{} · {} m · ≈ {:.0} Mbit/s", l.medium.label(), self.net.link_len(l), self.net.link_rate(l));

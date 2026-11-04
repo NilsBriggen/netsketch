@@ -243,8 +243,8 @@ impl Network {
     /// "port 3 · 1G RJ45"
     pub fn port_name(&self, id: u32, p: u16) -> String {
         match self.dev(id).and_then(|d| d.port(p)) {
-            Some(g) => format!("port {} · {} {}{}", p as u16 + 1, short_speed(g.mbps), g.kind.label(), if g.wan { " WAN" } else { "" }),
-            None => format!("port {}", p as u16 + 1),
+            Some(g) => format!("{} · {} {}{}", crate::i18n::trf("port {}", &[&(p + 1)]), short_speed(g.mbps), g.kind.label(), if g.wan { " WAN" } else { "" }),
+            None => crate::i18n::trf("port {}", &[&(p + 1)]),
         }
     }
 }

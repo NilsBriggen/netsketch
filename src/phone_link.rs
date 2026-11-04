@@ -209,9 +209,7 @@ impl Network {
     /// The floor plan the phone shows (positions in metres): storeys, walls, room labels, devices and pins.
     pub fn plan_pack(&self) -> String {
         let m = |p: [f32; 2]| [p[0] / PX_PER_M, p[1] / PX_PER_M];
-        let mut floors: Vec<i8> = self.walls.iter().map(|w| w.floor).chain(self.devices.iter().map(|d| d.floor)).collect();
-        floors.sort();
-        floors.dedup();
+        let floors = self.used_floors();
         serde_json::json!({
             "format": "netsketch-plan",
             "title": self.title,

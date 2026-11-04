@@ -304,8 +304,14 @@ impl App {
     fn outdoor_rows(&mut self, ui: &mut egui::Ui) {
         let mut remove = None;
         let ids: Vec<u32> = self.net.outdoor.iter().filter(|o| o.floor == self.floor).map(|o| o.id).collect();
-        for id in ids {
-            let c = self.net.outdoor_coverage(self.net.outdoor.iter().find(|o| o.id == id).unwrap());
+        // Sampling a garden is costly: once a second is plenty for a number in a list.
+        let now = ui.input(|i| i.time);
+        if self.outdoor_cache.as_ref().is_none_or(|c| now - c.0 > 1.0 || c.1.len() != ids.len() || c.1.iter().zip(&ids).any(|(a, b)| a.0 != *b)) {
+            let covs = ids.iter().map(|id| (*id, self.net.outdoor_coverage(self.net.outdoor.iter().find(|o| o.id == *id).unwrap()))).collect();
+            self.outdoor_cache = Some((now, covs));
+        }
+        let covs = self.outdoor_cache.as_ref().map(|c| c.1.clone()).unwrap_or_default();
+        for (id, c) in covs {
             let o = self.net.outdoor.iter_mut().find(|o| o.id == id).unwrap();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(ic::TREE).color(pal().green));

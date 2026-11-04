@@ -278,19 +278,26 @@ impl Network {
                     None,
                     Some(l.id),
                     format!(
-                        "{} {}–{} is {:.0}% full ({} share ≈ {:.0} Mbit/s).{}",
-                        if (18.0..23.5).contains(&self.hour) { crate::i18n::trf("At the busy hour ({})", &[&(crate::more::clock(self.hour))]) } else { format!("At {}", crate::more::clock(self.hour)) },
-                        self.name(l.a),
-                        self.name(l.b),
-                        u * 100.0,
-                        if who == 1 { crate::i18n::tr("one device's apps").to_string() } else { format!("{who} devices' apps") },
-                        self.link_rate(l),
-                        match (sensitive, self.sqm_on(l)) {
-                            (_, true) => " Smart queueing keeps the delay low; more speed needs a faster plan or fewer heavy apps.",
-                            (true, false) => " Video calls and games will lag — full queues add delay. Smart queueing (SQM) on the router keeps them smooth.",
+                        "{} {}",
+                        crate::i18n::trf(
+                            "{} {}–{} is {}% full ({} share ≈ {} Mbit/s).",
+                            &[
+                                &(if (18.0..23.5).contains(&self.hour) { crate::i18n::trf("At the busy hour ({})", &[&(crate::more::clock(self.hour))]) } else { crate::i18n::trf("At {}", &[&(crate::more::clock(self.hour))]) }),
+                                &self.name(l.a),
+                                &self.name(l.b),
+                                &format!("{:.0}", u * 100.0),
+                                &(if who == 1 { crate::i18n::tr("one device's apps").to_string() } else { crate::i18n::trf("{} devices' apps", &[&who]) }),
+                                &format!("{:.0}", self.link_rate(l)),
+                            ]
+                        ),
+                        crate::i18n::tr(match (sensitive, self.sqm_on(l)) {
+                            (_, true) => "Smart queueing keeps the delay low; more speed needs a faster plan or fewer heavy apps.",
+                            (true, false) => "Video calls and games will lag — full queues add delay. Smart queueing (SQM) on the router keeps them smooth.",
                             _ => "",
-                        }
-                    ),
+                        })
+                    )
+                    .trim_end()
+                    .to_string(),
                     [l.a, l.b].iter().filter_map(|x| self.dev(*x)).find(|d| d.kind == Kind::HomeRouter && !d.sqm).filter(|_| [l.a, l.b].iter().any(|x| self.dev(*x).is_some_and(|d| d.kind == Kind::Internet))).map(|r| Fix::Sqm(r.id)),
                 ));
             }
@@ -386,7 +393,7 @@ impl Network {
                     v.push(issue(Level::Tip, Some(id), Some(l.id), crate::i18n::trf("The cable from {} goes into {}'s SFP {}: that needs an RJ45 SFP module.", &[&other, &d.name, &(self.port_name(id, p))]), None));
                 }
                 if let Some(q) = self.faster_free_port(l, id) {
-                    v.push(issue(Level::Tip, Some(id), Some(l.id), format!("{other} is in {}'s {} while {} is free.", d.name, self.port_name(id, p), self.port_name(id, q)), Some(Fix::MovePort(l.id, id))));
+                    v.push(issue(Level::Tip, Some(id), Some(l.id), crate::i18n::trf("{} is in {}'s {} while {} is free.", &[&other, &d.name, &(self.port_name(id, p)), &(self.port_name(id, q))]), Some(Fix::MovePort(l.id, id))));
                 }
             }
         }
