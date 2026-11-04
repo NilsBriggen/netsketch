@@ -958,6 +958,14 @@ impl App {
 
     fn canvas(&mut self, ui: &mut egui::Ui, issues: &[Issue]) {
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        // Screen readers get the map as one element: what's on this storey and what's picked (Tab walks the devices).
+        let picked = match self.sel {
+            Sel::Dev(id) => self.net.dev(id).map(|d| format!("{}, {}", d.name, d.kind.label())),
+            _ => None,
+        };
+        let count = self.net.devices.iter().filter(|d| d.floor == self.floor).count();
+        let about = trf("Network map, {}: {} devices. {}", &[&self.net.storey(self.floor), &count, &picked.map_or_else(|| tr("Press Tab to pick a device.").to_string(), |p| trf("Picked: {}.", &[&p]))]);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, about.clone()));
         self.canvas_rect = rect;
         // Panels settle during the first frames; wait for them before measuring.
         if self.fit_pending && self.frame >= 2 && rect.width() > 50.0 {
