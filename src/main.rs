@@ -576,8 +576,9 @@ impl App {
         }
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| serde_json::from_str::<Network>(&s).map_err(|e| e.to_string())) {
             Ok(n) => {
+                let newer = n.version > net::FORMAT;
                 self.load(n);
-                self.say(ctx, format!("Opened {}", path.display()));
+                self.say(ctx, if newer { format!("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", path.display()) } else { format!("Opened {}", path.display()) });
                 self.file = Some(path);
             }
             Err(e) => self.say(ctx, format!("Couldn't open that file: {e}")),

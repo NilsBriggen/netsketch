@@ -476,7 +476,8 @@ impl Model {
 
 /// The user's model library, shared by all plans.
 pub fn library_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))).unwrap_or_else(|| ".".into());
+    // XDG on Linux, %APPDATA% on Windows, ~/.config elsewhere.
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("APPDATA").map(std::path::PathBuf::from)).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))).unwrap_or_else(|| ".".into());
     base.join("netsketch").join("models.json")
 }
 

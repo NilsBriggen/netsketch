@@ -1,0 +1,58 @@
+# Tests on every push and pull request; a tag like v0.2.0 also builds the app for Linux, Windows and macOS
+# and attaches it to a GitHub release.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux libraries for the window and file dialogs
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgtk-3-dev libwayland-dev
+      - run: cargo build --locked
+      - run: cargo test --locked
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            file: netsketch
+            name: netsketch-linux-x86_64
+          - os: windows-latest
+            file: netsketch.exe
+            name: netsketch-windows-x86_64.exe
+          - os: macos-latest
+            file: netsketch
+            name: netsketch-macos-arm64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries for the window and file dialogs
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgtk-3-dev libwayland-dev
+      - run: cargo build --release --locked
+      - name: Name the binary for its platform
+        shell: bash
+        run: cp "target/release/${{ matrix.file }}" "${{ matrix.name }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.name }}

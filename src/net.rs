@@ -710,9 +710,15 @@ pub fn net_of(a: Ipv4Addr, p: u8) -> Ipv4Addr {
     Ipv4Addr::from(u32::from(a) & mask(p))
 }
 
+/// The .netplan format this build writes; `sanitize` brings older files up to it.
+pub const FORMAT: u32 = 1;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Network {
+    /// Save format version (0 = a file from before versions were written).
+    #[serde(default)]
+    pub version: u32,
     pub title: String,
     pub currency: String,
     pub devices: Vec<Device>,
@@ -749,6 +755,7 @@ pub struct Network {
 impl Default for Network {
     fn default() -> Self {
         Network {
+            version: FORMAT,
             title: String::new(),
             currency: String::new(),
             devices: vec![],
@@ -895,6 +902,8 @@ impl Network {
         fresh(&mut self.walls.iter_mut().map(|w| &mut w.id));
         fresh(&mut self.points.iter_mut().map(|p| &mut p.id));
         fresh(&mut self.labels.iter_mut().map(|l| &mut l.id));
+        // Migrations above are keyed on what's in the file; from here on it is the current format (fields a newer one added are gone).
+        self.version = FORMAT;
         self.assign_ports();
     }
 
