@@ -102,4 +102,4 @@ Known gaps: some older hardware Swisscom supplied (the 2013–2014 boosters and 
 
 NetSketch is an independent, clean-room rewrite. It isn't affiliated with the Filius project and contains none of its code. The `.fls` import works from Filius's saved file format only.
 
-No license has been chosen yet.
+NetSketch is free software under the [GNU General Public License v3.0](LICENSE): you may use, study, share and change it, and versions you pass on must stay under the same license with their source.
