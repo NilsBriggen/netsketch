@@ -52,6 +52,18 @@ public final class Survey {
     public String device = "";
     public final List<Point> points = new ArrayList<>();
 
+    /**
+     * Keeps a new point; one measured again (replaces) takes the old one's place in the list. Refuses a
+     * point that heard no network at all (false): it would only be an empty pin.
+     */
+    public boolean add(Point p, Point replaces) {
+        if (p.networks.isEmpty()) return false;
+        int i = replaces == null ? -1 : points.indexOf(replaces);
+        if (i >= 0) points.set(i, p);
+        else points.add(p);
+        return true;
+    }
+
     // ---------- file ----------
 
     /** A file with just one point (what the live link sends after each measurement). */
@@ -128,6 +140,15 @@ public final class Survey {
         if (freq >= 5955 && freq <= 7115) return (freq - 5950) / 5;
         if (freq >= 5160 && freq <= 5885) return (freq - 5000) / 5;
         return 0;
+    }
+
+    /** The MHz a band's channel chart spans: every 20 MHz channel, up to 5 GHz ch 177 and 6 GHz ch 233. */
+    public static int[] chartSpan(String band) {
+        switch (band) {
+            case "2.4 GHz": return new int[] {2400, 2496};
+            case "5 GHz": return new int[] {5160, 5895};
+            default: return new int[] {5935, 7125};
+        }
     }
 
     public static String bandOf(int freq) {

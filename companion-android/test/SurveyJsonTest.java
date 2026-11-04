@@ -45,6 +45,10 @@ public class SurveyJsonTest {
         double[] load = Survey.bssLoad(new byte[] {5, 0, (byte) 107, 0, 0});
         check(load[0] == 5 && Math.abs(load[1] - 107 / 255.0) < 1e-9 && Survey.bssLoad(new byte[] {1}) == null, "bss load");
         check(Survey.q("a\"b\\c\n").equals("\"a\\\"b\\\\c\\n\""), "escaping");
+        // The channel chart reaches the top channels (5 GHz 177, 6 GHz 233), each with its 20 MHz.
+        check(Survey.channelOf(5885) == 177 && Survey.chartSpan("5 GHz")[1] >= 5885 + 10 && Survey.chartSpan("5 GHz")[0] <= 5180 - 10, "5 GHz chart");
+        check(Survey.channelOf(7115) == 233 && Survey.chartSpan("6 GHz")[1] >= 7115 + 10 && Survey.chartSpan("6 GHz")[0] <= 5955 - 10, "6 GHz chart");
+        check(Survey.chartSpan("2.4 GHz")[1] >= 2484 + 10, "2.4 GHz chart");
 
         // A walk through the small flat: bedroom desk, sofa, hall.
         Survey s = new Survey();
@@ -86,7 +90,21 @@ public class SurveyJsonTest {
             }
             s.points.add(p);
         }
+        // A point that heard nothing isn't kept.
+        check(!s.add(new Survey.Point(), null) && s.points.size() == 3, "empty point refused");
         String json = s.toJson();
+        // Measuring a spot again replaces that point where it was; the new one isn't sent yet.
+        Survey re = new Survey();
+        Survey.Point a1 = new Survey.Point(), a2 = new Survey.Point(), again = new Survey.Point();
+        for (Survey.Point x : new Survey.Point[] {a1, a2, again}) x.networks.add(seen("HomeNet", "d4:5d:64:aa:bb:c0", 2412, 20, -50, "WPA2", ""));
+        a1.sent = true;
+        re.add(a1, null);
+        re.add(a2, null);
+        check(re.add(again, a1) && re.points.size() == 2 && re.points.get(0) == again && !re.points.get(0).sent, "measured again replaces in place");
+        Survey.Point late = new Survey.Point();
+        late.networks.add(seen("X", "x", 2412, 20, -60, "", ""));
+        check(re.add(late, a1) && re.points.size() == 3 && re.points.get(2) == late, "a replaced point that's gone: added at the end");
+        check(!re.add(new Survey.Point(), again) && re.points.get(0) == again, "an empty re-measurement keeps the old point");
         check(json.contains("\"format\": \"netsketch-survey\"") && json.contains("\"utilization\": 0.42") && json.contains("Cafe \\\"Corner\\\""), "json");
         check(new Survey().toJson().contains("\"points\": []"), "empty survey");
         check(json.contains("\"up_mbps\": 48.50, \"jitter_ms\": 2.10"), "upload and jitter written");
@@ -98,7 +116,12 @@ public class SurveyJsonTest {
         }
         T.german = true;
         check(T.f("Spot %d", 3).equals("Punkt 3") && T.t("not in the table").equals("not in the table"), "german lookup");
+        java.util.Locale was = java.util.Locale.getDefault();
+        java.util.Locale.setDefault(java.util.Locale.GERMANY);
+        check(T.f("%.1f m", 3.2).equals("3,2 m"), "german numbers");
+        java.util.Locale.setDefault(was);
         T.german = false;
+        check(T.f("%.1f m", 3.2).equals("3.2 m"), "english numbers");
 
         // What a point shows. The sofa: the phone on the 5 GHz radio, nothing wrong.
         Set<String> mine = Set.of("HomeNet");

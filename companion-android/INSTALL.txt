@@ -28,10 +28,14 @@ On the phone
     coloured dots (green = strong, red = weak); tap one to see what was measured there.
   - Each point lists what it shows in plain words (weak signal, a phone sticking to a far access point,
     the slow band, a crowded 2.4 GHz channel and which one to try), a channel chart per band, and every
-    network heard. Long-press a point (or tap ⋮) to rename it, measure again at the same spot, or delete it.
-  - The speed test measures download, upload, delay and its variation (about 35 MB).
+    network heard. Long-press a point (or tap ⋮) to rename it, measure again at the same spot (the new
+    measurement replaces the old point), or delete it. "Cancel" stops a measurement without adding a point.
+  - The speed test measures download, upload, delay and its variation (about 35 MB), always over Wi-Fi.
+  - "Quick point (signal only)" records just your own Wi-Fi's strength and speed in about 3 seconds,
+    without a scan. "Ping test" checks how quickly and steadily your router answers.
   - Android lets an app scan for networks 4 times every 2 minutes. When that runs out the app waits and
-    counts down; turning off "Wi-Fi scan throttling" in Developer options makes surveys faster.
+    counts down (quick points don't count); turning off "Wi-Fi scan throttling" in Developer options
+    makes surveys faster.
   - The app follows the phone's language (English or German) and its dark or light setting.
 
 In NetSketch afterwards
