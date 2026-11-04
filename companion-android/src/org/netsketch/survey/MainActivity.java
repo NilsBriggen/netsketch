@@ -227,7 +227,7 @@ public class MainActivity extends Activity {
         liveRow.addView(liveBars);
         liveCard.addView(liveRow);
         spark = new Ui.Spark(this);
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36));
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
         sp.topMargin = dp(10);
         liveCard.addView(spark, sp);
         liveRange = Ui.text(this, "", 12, Ui.DIM);

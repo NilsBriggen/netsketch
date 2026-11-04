@@ -212,26 +212,41 @@ final class Ui {
 
         @Override
         protected void onDraw(Canvas cv) {
-            float w = getWidth(), h = getHeight();
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(dp(getContext(), 1));
-            p.setColor(LINE);
-            for (int db : new int[] {-60, -70, -80}) {
-                float y = h * (-40 - db) / 50f;
-                cv.drawLine(0, y, w, y, p);
+            Context c = getContext();
+            // The scale follows the last minute (at least 15 dB, on 5 dB steps), so the labelled lines frame the curve.
+            float[] r = range();
+            hi = r == null ? -40 : (float) Math.ceil((r[1] + 2) / 5) * 5;
+            lo = r == null ? -90 : (float) Math.floor((r[0] - 2) / 5) * 5;
+            if (hi - lo < 15) lo = hi - 15;
+            int every = hi - lo > 30 ? 10 : 5;
+            p.setTextSize(dp(c, 10));
+            float pad = dp(c, 6), left = p.measureText("-100") + dp(c, 6), w = getWidth();
+            top = pad;
+            span = getHeight() - 2 * pad;
+            for (int db = (int) hi; db >= lo; db -= every) {
+                float y = y(db);
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(DIM);
+                cv.drawText(String.valueOf(db), 0, y + p.getTextSize() / 3, p);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(c, 1));
+                p.setColor(LINE);
+                cv.drawLine(left, y, w, y, p);
             }
             if (n < 2) return;
-            p.setStrokeWidth(dp(getContext(), 2));
+            p.setStrokeWidth(dp(c, 2));
             p.setStrokeCap(Paint.Cap.ROUND);
-            float step = w / (v.length - 1), x0 = w - (n - 1) * step;
+            float step = (w - left) / (v.length - 1), x0 = w - (n - 1) * step;
             for (int i = 1; i < n; i++) {
                 p.setColor(quality(v[i]));
-                cv.drawLine(x0 + (i - 1) * step, y(v[i - 1], h), x0 + i * step, y(v[i], h), p);
+                cv.drawLine(x0 + (i - 1) * step, y(v[i - 1]), x0 + i * step, y(v[i]), p);
             }
         }
 
-        private static float y(float rssi, float h) {
-            return h * Math.max(0, Math.min(1, (-40 - rssi) / 50f));
+        private float hi, lo, top, span;
+
+        private float y(float rssi) {
+            return top + span * Math.max(0, Math.min(1, (hi - rssi) / (hi - lo)));
         }
     }
 
