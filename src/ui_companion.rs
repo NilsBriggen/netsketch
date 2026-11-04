@@ -83,7 +83,7 @@ impl App {
         let ctx = ui.ctx().clone();
         match &self.phone {
             None => {
-                if ui.button(format!("{}  Link a phone (live)", ic::DEVICE_MOBILE)).on_hover_text("The NetSketch Survey app finds this computer on your Wi-Fi, shows your floor plan, and every measurement lands here as a pin — no files to send").clicked() {
+                if ui.button(format!("{}  {}", ic::DEVICE_MOBILE, tr("Link a phone (live)"))).on_hover_text(tr("The NetSketch Survey app finds this computer on your Wi-Fi, shows your floor plan, and every measurement lands here as a pin — no files to send")).clicked() {
                     let code = format!("{:04}", crate::sim::new_seed() % 10_000);
                     match phone_link::PhoneLink::start(phone_link::TCP_PORT, phone_link::UDP_PORT, code, self.net.title.clone()) {
                         Ok(l) => {
@@ -105,9 +105,9 @@ impl App {
                             ui.label(RichText::new(format!("{}:{}", l.addr, l.port)).small().monospace().color(pal().dim));
                         });
                     });
-                    ui.label(RichText::new("In NetSketch Survey tap Link: it finds this computer on your Wi-Fi. Enter the code, tap where you stand on the plan, measure.").small().color(pal().dim));
-                    ui.label(RichText::new("Phone doesn't find it? Type the address above on the phone. Still nothing: this computer's firewall blocks it — allow ports 47878 (TCP) and 47879 (UDP).").small().color(pal().dim))
-                        .on_hover_text("Linux with ufw: sudo ufw allow 47878/tcp && sudo ufw allow 47879/udp\nWindows asks the first time — allow access on private networks.\nmacOS: allow incoming connections when asked.");
+                    ui.label(RichText::new(tr("In NetSketch Survey tap Link: it finds this computer on your Wi-Fi. Enter the code, tap where you stand on the plan, measure.")).small().color(pal().dim));
+                    ui.label(RichText::new(tr("Phone doesn't find it? Type the address above on the phone. Still nothing: this computer's firewall blocks it — allow ports 47878 (TCP) and 47879 (UDP).")).small().color(pal().dim))
+                        .on_hover_text(tr("Linux with ufw: sudo ufw allow 47878/tcp && sudo ufw allow 47879/udp\nWindows asks the first time — allow access on private networks.\nmacOS: allow incoming connections when asked."));
                     ui.horizontal(|ui| {
                         let (txt, col) = match heard {
                             Some(s) if s < 30 => ("Phone connected".to_string(), pal().green),
@@ -115,7 +115,7 @@ impl App {
                             None => ("Waiting for the phone…".to_string(), pal().dim),
                         };
                         ui.label(RichText::new(txt).color(col));
-                        if ui.small_button("Stop").on_hover_text("Close the link").clicked() {
+                        if ui.small_button(tr("Stop")).on_hover_text(tr("Close the link")).clicked() {
                             stop = true;
                         }
                     });
@@ -166,7 +166,7 @@ impl App {
                         if ui.selectable_label(m.dev.is_none(), "Not in the plan").clicked() {
                             link = Some((m.key.clone(), None));
                         }
-                        if ui.selectable_label(false, format!("{} Add as a neighbour", ic::PLUS)).clicked() {
+                        if ui.selectable_label(false, format!("{} {}", ic::PLUS, tr("Add as a neighbour"))).clicked() {
                             add.push(m.key.clone());
                         }
                         ui.separator();
@@ -183,10 +183,10 @@ impl App {
         });
         let strangers: Vec<String> = found.iter().filter(|m| m.dev.is_none() && m.best >= -85.0).map(|m| m.key.clone()).collect();
         ui.horizontal_wrapped(|ui| {
-            if !strangers.is_empty() && ui.small_button(format!("{} Add {} neighbours", ic::PLUS, strangers.len())).on_hover_text("Every measured network that isn't yours and is louder than −85 dBm").clicked() {
+            if !strangers.is_empty() && ui.small_button(format!("{} Add {} neighbours", ic::PLUS, strangers.len())).on_hover_text(tr("Every measured network that isn't yours and is louder than −85 dBm")).clicked() {
                 add.extend(strangers.iter().cloned());
             }
-            if ui.small_button(format!("{} Fit to measurements", ic::RULER)).on_hover_text("Moves measured neighbours to where their signal fits your readings best and sets how loud every measured access point is").clicked() {
+            if ui.small_button(format!("{} {}", ic::RULER, tr("Fit to measurements"))).on_hover_text(tr("Moves measured neighbours to where their signal fits your readings best and sets how loud every measured access point is")).clicked() {
                 self.snapshot();
                 let msg = self.net.fit_all_measured();
                 self.say(&ctx, msg);
@@ -216,22 +216,22 @@ impl App {
         Self::header(ui, ic::MAP_PIN, if p.placed { pal().accent } else { pal().amber }, "Measuring point", &sub);
         ui.add_space(4.0);
         egui::Grid::new(("pt", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(RichText::new("Name").color(pal().dim));
+            ui.label(RichText::new(tr("Name")).color(pal().dim));
             ui.text_edit_singleline(&mut p.name);
             ui.end_row();
-            ui.label(RichText::new("Storey").color(pal().dim));
+            ui.label(RichText::new(tr("Storey")).color(pal().dim));
             ui.add(egui::DragValue::new(&mut p.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
             ui.end_row();
-            ui.label(RichText::new("Place").color(pal().dim));
-            ui.label(if p.placed { RichText::new("on the map").color(pal().green) } else { RichText::new("not yet — drag the pin").color(pal().amber) });
+            ui.label(RichText::new(tr("Place")).color(pal().dim));
+            ui.label(if p.placed { RichText::new(tr("on the map")).color(pal().green) } else { RichText::new(tr("not yet — drag the pin")).color(pal().amber) });
             ui.end_row();
             if let Some(c) = &p.connected {
-                ui.label(RichText::new("Phone was on").color(pal().dim));
+                ui.label(RichText::new(tr("Phone was on")).color(pal().dim));
                 ui.label(format!("{} · {:.0} dBm · {:.0} Mbit/s link", c.ssid, c.rssi, c.link_mbps));
                 ui.end_row();
             }
             if let Some(s) = &p.speed {
-                ui.label(RichText::new("Speed test").color(pal().dim));
+                ui.label(RichText::new(tr("Speed test")).color(pal().dim));
                 ui.label(RichText::new(format!("{:.0} Mbit/s · {:.0} ms", s.down_mbps, s.latency_ms)).strong());
                 ui.end_row();
             }
@@ -262,7 +262,7 @@ impl App {
             }
         }
         ui.add_space(6.0);
-        if ui.small_button(RichText::new(format!("{}  Remove point", ic::TRASH)).color(pal().red)).clicked() {
+        if ui.small_button(RichText::new(format!("{}  {}", ic::TRASH, tr("Remove point"))).color(pal().red)).clicked() {
             delete = true;
         }
         if delete {

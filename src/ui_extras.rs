@@ -56,7 +56,7 @@ impl App {
         if Self::section_hint(ui, "Floor plan picture", "A picture of this storey's plan under the map (PNG or JPEG, e.g. a scan or a screenshot of the architect's PDF). Trace the walls over it with the Walls tool, then the Wi-Fi map is your real home.") {
         let idx = self.net.plans.iter().position(|p| p.floor == self.floor);
         ui.horizontal(|ui| {
-            if ui.button(format!("{}  {}", ic::IMAGE, if idx.is_some() { "Replace…" } else { "Choose a picture…" })).on_hover_text("PNG or JPEG of this storey's plan, e.g. a scan or a screenshot of the architect's PDF").clicked() {
+            if ui.button(format!("{}  {}", ic::IMAGE, if idx.is_some() { "Replace…" } else { "Choose a picture…" })).on_hover_text(tr("PNG or JPEG of this storey's plan, e.g. a scan or a screenshot of the architect's PDF")).clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("Picture", &["png", "jpg", "jpeg"]).pick_file() {
                     let path = path.to_string_lossy().into_owned();
                     self.textures.remove(&path);
@@ -75,7 +75,7 @@ impl App {
                     }
                 }
             }
-            if idx.is_some() && ui.small_button(ic::TRASH).on_hover_text("Remove the picture").clicked() {
+            if idx.is_some() && ui.small_button(ic::TRASH).on_hover_text(tr("Remove the picture")).clicked() {
                 self.snapshot();
                 self.net.plans.retain(|p| p.floor != self.floor);
             }
@@ -85,10 +85,10 @@ impl App {
         }
         if let Some(p) = self.net.plans.iter_mut().find(|p| p.floor == self.floor) {
             egui::Grid::new("planpic").num_columns(2).show(ui, |ui| {
-                ui.label("Real width").on_hover_text("Measure one wall you know, then set the picture's full width so the walls come out at their real length");
+                ui.label(tr("Real width")).on_hover_text(tr("Measure one wall you know, then set the picture's full width so the walls come out at their real length"));
                 ui.add(egui::DragValue::new(&mut p.width_m).range(2.0..=500.0).speed(0.1).suffix(" m"));
                 ui.end_row();
-                ui.label("Position");
+                ui.label(tr("Position"));
                 ui.horizontal(|ui| {
                     let mut x = p.pos[0] / PX_PER_M;
                     let mut y = p.pos[1] / PX_PER_M;
@@ -97,7 +97,7 @@ impl App {
                     p.pos = [x * PX_PER_M, y * PX_PER_M];
                 });
                 ui.end_row();
-                ui.label("See-through");
+                ui.label(tr("See-through"));
                 ui.add(egui::Slider::new(&mut p.opacity, 0.1..=1.0));
                 ui.end_row();
             });
@@ -108,7 +108,7 @@ impl App {
             return;
         }
         ui.horizontal(|ui| {
-            if ui.button(format!("{}  Import measurements…", ic::DOWNLOAD_SIMPLE)).on_hover_text("A survey from the NetSketch Survey phone app, or a text file of readings").clicked() {
+            if ui.button(format!("{}  {}", ic::DOWNLOAD_SIMPLE, tr("Import measurements…"))).on_hover_text(tr("A survey from the NetSketch Survey phone app, or a text file of readings")).clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("Measurements", &["netsurvey", "json", "csv", "txt", "tsv"]).pick_file() {
                     let companion = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("netsurvey") || e.eq_ignore_ascii_case("json"));
                     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string());
@@ -128,12 +128,12 @@ impl App {
                 }
             }
             if !self.net.survey.is_empty() {
-                if ui.button(format!("{}  Calibrate", ic::RULER)).on_hover_text("Adjust each access point so the model matches your readings on average").clicked() {
+                if ui.button(format!("{}  {}", ic::RULER, tr("Calibrate"))).on_hover_text(tr("Adjust each access point so the model matches your readings on average")).clicked() {
                     self.snapshot();
                     let msg = self.net.calibrate();
                     self.say(&ctx, msg);
                 }
-                if ui.small_button(ic::TRASH).on_hover_text("Delete all readings (Ctrl+Z brings them back)").clicked() {
+                if ui.small_button(ic::TRASH).on_hover_text(tr("Delete all readings (Ctrl+Z brings them back)")).clicked() {
                     self.snapshot();
                     self.net.survey.clear();
                 }
@@ -177,24 +177,24 @@ impl App {
         if matches!(kind, Kind::HomeRouter | Kind::Router) && Self::section(ui, "Firewall & extras") {
             if kind == Kind::HomeRouter {
                 let mut guest = self.net.dev(id).unwrap().ifaces.iter().any(|f| f.vlan == GUEST_VLAN);
-                if ui.checkbox(&mut guest, "Guest Wi-Fi").on_hover_text("Its own network 192.168.99.0/24, isolated from the home").changed() {
+                if ui.checkbox(&mut guest, tr("Guest Wi-Fi")).on_hover_text(tr("Its own network 192.168.99.0/24, isolated from the home")).changed() {
                     self.net.set_guest(id, guest);
                 }
                 let d = self.net.dev_mut(id).unwrap();
                 if guest {
                     ui.horizontal(|ui| {
-                        ui.label("Guest name");
+                        ui.label(tr("Guest name"));
                         ui.text_edit_singleline(&mut d.guest_ssid);
                     });
                 }
-                ui.checkbox(&mut d.ipv6, "IPv6").on_hover_text("Every device also gets a public IPv6 address (try ping6)");
-                ui.checkbox(&mut d.sqm, "Smart queueing (SQM)").on_hover_text("Keeps calls and games smooth when the line is full; costs about 8% top speed");
+                ui.checkbox(&mut d.ipv6, tr("IPv6")).on_hover_text(tr("Every device also gets a public IPv6 address (try ping6)"));
+                ui.checkbox(&mut d.sqm, tr("Smart queueing (SQM)")).on_hover_text(tr("Keeps calls and games smooth when the line is full; costs about 8% top speed"));
             }
             let d = self.net.dev_mut(id).unwrap();
-            ui.label(RichText::new("Firewall rules").color(pal().dim));
-            ui.add(TextEdit::multiline(&mut d.rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("deny guest lan\nallow internet 192.168.1.10 443\nforward 443 192.168.1.10"))
-                .on_hover_text("First match wins: allow|deny <from> <to> [port] — from/to: any, lan, guest, internet, an address or network/prefix. Port forwarding: forward <port> <address>.");
-            ui.label(RichText::new("One rule per line, the first match wins: allow|deny <from> <to> [port] (any, lan, guest, internet, an address or network/prefix) · forward <port> <address> opens a port from the internet.").small().color(pal().dim));
+            ui.label(RichText::new(tr("Firewall rules")).color(pal().dim));
+            ui.add(TextEdit::multiline(&mut d.rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("deny guest lan\nallow internet 192.168.1.10 443\nforward 443 192.168.1.10")))
+                .on_hover_text(tr("First match wins: allow|deny <from> <to> [port] — from/to: any, lan, guest, internet, an address or network/prefix. Port forwarding: forward <port> <address>."));
+            ui.label(RichText::new(tr("One rule per line, the first match wins: allow|deny <from> <to> [port] (any, lan, guest, internet, an address or network/prefix) · forward <port> <address> opens a port from the internet.")).small().color(pal().dim));
         }
 
         // Power over Ethernet.
@@ -218,8 +218,8 @@ impl App {
             }
         } else if kind.poe_powered() || d.poe_draw > 0.0 {
             ui.horizontal(|ui| {
-                ui.label("Powered over the cable");
-                ui.add(egui::DragValue::new(&mut d.poe_draw).range(0.0..=90.0).speed(0.2).suffix(" W")).on_hover_text("0 = it has its own power supply");
+                ui.label(tr("Powered over the cable"));
+                ui.add(egui::DragValue::new(&mut d.poe_draw).range(0.0..=90.0).speed(0.2).suffix(" W")).on_hover_text(tr("0 = it has its own power supply"));
             });
         }
 
@@ -238,7 +238,7 @@ impl App {
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("model", id)).selected_text("Apply a saved model…").width(200.0).show_ui(ui, |ui| {
                 if models.is_empty() {
-                    ui.label(RichText::new("No saved models for this kind yet").color(pal().dim));
+                    ui.label(RichText::new(tr("No saved models for this kind yet")).color(pal().dim));
                 }
                 for m in &models {
                     if ui.selectable_label(false, &m.name).clicked() {
@@ -248,8 +248,8 @@ impl App {
             });
         });
         ui.horizontal(|ui| {
-            ui.add(TextEdit::singleline(&mut self.model_name).desired_width(170.0).hint_text("e.g. Brand X AP-620"));
-            if ui.button(format!("{}  Save as model", ic::FLOPPY_DISK)).on_hover_text("Stores this device's hardware — ports, PoE, radio, price — in this plan and in your library").clicked() && !self.model_name.trim().is_empty() {
+            ui.add(TextEdit::singleline(&mut self.model_name).desired_width(170.0).hint_text(tr("e.g. Brand X AP-620")));
+            if ui.button(format!("{}  {}", ic::FLOPPY_DISK, tr("Save as model"))).on_hover_text(tr("Stores this device's hardware — ports, PoE, radio, price — in this plan and in your library")).clicked() && !self.model_name.trim().is_empty() {
                 let m = Model::from(self.model_name.trim(), self.net.dev(id).unwrap());
                 self.net.models.retain(|x| x.name != m.name);
                 self.net.models.push(m.clone());
@@ -280,9 +280,9 @@ impl App {
     pub(crate) fn record_reading(&mut self, ui: &mut egui::Ui, id: u32) {
         let Some(ap) = self.net.wifi_link_of(id).and_then(|l| self.net.wifi_ends(l)).map(|(a, _)| a.id) else { return };
         ui.horizontal(|ui| {
-            ui.label("Real reading here");
+            ui.label(tr("Real reading here"));
             ui.add(egui::DragValue::new(&mut self.reading).range(-100.0..=-20.0).suffix(" dBm"));
-            if ui.button(format!("{} Record", ic::PLUS)).on_hover_text("Stand where the device is on the map and type what your phone's Wi-Fi app shows").clicked() {
+            if ui.button(format!("{} {}", ic::PLUS, tr("Record"))).on_hover_text(tr("Stand where the device is on the map and type what your phone's Wi-Fi app shows")).clicked() {
                 let d = self.net.dev(id).unwrap();
                 self.net.survey.push(Sample { pos: d.pos, floor: d.floor, ap, rssi: self.reading });
                 let ctx = ui.ctx().clone();
@@ -300,7 +300,7 @@ impl App {
         let wired = links.iter().filter(|l| !l.medium.wireless()).count();
         ui.label(RichText::new(format!("{wired} of {} ports in use{}", d.port_count(), if d.poe_class > 0 { format!(" · {}", POE[d.poe_class as usize].0) } else { String::new() })).color(pal().dim));
         if links.is_empty() {
-            ui.label(RichText::new("Nothing plugged in.").color(pal().dim));
+            ui.label(RichText::new(tr("Nothing plugged in.")).color(pal().dim));
             return;
         }
         let mut poe_total = 0.0;
@@ -358,7 +358,7 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
         let router = if p.router.is_empty() { String::new() } else { format!(" · comes with {}", p.router) };
         ui.label(RichText::new(format!("{}{router}", p.summary())).small().color(pal().dim)).on_hover_text(format!("{}\n{}", p.note, p.source));
     }
-    ui.add(TextEdit::singleline(query).hint_text(format!("{}  Find your plan (Swisscom, Init7, Sunrise…)", ic::MAGNIFYING_GLASS)).desired_width(ui.available_width() - 8.0));
+    ui.add(TextEdit::singleline(query).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, tr("Find your plan (Swisscom, Init7, Sunrise…)"))).desired_width(ui.available_width() - 8.0));
     if query.trim().is_empty() {
         return;
     }
@@ -374,7 +374,7 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
         }
     }
     if hits.is_empty() {
-        ui.label(RichText::new("No plan matches. Try the provider's name, or set the speed below.").small().color(pal().dim));
+        ui.label(RichText::new(tr("No plan matches. Try the provider's name, or set the speed below.")).small().color(pal().dim));
     } else if hits.len() > 8 {
         ui.label(RichText::new(format!("…and {} more: type more of the name.", hits.len() - 8)).small().color(pal().dim));
     }
@@ -401,10 +401,10 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
         let mut first = 0u16;
         for (i, g) in ports.iter_mut().enumerate() {
             ui.horizontal_wrapped(|ui| {
-                ui.add(egui::DragValue::new(&mut g.n).range(1..=96)).on_hover_text("How many ports of this kind");
-                ui.label("×");
+                ui.add(egui::DragValue::new(&mut g.n).range(1..=96)).on_hover_text(tr("How many ports of this kind"));
+                ui.label(tr("×"));
                 if g.kind.line() {
-                    ui.add(egui::DragValue::new(&mut g.mbps).range(1..=10000).speed(10.0).suffix(" Mbit/s")).on_hover_text("The fastest line rate the modem supports");
+                    ui.add(egui::DragValue::new(&mut g.mbps).range(1..=10000).speed(10.0).suffix(" Mbit/s")).on_hover_text(tr("The fastest line rate the modem supports"));
                 } else {
                     speed_combo(ui, ("pg-speed", id, i), &mut g.mbps);
                 }
@@ -413,8 +413,8 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
                         ui.selectable_value(&mut g.kind, k, k.label());
                     }
                 });
-                ui.toggle_value(&mut g.wan, "WAN").on_hover_text("For the internet line: other cables only use it when nothing else is free");
-                if ui.small_button(ic::X).on_hover_text("Remove these ports").clicked() {
+                ui.toggle_value(&mut g.wan, "WAN").on_hover_text(tr("For the internet line: other cables only use it when nothing else is free"));
+                if ui.small_button(ic::X).on_hover_text(tr("Remove these ports")).clicked() {
                     remove = Some(i);
                 }
             });
@@ -428,7 +428,7 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
         if let Some(i) = remove {
             ports.remove(i);
         }
-        let add = ui.small_button(format!("{} Add ports", ic::PLUS)).clicked();
+        let add = ui.small_button(format!("{} {}", ic::PLUS, tr("Add ports"))).clicked();
         if add {
             ports.push(PortGroup::rj45(1, 1000));
         }

@@ -3,6 +3,7 @@ mod companion;
 mod extras;
 mod fls;
 mod html;
+mod i18n;
 mod issues;
 mod lessons;
 mod more;
@@ -29,6 +30,7 @@ use net::{Issue, Kind, Level, Medium, Network, Security, WifiStd, PX_PER_M};
 
 /// Closest zoom: 1 m of the map = 240 screen pixels, enough for a single room to fill the screen.
 const MAX_ZOOM: f32 = 12.0;
+use i18n::{tr, trf};
 use radio_ui::{issue_row, quality_color, Walk};
 use wifi::WallKind;
 use std::collections::HashMap;
@@ -183,11 +185,13 @@ struct Settings {
     zoom: f32,
     /// Lessons whose question was answered right, one bit per lesson.
     quiz: u64,
+    /// Index into i18n::LANGUAGES.
+    lang: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, zoom: 1.0, quiz: 0 }
+        Settings { theme: 0, zoom: 1.0, quiz: 0, lang: 0 }
     }
 }
 
@@ -208,6 +212,7 @@ impl Settings {
     /// Colours, spacing and text sizes for the whole app.
     fn apply(&self, ctx: &egui::Context) {
         THEME.store(self.theme.min(PALETTES.len() - 1), std::sync::atomic::Ordering::Relaxed);
+        i18n::set(self.lang);
         ctx.set_zoom_factor(self.zoom.clamp(0.7, 2.0));
         ctx.set_theme(if self.theme == 1 { egui::Theme::Light } else { egui::Theme::Dark });
         ctx.all_styles_mut(|s| {
@@ -709,11 +714,11 @@ impl App {
         // Narrow windows: icon-only buttons (names on hover) so nothing overlaps.
         let compact = ui.available_width() < 1500.0;
         let tiny = ui.available_width() < 1150.0;
-        let lab = |icon: &str, text: &str| if compact { icon.to_string() } else { format!("{icon}  {text}") };
+        let lab = |icon: &str, text: &str| if compact { icon.to_string() } else { format!("{icon}  {}", tr(text)) };
         ui.horizontal(|ui| {
             ui.label(RichText::new(ic::SHARE_NETWORK).size(22.0).color(pal().accent));
             if !tiny {
-                ui.label(RichText::new("NetSketch").size(18.0).strong());
+                ui.label(RichText::new(tr("NetSketch")).size(18.0).strong());
             }
             ui.add(TextEdit::singleline(&mut self.net.title).desired_width(if compact { 130.0 } else { 180.0 }).frame(egui::Frame::NONE).text_color(pal().dim));
             ui.add_space(if compact { 6.0 } else { 16.0 });
@@ -735,53 +740,58 @@ impl App {
                 let was = self.settings;
                 ui.menu_button(ic::GEAR, |ui| {
                     ui.set_min_width(240.0);
-                    ui.label(RichText::new("Look").strong());
-                    for (i, name) in ["Dark", "Light", "High contrast"].into_iter().enumerate() {
-                        ui.radio_value(&mut self.settings.theme, i, name);
+                    ui.label(RichText::new(tr("Language")).strong());
+                    for (i, name) in i18n::LANGUAGES.into_iter().enumerate() {
+                        ui.radio_value(&mut self.settings.lang, i, name);
                     }
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Text and buttons").strong());
+                    ui.label(RichText::new(tr("Look")).strong());
+                    for (i, name) in ["Dark", "Light", "High contrast"].into_iter().enumerate() {
+                        ui.radio_value(&mut self.settings.theme, i, tr(name));
+                    }
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(tr("Text and buttons")).strong());
                     ui.add(egui::Slider::new(&mut self.settings.zoom, 0.8..=1.8).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                    ui.label(RichText::new("Ctrl + and Ctrl − change the size too.").small().color(pal().dim));
+                    ui.label(RichText::new(tr("Ctrl + and Ctrl − change the size too.")).small().color(pal().dim));
                 })
                 .response
-                .on_hover_text("Settings: colours and text size");
+                .on_hover_text(tr("Settings: colours and text size"));
                 if self.settings != was {
                     self.settings.apply(ui.ctx());
                     self.settings.save();
                 }
                 ui.menu_button(ic::KEYBOARD, |ui| {
                     ui.set_min_width(300.0);
-                    ui.label(RichText::new("Keyboard shortcuts").strong());
+                    ui.label(RichText::new(tr("Keyboard shortcuts")).strong());
                     egui::Grid::new("keys").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
                         for (k, what) in SHORTCUTS {
                             ui.label(RichText::new(*k).monospace().color(pal().accent));
-                            ui.label(*what);
+                            ui.label(tr(what));
                             ui.end_row();
                         }
                     });
-                    ui.label(RichText::new("Right-click anything on the map for more. Hold Shift while connecting to cable a laptop.").small().color(pal().dim));
+                    ui.label(RichText::new(tr("Right-click anything on the map for more. Hold Shift while connecting to cable a laptop.")).small().color(pal().dim));
                 })
                 .response
-                .on_hover_text("Keyboard shortcuts");
-                if ui.button(lab(ic::EXPORT, "Export")).on_hover_text("Export: the plan, addresses and shopping list as a document").clicked() {
+                .on_hover_text(tr("Keyboard shortcuts"));
+                if ui.button(lab(ic::EXPORT, "Export")).on_hover_text(tr("Export: the plan, addresses and shopping list as a document")).clicked() {
                     self.export(&ctx);
                 }
-                if ui.button(lab(ic::FLOPPY_DISK, "Save")).on_hover_text("Save (Ctrl+S)").clicked() {
+                if ui.button(lab(ic::FLOPPY_DISK, "Save")).on_hover_text(tr("Save (Ctrl+S)")).clicked() {
                     self.save(&ctx, false);
                 }
-                if ui.button(lab(ic::FOLDER_OPEN, "Open")).on_hover_text("Open a plan or an older .fls project (Ctrl+O)").clicked() {
+                if ui.button(lab(ic::FOLDER_OPEN, "Open")).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O)")).clicked() {
                     self.open(&ctx);
                 }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(ic::ARROW_CLOCKWISE)).on_hover_text("Redo (Ctrl+Y)").clicked() {
+                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(ic::ARROW_CLOCKWISE)).on_hover_text(tr("Redo (Ctrl+Y)")).clicked() {
                     self.redo_once(&ctx);
                 }
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(ic::ARROW_COUNTER_CLOCKWISE)).on_hover_text("Undo (Ctrl+Z)").clicked() {
+                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(ic::ARROW_COUNTER_CLOCKWISE)).on_hover_text(tr("Undo (Ctrl+Z)")).clicked() {
                     self.undo_once(&ctx);
                 }
                 ui.menu_button(lab(ic::FILE_PLUS, "New"), |ui| {
                     ui.set_min_width(340.0);
-                    if Self::autosave_path().exists() && ui.button(RichText::new(format!("{}  Recover last session", ic::CLOCK_COUNTER_CLOCKWISE)).strong()).on_hover_text("The plan as it was at the last automatic save").clicked() {
+                    if Self::autosave_path().exists() && ui.button(RichText::new(format!("{}  {}", ic::CLOCK_COUNTER_CLOCKWISE, tr("Recover last session"))).strong()).on_hover_text(tr("The plan as it was at the last automatic save")).clicked() {
                         if let Some(n) = std::fs::read_to_string(Self::autosave_path()).ok().and_then(|t| serde_json::from_str::<Network>(&t).ok()) {
                             self.load(n);
                             // A recovered copy must not overwrite whatever file was open before.
@@ -792,7 +802,7 @@ impl App {
                     }
                     ui.separator();
                     for (key, label, desc) in scenarios::SCENARIOS {
-                        if ui.button(RichText::new(*label).strong()).on_hover_text(*desc).clicked() {
+                        if ui.button(RichText::new(tr(label)).strong()).on_hover_text(tr(desc)).clicked() {
                             self.load(net::template(key));
                             self.file = None;
                             if self.mode == Mode::Learn {
@@ -825,7 +835,7 @@ impl App {
                         self.net.storey_names.push((f, name));
                     }
                     let below: Vec<crate::wifi::Wall> = self.net.walls.iter().filter(|w| w.floor == f - 1).cloned().collect();
-                    if !below.is_empty() && ui.button(format!("{}  Copy walls from {}", ic::COPY, self.net.storey(f - 1))).on_hover_text("Outer walls are usually the same on every storey").clicked() {
+                    if !below.is_empty() && ui.button(format!("{}  Copy walls from {}", ic::COPY, self.net.storey(f - 1))).on_hover_text(tr("Outer walls are usually the same on every storey")).clicked() {
                         self.snapshot();
                         for w in below {
                             crate::scenarios::wall(&mut self.net, w.a, w.b, w.kind);
@@ -834,8 +844,8 @@ impl App {
                         self.heat_cache = None;
                         ui.close();
                     }
-                }).response.on_hover_text("Storeys: each one has its own walls; floors between them cost signal");
-                ui.toggle_value(&mut self.heat, lab(ic::WIFI_HIGH, "Wi-Fi map")).on_hover_text("Colour the floor by signal strength — walls, power, bands and antennas included");
+                }).response.on_hover_text(tr("Storeys: each one has its own walls; floors between them cost signal"));
+                ui.toggle_value(&mut self.heat, lab(ic::WIFI_HIGH, "Wi-Fi map")).on_hover_text(tr("Colour the floor by signal strength — walls, power, bands and antennas included"));
             });
         });
     }
@@ -844,24 +854,24 @@ impl App {
 
     fn shelf(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(RichText::new("TOOLS").small().color(pal().dim));
+        ui.label(RichText::new(tr("TOOLS")).small().color(pal().dim));
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.tool, Tool::Select, format!("{} Move", ic::CURSOR));
-            ui.selectable_value(&mut self.tool, Tool::Connect, format!("{} Connect", ic::PLUGS_CONNECTED));
-            ui.selectable_value(&mut self.tool, Tool::Wall, format!("{} Walls", ic::WALL));
-            ui.selectable_value(&mut self.tool, Tool::Measure, format!("{} Measure", ic::RULER));
+            ui.selectable_value(&mut self.tool, Tool::Select, format!("{} {}", ic::CURSOR, tr("Move")));
+            ui.selectable_value(&mut self.tool, Tool::Connect, format!("{} {}", ic::PLUGS_CONNECTED, tr("Connect")));
+            ui.selectable_value(&mut self.tool, Tool::Wall, format!("{} {}", ic::WALL, tr("Walls")));
+            ui.selectable_value(&mut self.tool, Tool::Measure, format!("{} {}", ic::RULER, tr("Measure")));
         });
         if self.tool == Tool::Measure {
             self.measure_panel(ui);
         }
-        ui.checkbox(&mut self.snap, "Snap to the half-metre grid");
+        ui.checkbox(&mut self.snap, tr("Snap to the half-metre grid"));
         if self.tool == Tool::Wall {
             egui::ComboBox::from_id_salt("wallkind").selected_text(self.wall_kind.label()).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
                 for k in WallKind::ALL {
                     ui.selectable_value(&mut self.wall_kind, k, k.label());
                 }
             });
-            ui.label(RichText::new("Click to start, click again to place — each click continues the wall. Right-click, double-click or Esc to stop. Points lock onto corners (green) and walls (amber); Shift keeps it straight.").small().color(pal().dim));
+            ui.label(RichText::new(tr("Click to start, click again to place — each click continues the wall. Right-click, double-click or Esc to stop. Points lock onto corners (green) and walls (amber); Shift keeps it straight.")).small().color(pal().dim));
             ui.add_space(8.0);
         }
         if self.tool == Tool::Connect {
@@ -873,13 +883,13 @@ impl App {
                         ui.selectable_value(&mut self.medium, m, m.label());
                     }
                 });
-            ui.label(RichText::new("Drag from one device to another — or click one, then the other. Laptops join by Wi-Fi; hold Shift to cable one.").small().color(pal().dim));
+            ui.label(RichText::new(tr("Drag from one device to another — or click one, then the other. Laptops join by Wi-Fi; hold Shift to cable one.")).small().color(pal().dim));
         }
         if self.tool == Tool::Select {
-            ui.label(RichText::new("Drag devices, pins and wall ends. Right-click anything for more.").small().color(pal().dim));
+            ui.label(RichText::new(tr("Drag devices, pins and wall ends. Right-click anything for more.")).small().color(pal().dim));
         }
         ui.add_space(8.0);
-        ui.label(RichText::new("ADD DEVICES").small().color(pal().dim));
+        ui.label(RichText::new(tr("ADD DEVICES")).small().color(pal().dim));
         egui::Grid::new("shelf").num_columns(2).spacing(vec2(6.0, 6.0)).show(ui, |ui| {
             for (i, k) in Kind::SHELF.iter().enumerate() {
                 // Smaller cards in narrow windows so the map keeps its room.
@@ -911,15 +921,15 @@ impl App {
             }
         });
         ui.add_space(10.0);
-        ui.label(RichText::new("PLAN").small().color(pal().dim));
-        if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  Plan addresses for me", ic::MAGIC_WAND))).on_hover_text("Gives every network a sensible address range, turns on DHCP and fills in routes").clicked() {
+        ui.label(RichText::new(tr("PLAN")).small().color(pal().dim));
+        if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  {}", ic::MAGIC_WAND, tr("Plan addresses for me")))).on_hover_text(tr("Gives every network a sensible address range, turns on DHCP and fills in routes")).clicked() {
             self.snapshot();
             let logs = self.net.auto_address();
             self.push_logs(logs);
             let ctx = ui.ctx().clone();
             self.say(&ctx, "Addresses planned. Check the problem list for anything left.");
         }
-        if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  Pick better channels", ic::WIFI_HIGH))).on_hover_text("Chooses non-overlapping channels for your access points, avoiding the neighbours").clicked() {
+        if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  {}", ic::WIFI_HIGH, tr("Pick better channels")))).on_hover_text(tr("Chooses non-overlapping channels for your access points, avoiding the neighbours")).clicked() {
             self.snapshot();
             let msg = self.net.auto_channels();
             let ctx = ui.ctx().clone();
@@ -1069,9 +1079,9 @@ impl App {
             let m = a + (b - a) * 0.5;
             if standby || storm {
                 let (t, c) = if storm {
-                    (format!("{} loop!", ic::FIRE), pal().red)
+                    (format!("{} {}", ic::FIRE, tr("loop!")), pal().red)
                 } else if l.unplugged {
-                    (format!("{} unplugged", ic::PLUGS), pal().amber)
+                    (format!("{} {}", ic::PLUGS, tr("unplugged")), pal().amber)
                 } else if dead {
                     ("no power".to_string(), pal().dim)
                 } else {
@@ -1367,15 +1377,15 @@ impl App {
                 if ui.small_button(ic::MAGNIFYING_GLASS_MINUS).clicked() {
                     self.zoom = (self.zoom / 1.2).max(0.1);
                 }
-                ui.label(RichText::new(format!("{:.0}%", self.zoom * 100.0)).small().color(pal().dim)).on_hover_text("Zoom level");
-                ui.label(RichText::new(format!("· dots {} m", self.grid_m())).small().color(pal().dim)).on_hover_text("Distance between two dots of the grid");
+                ui.label(RichText::new(format!("{:.0}%", self.zoom * 100.0)).small().color(pal().dim)).on_hover_text(tr("Zoom level"));
+                ui.label(RichText::new(format!("· dots {} m", self.grid_m())).small().color(pal().dim)).on_hover_text(tr("Distance between two dots of the grid"));
                 if ui.small_button(ic::MAGNIFYING_GLASS_PLUS).clicked() {
                     self.zoom = (self.zoom * 1.2).min(MAX_ZOOM);
                 }
-                if ui.small_button(ic::CORNERS_OUT).on_hover_text("Fit everything").clicked() {
+                if ui.small_button(ic::CORNERS_OUT).on_hover_text(tr("Fit everything")).clicked() {
                     self.fit();
                 }
-                if ui.small_button(ic::CAMERA).on_hover_text("Save the map as a picture (PNG)").clicked() {
+                if ui.small_button(ic::CAMERA).on_hover_text(tr("Save the map as a picture (PNG)")).clicked() {
                     let ctx = ui.ctx().clone();
                     self.export_picture(&ctx);
                 }
@@ -1545,9 +1555,9 @@ impl App {
         let clicked = ui
             .horizontal(|ui| {
                 let caret = if open { ic::CARET_DOWN } else { ic::CARET_RIGHT };
-                let r = ui.add(egui::Label::new(RichText::new(format!("{caret}  {title}")).strong().color(if open { pal().text } else { pal().dim })).sense(Sense::click()));
+                let r = ui.add(egui::Label::new(RichText::new(format!("{caret}  {}", tr(title))).strong().color(if open { pal().text } else { pal().dim })).sense(Sense::click()));
                 if !hint.is_empty() {
-                    ui.label(RichText::new(ic::INFO).color(pal().dim)).on_hover_text(hint);
+                    ui.label(RichText::new(ic::INFO).color(pal().dim)).on_hover_text(tr(hint));
                 }
                 // The rest of the row is clickable too.
                 let rest = ui.allocate_response(vec2(ui.available_width(), r.rect.height()), Sense::click());
@@ -1589,19 +1599,19 @@ impl App {
         }
         // Actions, then this device's problems: the things you came for, before the details.
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button(format!("{}  Try it", ic::PLAY)).on_hover_text("See this device in Simulate mode").clicked() {
+            if ui.small_button(format!("{}  {}", ic::PLAY, tr("Try it"))).on_hover_text(tr("See this device in Simulate mode")).clicked() {
                 self.mode = Mode::Simulate;
                 let ctx = ui.ctx().clone();
                 self.start_sim(&ctx);
             }
-            if ui.small_button(format!("{}  Duplicate", ic::COPY)).on_hover_text("A copy next to it, same hardware, fresh addresses (Ctrl+D)").clicked() {
+            if ui.small_button(format!("{}  {}", ic::COPY, tr("Duplicate"))).on_hover_text(tr("A copy next to it, same hardware, fresh addresses (Ctrl+D)")).clicked() {
                 self.snapshot();
                 if let Some(new) = self.net.duplicate(id) {
                     self.sel = Sel::Dev(new);
                 }
             }
             self.power_toggle(ui, id);
-            if ui.small_button(RichText::new(format!("{}  Delete", ic::TRASH)).color(pal().red)).on_hover_text("Remove this device (Delete key)").clicked() {
+            if ui.small_button(RichText::new(format!("{}  {}", ic::TRASH, tr("Delete"))).color(pal().red)).on_hover_text(tr("Remove this device (Delete key)")).clicked() {
                 delete = true;
             }
         });
@@ -1635,30 +1645,30 @@ impl App {
                         ui.label(RichText::new(&f.name).monospace().color(pal().dim));
                         ui.horizontal(|ui| {
                             let locked = auto && i == dhcp_if;
-                            ui.add_enabled(!locked, TextEdit::singleline(&mut f.ip).desired_width(118.0).hint_text("e.g. 192.168.1.20").font(egui::TextStyle::Monospace));
-                            ui.label("/");
+                            ui.add_enabled(!locked, TextEdit::singleline(&mut f.ip).desired_width(118.0).hint_text(tr("e.g. 192.168.1.20")).font(egui::TextStyle::Monospace));
+                            ui.label(tr("/"));
                             ui.add_enabled(!locked, egui::DragValue::new(&mut f.prefix).range(0..=32));
                         });
                         ui.end_row();
                     }
                     // A VLAN number is set on wired ports; Wi-Fi devices get theirs from the network they join.
                     if kind.is_host() && self_wired {
-                        ui.label("VLAN");
-                        ui.add(egui::DragValue::new(&mut d.ifaces[0].vlan).range(1..=4094)).on_hover_text("1 = the normal, untagged network. Other numbers need a router interface in that VLAN.");
+                        ui.label(tr("VLAN"));
+                        ui.add(egui::DragValue::new(&mut d.ifaces[0].vlan).range(1..=4094)).on_hover_text(tr("1 = the normal, untagged network. Other numbers need a router interface in that VLAN."));
                         ui.end_row();
                     }
                     if kind != Kind::Internet {
-                        ui.label("Gateway");
-                        ui.add_enabled(!auto, TextEdit::singleline(&mut d.gateway).desired_width(150.0).hint_text("router address").font(egui::TextStyle::Monospace));
+                        ui.label(tr("Gateway"));
+                        ui.add_enabled(!auto, TextEdit::singleline(&mut d.gateway).desired_width(150.0).hint_text(tr("router address")).font(egui::TextStyle::Monospace));
                         ui.end_row();
-                        ui.label("DNS");
-                        ui.add_enabled(!auto, TextEdit::singleline(&mut d.dns).desired_width(150.0).hint_text("name server").font(egui::TextStyle::Monospace));
+                        ui.label(tr("DNS"));
+                        ui.add_enabled(!auto, TextEdit::singleline(&mut d.dns).desired_width(150.0).hint_text(tr("name server")).font(egui::TextStyle::Monospace));
                         ui.end_row();
                     }
                 });
             }
             if kind == Kind::Router && d.ifaces.is_empty() && Self::section(ui, "Addresses") {
-                ui.label(RichText::new("Connect cables first: each cable uses one of the router's ports, which then gets its own address.").small().color(pal().dim));
+                ui.label(RichText::new(tr("Connect cables first: each cable uses one of the router's ports, which then gets its own address.")).small().color(pal().dim));
             }
             if kind == Kind::Internet && Self::section(ui, "Internet plan") {
                 ui_extras::plan_picker(ui, d, &mut self.catalog_query);
@@ -1673,40 +1683,40 @@ impl App {
             }
             if kind.serves() && Self::section(ui, "Services") {
                 if kind.offers("dhcp") {
-                    ui.checkbox(&mut d.services.dhcp, "DHCP server").on_hover_text("Hands out addresses");
+                    ui.checkbox(&mut d.services.dhcp, tr("DHCP server")).on_hover_text(tr("Hands out addresses"));
                 }
                 if d.services.dhcp && kind.offers("dhcp") {
                     ui.horizontal(|ui| {
-                        let pool = ui.label("Pool");
+                        let pool = ui.label(tr("Pool"));
                         if kind == Kind::Router {
-                            pool.on_hover_text("Leave the pool empty: every VLAN interface then hands out .100–.199 of its own network.");
+                            pool.on_hover_text(tr("Leave the pool empty: every VLAN interface then hands out .100–.199 of its own network."));
                         }
                         ui.add(TextEdit::singleline(&mut d.dhcp_from).desired_width(110.0).font(egui::TextStyle::Monospace));
-                        ui.label("–");
+                        ui.label(tr("–"));
                         ui.add(TextEdit::singleline(&mut d.dhcp_to).desired_width(110.0).font(egui::TextStyle::Monospace));
                     });
                 }
                 if kind.offers("dns") {
-                    ui.checkbox(&mut d.services.dns, "DNS server").on_hover_text("Answers name lookups");
+                    ui.checkbox(&mut d.services.dns, tr("DNS server")).on_hover_text(tr("Answers name lookups"));
                 }
                 if d.services.dns && kind.offers("dns") && kind != Kind::Internet {
-                    ui.add(TextEdit::multiline(&mut d.dns_records).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("www.home.test 192.168.1.10")).on_hover_text("Name records, one per line: name address");
+                    ui.add(TextEdit::multiline(&mut d.dns_records).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("www.home.test 192.168.1.10"))).on_hover_text(tr("Name records, one per line: name address"));
                 }
                 if kind.offers("web") {
-                    ui.checkbox(&mut d.services.web, "Web server (HTTPS)");
+                    ui.checkbox(&mut d.services.web, tr("Web server (HTTPS)"));
                     if d.services.web {
-                        ui.add(TextEdit::multiline(&mut d.web_page).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("Page text or HTML (index.html)"));
+                        ui.add(TextEdit::multiline(&mut d.web_page).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("Page text or HTML (index.html)")));
                     }
                 }
                 if kind.offers("files") {
-                    ui.checkbox(&mut d.services.files, "File sharing (SMB 3)");
+                    ui.checkbox(&mut d.services.files, tr("File sharing (SMB 3)"));
                 }
                 if kind.offers("print") {
-                    ui.checkbox(&mut d.services.print, "Printing (IPP)");
+                    ui.checkbox(&mut d.services.print, tr("Printing (IPP)"));
                 }
             }
             if kind.routes() && kind != Kind::Internet && Self::section(ui, "Routes") {
-                ui.add(TextEdit::multiline(&mut d.routes).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("10.0.2.0/24 via 10.0.1.2")).on_hover_text("Extra routes, one per line: network/prefix via gateway");
+                ui.add(TextEdit::multiline(&mut d.routes).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("10.0.2.0/24 via 10.0.1.2"))).on_hover_text(tr("Extra routes, one per line: network/prefix via gateway"));
             }
             // The internet cloud is the outside world: no ports or storey to plan.
             if kind != Kind::Internet && Self::section(ui, "Hardware") {
@@ -1720,7 +1730,7 @@ impl App {
             egui::Grid::new(("hw", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
                 // Phones and gadgets have no socket; hosts have one, so just its speed.
                 if kind.is_host() && !matches!(kind, Kind::Phone | Kind::SmartHome) {
-                    ui.label("Ethernet");
+                    ui.label(tr("Ethernet"));
                     if d.ports.is_empty() {
                         d.ports.push(ports::PortGroup::rj45(1, 1000));
                     }
@@ -1728,18 +1738,18 @@ impl App {
                     ui_extras::speed_combo(ui, ("pspeed", id), &mut d.ports[0].mbps);
                     ui.end_row();
                 }
-                ui.label("Storey");
+                ui.label(tr("Storey"));
                 ui.add(egui::DragValue::new(&mut d.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
                 ui.end_row();
                 if !kind.foreign() {
-                    ui.label("Power draw");
-                    ui.add(egui::DragValue::new(&mut d.watts).range(0.0..=2000.0).speed(0.5).suffix(" W average")).on_hover_text("Average over a day, standby included. Devices powered over the cable count at their switch.");
+                    ui.label(tr("Power draw"));
+                    ui.add(egui::DragValue::new(&mut d.watts).range(0.0..=2000.0).speed(0.5).suffix(" W average")).on_hover_text(tr("Average over a day, standby included. Devices powered over the cable count at their switch."));
                     ui.end_row();
                 }
             });
             if !kind.foreign() && !kind.is_host() {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Ports").color(pal().dim));
+                ui.label(RichText::new(tr("Ports")).color(pal().dim));
                 let old = d.clone();
                 if ui_extras::port_editor(ui, id, &mut d.ports, &plugged) {
                     self.before = Some(Before::Device(old));
@@ -1749,11 +1759,11 @@ impl App {
             if Self::section(ui, "Price and notes") {
                 if !kind.foreign() && kind != Kind::Internet {
                     ui.horizontal(|ui| {
-                        ui.label("Price");
+                        ui.label(tr("Price"));
                         ui.add(egui::DragValue::new(&mut d.price).range(0.0..=100000.0).prefix(currency.clone()).speed(5.0));
                     });
                 }
-                ui.add(TextEdit::multiline(&mut d.notes).desired_rows(2).desired_width(f32::INFINITY).hint_text("Notes: room, model, serial number…"));
+                ui.add(TextEdit::multiline(&mut d.notes).desired_rows(2).desired_width(f32::INFINITY).hint_text(tr("Notes: room, model, serial number…")));
             }
         }
         let kind = self.net.dev(id).unwrap().kind;
@@ -1809,7 +1819,7 @@ impl App {
         let wifi_only = [ka, kb].iter().any(|k| matches!(k, Kind::Phone | Kind::SmartHome));
         ui.add_space(4.0);
         egui::Grid::new(("link", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(RichText::new("Type").color(pal().dim));
+            ui.label(RichText::new(tr("Type")).color(pal().dim));
             egui::ComboBox::from_id_salt(("medium", id)).selected_text(l.medium.label()).width(200.0).show_ui(ui, |ui| {
                 for m in Medium::ALL.into_iter().filter(|m| match m {
                     Medium::Mesh => ka == Kind::Speaker && kb == Kind::Speaker,
@@ -1825,17 +1835,17 @@ impl App {
             }
             ui.end_row();
             if l.medium == Medium::Powerline && !catalog::powerline().is_empty() {
-                ui.label(RichText::new("Kit").color(pal().dim));
+                ui.label(RichText::new(tr("Kit")).color(pal().dim));
                 let shown = if l.kit.is_empty() { "A typical kit (≈ 300 Mbit/s up close)".to_string() } else { l.kit.clone() };
                 egui::ComboBox::from_id_salt(("kit", id)).selected_text(shown).width(200.0).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut l.kit, String::new(), "A typical kit (≈ 300 Mbit/s up close)");
+                    ui.selectable_value(&mut l.kit, String::new(), tr("A typical kit (≈ 300 Mbit/s up close)"));
                     for k in catalog::powerline() {
                         ui.selectable_value(&mut l.kit, k.title(), format!("{} — {}, ≈ {:.0} Mbit/s up close", k.title(), k.standard, k.real_mbps)).on_hover_text(format!("{}\n{}\nSpecs from {}", k.summary(), k.note, k.source));
                     }
                 });
                 ui.end_row();
             }
-            ui.label(RichText::new("Length").color(pal().dim));
+            ui.label(RichText::new(tr("Length")).color(pal().dim));
             ui.horizontal(|ui| {
                 let mut manual = l.length_m.is_some();
                 if let Some(m) = &mut l.length_m {
@@ -1843,7 +1853,7 @@ impl App {
                 } else {
                     ui.label(format!("{measured} m"));
                 }
-                if ui.checkbox(&mut manual, "by hand").on_hover_text("Off: measured from the drawing").changed() {
+                if ui.checkbox(&mut manual, tr("by hand")).on_hover_text(tr("Off: measured from the drawing")).changed() {
                     l.length_m = manual.then_some(measured);
                 }
             });
@@ -1859,15 +1869,15 @@ impl App {
             ui.label(format!("≈ {:.0} Mbit/s real throughput", self.net.link_rate(&l)));
             let stp = self.stp();
             if stp.blocked.contains(&id) {
-                ui.label(RichText::new("Spanning tree keeps this link on standby (backup path).").color(pal().amber));
+                ui.label(RichText::new(tr("Spanning tree keeps this link on standby (backup path).")).color(pal().amber));
             } else if stp.storm.contains(&id) {
-                ui.label(RichText::new("This link closes a loop nobody blocks: broadcast storm!").color(pal().red));
+                ui.label(RichText::new(tr("This link closes a loop nobody blocks: broadcast storm!")).color(pal().red));
             }
         }
         self.link_ports(ui, id);
         self.link_extras(ui, id);
         ui.add_space(6.0);
-        if ui.small_button(RichText::new(format!("{}  Remove connection", ic::TRASH)).color(pal().red)).clicked() {
+        if ui.small_button(RichText::new(format!("{}  {}", ic::TRASH, tr("Remove connection"))).color(pal().red)).clicked() {
             self.snapshot();
             self.net.remove_link(id);
             self.sel = Sel::None;
@@ -1891,8 +1901,8 @@ impl App {
             ui.label(RichText::new(&self.net.story).color(pal().dim));
             if let Some((_, goal)) = scenarios::EXERCISES.iter().find(|e| e.0 == self.net.scenario) {
                 ui.add_space(4.0);
-                ui.label(RichText::new(format!("{}  Your task: {goal}", ic::TARGET)).color(pal().accent));
-                if ui.button(format!("{}  Check my work", ic::CHECK_SQUARE)).clicked() {
+                ui.label(RichText::new(format!("{}  {}", ic::TARGET, trf("Your task: {}", &[&tr(goal)]))).color(pal().accent));
+                if ui.button(format!("{}  {}", ic::CHECK_SQUARE, tr("Check my work"))).clicked() {
                     let ctx = ui.ctx().clone();
                     match scenarios::check_exercise(&self.net) {
                         Ok(m) | Err(m) => self.say(&ctx, m),
@@ -1920,23 +1930,23 @@ impl App {
         self.resilience_and_power(ui);
         if Self::section(ui, "Settings") {
             egui::Grid::new("settings").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                ui.label(RichText::new("Floors made of").color(pal().dim)).on_hover_text("What the floors between storeys are built from: it decides how much Wi-Fi gets through to the next storey");
+                ui.label(RichText::new(tr("Floors made of")).color(pal().dim)).on_hover_text(tr("What the floors between storeys are built from: it decides how much Wi-Fi gets through to the next storey"));
                 egui::ComboBox::from_id_salt("slab").selected_text(self.net.slab.label()).width(170.0).show_ui(ui, |ui| {
                     for k in WallKind::ALL {
                         ui.selectable_value(&mut self.net.slab, k, k.label());
                     }
                 });
                 ui.end_row();
-                ui.label(RichText::new("Hardware").color(pal().dim)).on_hover_text("Real devices differ: MAC addresses, how sticky each phone is, how busy the neighbours are, how good the house wiring is. A fixed seed makes the same plan always behave the same.");
-                if ui.small_button(format!("{} Shuffle  ·  {:08x}", ic::SHUFFLE, self.net.seed as u32)).on_hover_text("Same plan, other physical devices: new MAC addresses, different neighbours' habits and wiring quality").clicked() {
+                ui.label(RichText::new(tr("Hardware")).color(pal().dim)).on_hover_text(tr("Real devices differ: MAC addresses, how sticky each phone is, how busy the neighbours are, how good the house wiring is. A fixed seed makes the same plan always behave the same."));
+                if ui.small_button(format!("{} Shuffle  ·  {:08x}", ic::SHUFFLE, self.net.seed as u32)).on_hover_text(tr("Same plan, other physical devices: new MAC addresses, different neighbours' habits and wiring quality")).clicked() {
                     self.snapshot();
                     self.net.shuffle_hardware(sim::new_seed());
                 }
                 ui.end_row();
-                ui.label(RichText::new("Live variation").color(pal().dim));
-                ui.checkbox(&mut self.live_var, "in Simulate").on_hover_text("Fading and changing traffic while simulating. Off: Simulate uses the same steady averages as planning.");
+                ui.label(RichText::new(tr("Live variation")).color(pal().dim));
+                ui.checkbox(&mut self.live_var, tr("in Simulate")).on_hover_text(tr("Fading and changing traffic while simulating. Off: Simulate uses the same steady averages as planning."));
                 ui.end_row();
-                ui.label(RichText::new("Currency").color(pal().dim));
+                ui.label(RichText::new(tr("Currency")).color(pal().dim));
                 ui.add(TextEdit::singleline(&mut self.net.currency).desired_width(40.0));
                 ui.end_row();
             });
@@ -2008,7 +2018,7 @@ impl App {
                 ui.label(RichText::new(format!("Everything {} sent, received or handled — like a packet capture.", d.name)).small().color(pal().dim));
                 egui::ScrollArea::vertical().id_salt("traffic").stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                     if rows.is_empty() {
-                        ui.label(RichText::new("Nothing yet. Open a page or ping from any device.").color(pal().dim));
+                        ui.label(RichText::new(tr("Nothing yet. Open a page or ping from any device.")).color(pal().dim));
                     }
                     for r in rows {
                         ui.horizontal_wrapped(|ui| {
@@ -2029,14 +2039,14 @@ impl App {
         let b = self.browsers.entry(id).or_insert_with(|| Browser { url: home, ..Default::default() });
         let mut go = None;
         ui.horizontal(|ui| {
-            if ui.small_button(ic::ARROW_CLOCKWISE).on_hover_text("Reload").clicked() {
+            if ui.small_button(ic::ARROW_CLOCKWISE).on_hover_text(tr("Reload")).clicked() {
                 go = Some(b.url.clone());
             }
-            let r = ui.add(TextEdit::singleline(&mut b.url).font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 44.0).hint_text("address or name"));
+            let r = ui.add(TextEdit::singleline(&mut b.url).font(egui::TextStyle::Monospace).desired_width(ui.available_width() - 44.0).hint_text(tr("address or name")));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 go = Some(b.url.clone());
             }
-            if ui.button(ic::ARROW_RIGHT).on_hover_text("Go").clicked() {
+            if ui.button(ic::ARROW_RIGHT).on_hover_text(tr("Go")).clicked() {
                 go = Some(b.url.clone());
             }
         });
@@ -2099,7 +2109,7 @@ impl App {
                 ui.label(RichText::new(n).small().color(pal().dim));
             }
         } else {
-            ui.label(RichText::new("Type an address — a device's IP, its name, or a real website like wikipedia.org — and press Enter.").color(pal().dim));
+            ui.label(RichText::new(tr("Type an address — a device's IP, its name, or a real website like wikipedia.org — and press Enter.")).color(pal().dim));
         }
         if let Some(h) = follow.filter(|h| !h.starts_with('#') && !h.starts_with("mailto:") && !h.starts_with("javascript:")) {
             let here = b.page.as_ref().map(|p| p.0.clone()).unwrap_or_default();
@@ -2255,7 +2265,7 @@ impl App {
                 }
             });
         });
-        let resp = ui.add(TextEdit::singleline(&mut term.input).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text("type a command, e.g. ping example.com"));
+        let resp = ui.add(TextEdit::singleline(&mut term.input).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text(tr("type a command, e.g. ping example.com")));
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             run = Some(std::mem::take(&mut term.input));
             resp.request_focus();
@@ -2289,10 +2299,10 @@ impl App {
             tab(ui, &mut self.bottom, Bottom::Shopping, t(ic::SHOPPING_CART, "Shopping list".into(), String::new()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.bottom == Bottom::Packets {
-                    if ui.small_button(format!("{} Clear", ic::BROOM)).clicked() {
+                    if ui.small_button(format!("{} {}", ic::BROOM, tr("Clear"))).clicked() {
                         self.rows.clear();
                     }
-                    ui.checkbox(&mut self.only_selected, "Only selected device");
+                    ui.checkbox(&mut self.only_selected, tr("Only selected device"));
                 }
             });
         });
@@ -2300,10 +2310,10 @@ impl App {
         egui::ScrollArea::both().auto_shrink([false, false]).stick_to_bottom(self.bottom == Bottom::Packets).show(ui, |ui| match self.bottom {
             Bottom::Problems => {
                 if issues.is_empty() {
-                    ui.label(RichText::new(format!("{}  Everything looks good.", ic::CHECK_CIRCLE)).color(pal().green));
+                    ui.label(RichText::new(format!("{}  {}", ic::CHECK_CIRCLE, tr("Everything looks good."))).color(pal().green));
                 }
                 let fixable = issues.iter().filter(|i| i.fix.is_some()).count();
-                if fixable > 1 && ui.button(RichText::new(format!("{}  Apply all {fixable} one-click fixes", ic::WRENCH)).color(pal().accent)).on_hover_text("Every fix below in one go (Ctrl+Z undoes it)").clicked() {
+                if fixable > 1 && ui.button(RichText::new(format!("{}  Apply all {fixable} one-click fixes", ic::WRENCH)).color(pal().accent)).on_hover_text(tr("Every fix below in one go (Ctrl+Z undoes it)")).clicked() {
                     self.snapshot();
                     let n = self.net.fix_all().len();
                     self.issues = None;
@@ -2329,7 +2339,7 @@ impl App {
             Bottom::Packets => {
                 let sel = if let Sel::Dev(d) = self.sel { Some(d) } else { None };
                 if self.rows.is_empty() {
-                    ui.label(RichText::new("No traffic yet. Switch to Simulate and run a command.").color(pal().dim));
+                    ui.label(RichText::new(tr("No traffic yet. Switch to Simulate and run a command.")).color(pal().dim));
                 }
                 let rows: Vec<&Row> = self.rows.iter().filter(|r| !self.only_selected || sel.is_none() || Some(r.log.dev) == sel).collect();
                 packet_grid(ui, "pk", &rows);
@@ -2343,12 +2353,12 @@ impl App {
                         ui.label(format!("{}{cost:.0}", self.net.currency));
                         ui.end_row();
                     }
-                    ui.label(RichText::new("Total (estimate)").strong());
+                    ui.label(RichText::new(tr("Total (estimate)")).strong());
                     ui.label("");
                     ui.label(RichText::new(format!("{}{total:.0}", self.net.currency)).strong().color(pal().accent));
                     ui.end_row();
                 });
-                ui.label(RichText::new("Prices are rough estimates — set your own per device.").small().color(pal().dim));
+                ui.label(RichText::new(tr("Prices are rough estimates — set your own per device.")).small().color(pal().dim));
             }
         });
     }
@@ -2358,9 +2368,10 @@ impl App {
     fn learn(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("lessons").exact_size(270.0).frame(egui::Frame::new().fill(pal().panel).inner_margin(Margin::same(12))).show(ui, |ui| {
             let done = (0..lessons::LESSONS.len()).filter(|i| self.settings.quiz >> i & 1 == 1).count();
-            ui.label(RichText::new(format!("LESSONS · {done} of {} checked", lessons::LESSONS.len())).small().color(pal().dim));
+            ui.label(RichText::new(trf("LESSONS · {} of {} checked", &[&done, &lessons::LESSONS.len()])).small().color(pal().dim));
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (i, (title, ..)) in lessons::LESSONS.iter().enumerate() {
+                for i in 0..lessons::LESSONS.len() {
+                    let title = lessons::lesson(i).0;
                     let on = self.lesson == i;
                     let mark = if self.settings.quiz >> i & 1 == 1 { ic::CHECK_CIRCLE } else { "" };
                     let b = egui::Button::new(RichText::new(format!("{:>2}  {title}  {mark}", i + 1)).color(if on { pal().accent } else { pal().text })).fill(if on { pal().card } else { Color32::TRANSPARENT }).min_size(vec2(ui.available_width(), 30.0));
@@ -2369,10 +2380,10 @@ impl App {
                     }
                 }
                 ui.add_space(10.0);
-                ui.label(RichText::new("FIND THE FAULT").small().color(pal().dim));
+                ui.label(RichText::new(tr("FIND THE FAULT")).small().color(pal().dim));
                 for (key, goal) in scenarios::EXERCISES {
                     let label = scenarios::SCENARIOS.iter().find(|s| s.0 == *key).map_or(*key, |s| s.1);
-                    if ui.add(egui::Button::new(format!("{}  {label}", ic::TARGET)).fill(Color32::TRANSPARENT).min_size(vec2(ui.available_width(), 28.0))).on_hover_text(*goal).clicked() {
+                    if ui.add(egui::Button::new(format!("{}  {}", ic::TARGET, tr(label))).fill(Color32::TRANSPARENT).min_size(vec2(ui.available_width(), 28.0))).on_hover_text(tr(goal)).clicked() {
                         self.load(net::template(key));
                         self.file = None;
                         self.mode = Mode::Design;
@@ -2381,10 +2392,11 @@ impl App {
             });
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().bg).inner_margin(Margin::symmetric(48, 32))).show(ui, |ui| {
-            let (title, body, try_it, scenario) = lessons::LESSONS[self.lesson];
+            let (title, body, try_it) = lessons::lesson(self.lesson);
+            let scenario = lessons::LESSONS[self.lesson].3;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.set_max_width(760.0);
-                ui.label(RichText::new(format!("Lesson {} of {}", self.lesson + 1, lessons::LESSONS.len())).color(pal().dim));
+                ui.label(RichText::new(trf("Lesson {} of {}", &[&(self.lesson + 1), &lessons::LESSONS.len()])).color(pal().dim));
                 ui.label(RichText::new(title).size(28.0).strong());
                 ui.add_space(12.0);
                 for p in body.split("\n\n") {
@@ -2393,48 +2405,48 @@ impl App {
                 }
                 egui::Frame::new().fill(pal().card).corner_radius(10).inner_margin(Margin::same(14)).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("{}  Try it", ic::LIGHTNING)).strong().color(pal().accent));
+                        ui.label(RichText::new(format!("{}  {}", ic::LIGHTNING, tr("Try it"))).strong().color(pal().accent));
                         ui.label(try_it);
                     });
                 });
-                if let Some((question, answers, right, why)) = lessons::QUIZ.get(self.lesson) {
+                if let Some((question, answers, right, why)) = lessons::quiz(self.lesson) {
                     ui.add_space(10.0);
                     egui::Frame::new().fill(pal().card).corner_radius(10).inner_margin(Margin::same(14)).show(ui, |ui| {
-                        ui.label(RichText::new(format!("{}  Check yourself", ic::QUESTION)).strong().color(pal().accent));
-                        ui.label(*question);
+                        ui.label(RichText::new(format!("{}  {}", ic::QUESTION, tr("Check yourself"))).strong().color(pal().accent));
+                        ui.label(question);
                         let picked = self.quiz_pick.filter(|p| p.0 == self.lesson).map(|p| p.1);
                         for (i, a) in answers.iter().enumerate() {
                             if ui.radio(picked == Some(i), *a).clicked() {
                                 self.quiz_pick = Some((self.lesson, i));
-                                if i == *right {
+                                if i == right {
                                     self.settings.quiz |= 1 << self.lesson;
                                     self.settings.save();
                                 }
                             }
                         }
                         if let Some(p) = picked {
-                            let (icon, verdict, col) = if p == *right { (ic::CHECK_CIRCLE, "Right.", pal().green) } else { (ic::X_CIRCLE, "Not quite — try another answer.", pal().amber) };
+                            let (icon, verdict, col) = if p == right { (ic::CHECK_CIRCLE, tr("Right."), pal().green) } else { (ic::X_CIRCLE, tr("Not quite — try another answer."), pal().amber) };
                             ui.label(RichText::new(format!("{icon}  {verdict}")).strong().color(col));
-                            if p == *right {
-                                ui.label(RichText::new(*why).color(pal().dim));
+                            if p == right {
+                                ui.label(RichText::new(why).color(pal().dim));
                             }
                         }
                     });
                 }
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
-                    if self.lesson > 0 && ui.button(format!("{}  Previous", ic::ARROW_LEFT)).clicked() {
+                    if self.lesson > 0 && ui.button(format!("{}  {}", ic::ARROW_LEFT, tr("Previous"))).clicked() {
                         self.lesson -= 1;
                     }
-                    if self.lesson + 1 < lessons::LESSONS.len() && ui.button(format!("Next  {}", ic::ARROW_RIGHT)).clicked() {
+                    if self.lesson + 1 < lessons::LESSONS.len() && ui.button(format!("{}  {}", tr("Next"), ic::ARROW_RIGHT)).clicked() {
                         self.lesson += 1;
                     }
-                    if ui.button(format!("{}  Open the planner", ic::PENCIL_SIMPLE)).clicked() {
+                    if ui.button(format!("{}  {}", ic::PENCIL_SIMPLE, tr("Open the planner"))).clicked() {
                         self.mode = Mode::Design;
                     }
                     // The example plan this lesson's exercise talks about, one click away.
                     if let Some((key, label, _)) = scenarios::SCENARIOS.iter().find(|s| s.0 == scenario) {
-                        if ui.button(format!("{}  Open \"{}\"", ic::FOLDER_OPEN, label.split(" (").next().unwrap_or(label))).clicked() {
+                        if ui.button(format!("{}  {}", ic::FOLDER_OPEN, trf("Open \"{}\"", &[&tr(label.split(" (").next().unwrap_or(label))]))).clicked() {
                             self.load(net::template(key));
                             self.file = None;
                             self.mode = Mode::Design;
@@ -2729,9 +2741,9 @@ impl eframe::App for App {
             if self.mode == Mode::Simulate && !matches!(self.sel, Sel::Dev(_)) {
                 Self::header(ui, ic::PLAY, pal().accent, "Simulation", "Click any device to use its apps");
                 ui.add_space(6.0);
-                ui.label(RichText::new("Addresses were handed out by DHCP. Pick a device on the map: see its Wi-Fi, take it for a walk to watch it roam, open a web page in its browser, or run ping, speedtest, wifi and stp on its command line. Packets move along the cables and every step lands in the packet log below.").color(pal().dim));
+                ui.label(RichText::new(tr("Addresses were handed out by DHCP. Pick a device on the map: see its Wi-Fi, take it for a walk to watch it roam, open a web page in its browser, or run ping, speedtest, wifi and stp on its command line. Packets move along the cables and every step lands in the packet log below.")).color(pal().dim));
                 ui.add_space(6.0);
-                if ui.button(format!("{}  Back to design", ic::PENCIL_SIMPLE)).clicked() {
+                if ui.button(format!("{}  {}", ic::PENCIL_SIMPLE, tr("Back to design"))).clicked() {
                     self.mode = Mode::Design;
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| self.resilience_and_power(ui));

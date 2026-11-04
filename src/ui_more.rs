@@ -10,8 +10,8 @@ impl App {
             return;
         }
         let off = d.off;
-        let label = if off { format!("{}  Switch on", ic::POWER) } else { format!("{}  Switch off", ic::POWER) };
-        if ui.button(RichText::new(label).color(if off { pal().green } else { pal().amber })).on_hover_text("Try what happens when this device fails or loses power").clicked() {
+        let label = if off { format!("{}  {}", ic::POWER, tr("Switch on")) } else { format!("{}  {}", ic::POWER, tr("Switch off")) };
+        if ui.button(RichText::new(label).color(if off { pal().green } else { pal().amber })).on_hover_text(tr("Try what happens when this device fails or loses power")).clicked() {
             let d = self.net.dev_mut(id).unwrap();
             d.off = !off;
             self.issues = None;
@@ -20,7 +20,7 @@ impl App {
             self.say(&ctx, if off { format!("{name} is back on.") } else { format!("{name} is off — see what stopped working in the problem list and with ping.") });
         }
         if off {
-            ui.label(RichText::new("Switched off: it passes no traffic and its Wi-Fi is silent.").small().color(pal().amber));
+            ui.label(RichText::new(tr("Switched off: it passes no traffic and its Wi-Fi is silent.")).small().color(pal().amber));
         }
     }
 
@@ -31,7 +31,7 @@ impl App {
             return;
         }
         let mut unplugged = l.unplugged;
-        if ui.checkbox(&mut unplugged, "Unplugged — what if this cable breaks?").changed() {
+        if ui.checkbox(&mut unplugged, tr("Unplugged — what if this cable breaks?")).changed() {
             self.net.links.iter_mut().find(|x| x.id == id).unwrap().unplugged = unplugged;
             self.issues = None;
         }
@@ -42,7 +42,7 @@ impl App {
             }
             let mut wan = l.end_if(end) == 1;
             let label = format!("This is {}'s internet (WAN) port — router behind router", r.name);
-            if ui.checkbox(&mut wan, label).on_hover_text("Plug a second router's WAN port into your network: it makes its own network behind the first (double NAT)").changed() {
+            if ui.checkbox(&mut wan, label).on_hover_text(tr("Plug a second router's WAN port into your network: it makes its own network behind the first (double NAT)")).changed() {
                 self.snapshot();
                 self.net.set_wan(end, id, wan);
                 let mut log = vec![];
@@ -59,13 +59,13 @@ impl App {
         if Self::section_hint(ui, "Weak spots", "Devices whose failure cuts others off. A second path (cable or mesh), a spare switch on the shelf, or a mobile backup line takes the sting out.") {
         let spots = self.net.weak_spots();
         if spots.is_empty() {
-            ui.label(RichText::new("No single device whose failure cuts others off.").small().color(pal().dim));
+            ui.label(RichText::new(tr("No single device whose failure cuts others off.")).small().color(pal().dim));
         }
         let mut pick = None;
         for (id, n) in spots.iter().take(4) {
             ui.horizontal_wrapped(|ui| {
                 let col = if *n >= 10 { pal().red } else if *n >= 4 { pal().amber } else { pal().dim };
-                if ui.add(egui::Label::new(RichText::new(self.net.name(*id)).strong()).sense(Sense::click())).on_hover_text("Select it").clicked() {
+                if ui.add(egui::Label::new(RichText::new(self.net.name(*id)).strong()).sense(Sense::click())).on_hover_text(tr("Select it")).clicked() {
                     pick = Some(*id);
                 }
                 ui.label(RichText::new(format!("— if it fails, {n} device{} lose the network", if *n == 1 { "" } else { "s" })).color(col));
@@ -82,18 +82,18 @@ impl App {
         let kwh = self.net.yearly_kwh();
         let cur = self.net.currency.clone();
         egui::Grid::new("power").num_columns(2).show(ui, |ui| {
-            ui.label(RichText::new("Power use").color(pal().dim));
+            ui.label(RichText::new(tr("Power use")).color(pal().dim));
             ui.label(format!("≈ {w:.0} W around the clock · {kwh:.0} kWh a year"));
             ui.end_row();
-            ui.label(RichText::new("Electricity").color(pal().dim));
+            ui.label(RichText::new(tr("Electricity")).color(pal().dim));
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut self.net.kwh_price).range(0.0..=2.0).speed(0.01).prefix(cur.clone()).suffix(" /kWh"));
                 ui.label(RichText::new(format!("≈ {cur}{:.0} a year", kwh * self.net.kwh_price)).strong());
             });
             ui.end_row();
-            ui.label(RichText::new("Traffic at").color(pal().dim));
+            ui.label(RichText::new(tr("Traffic at")).color(pal().dim));
             let before = self.net.hour;
-            ui.add(egui::Slider::new(&mut self.net.hour, 0.0..=23.75).step_by(0.25).custom_formatter(|v, _| more::clock(v as f32))).on_hover_text("Apps follow the day: streaming peaks in the evening, calls in the daytime, backups at night");
+            ui.add(egui::Slider::new(&mut self.net.hour, 0.0..=23.75).step_by(0.25).custom_formatter(|v, _| more::clock(v as f32))).on_hover_text(tr("Apps follow the day: streaming peaks in the evening, calls in the daytime, backups at night"));
             if self.net.hour != before {
                 self.issues = None;
             }
@@ -120,7 +120,7 @@ impl App {
         if let Some(i) = remove {
             d.ssids.remove(i);
         }
-        if ui.small_button(format!("{} Add a name", ic::PLUS)).clicked() {
+        if ui.small_button(format!("{} {}", ic::PLUS, tr("Add a name"))).clicked() {
             let n = d.ssids.len() + 2;
             d.ssids.push((format!("{}-{n}", d.ssid), 10 * n as u16));
         }
@@ -160,7 +160,7 @@ impl App {
         let r = Rect::from_min_size(rect.left_top() + vec2(10.0, 10.0), vec2(220.0f32.min(rect.width() - 20.0), 30.0));
         let mut jump = None;
         ui.put(r, |ui: &mut egui::Ui| {
-            ui.add(TextEdit::singleline(&mut self.search).hint_text(format!("{}  Find a device…", ic::MAGNIFYING_GLASS)).desired_width(r.width()))
+            ui.add(TextEdit::singleline(&mut self.search).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, tr("Find a device…"))).desired_width(r.width()))
         });
         let q = self.search.trim().to_lowercase();
         if !q.is_empty() {
@@ -176,7 +176,7 @@ impl App {
                 egui::Frame::new().fill(pal().card).corner_radius(8).inner_margin(Margin::same(6)).show(ui, |ui| {
                     ui.set_width(r.width() - 12.0);
                     if hits.is_empty() {
-                        ui.label(RichText::new("No match").color(pal().dim));
+                        ui.label(RichText::new(tr("No match")).color(pal().dim));
                     }
                     for (id, name) in hits {
                         if ui.selectable_label(false, name).clicked() {
@@ -237,7 +237,7 @@ impl App {
         ui.label(RichText::new(format!("{:.0}% of this storey (≈ {area:.0} m²) has good Wi-Fi, {:.0}% at least usable.", good * 100.0, usable * 100.0)).color(col))
             .on_hover_text(format!("Good: {:.0} dBm or better. Usable: {:.0} dBm or better. Measured inside the outline of the walls on this storey.", plan::GOOD, plan::USABLE));
         ui.horizontal_wrapped(|ui| {
-            if good < 0.98 && ui.small_button(format!("{} Where would another access point help?", ic::MAGNIFYING_GLASS)).clicked() {
+            if good < 0.98 && ui.small_button(format!("{} {}", ic::MAGNIFYING_GLASS, tr("Where would another access point help?"))).clicked() {
                 self.ap_hint = self.net.suggest_ap(self.floor).map(|(p, a, b)| (self.floor, p, a, b));
                 if self.ap_hint.is_none() {
                     let ctx = ui.ctx().clone();
@@ -246,7 +246,7 @@ impl App {
             }
             if let Some((f, p, a, b)) = self.ap_hint.filter(|h| h.0 == self.floor) {
                 ui.label(RichText::new(format!("Marked on the map: {:.0}% → {:.0}%", a * 100.0, b * 100.0)).color(pal().green));
-                if ui.small_button(format!("{} Put one there", ic::PLUS)).on_hover_text("Adds an access point at the mark; connect it by cable to a switch or the router").clicked() {
+                if ui.small_button(format!("{} {}", ic::PLUS, tr("Put one there"))).on_hover_text(tr("Adds an access point at the mark; connect it by cable to a switch or the router")).clicked() {
                     self.snapshot();
                     let id = self.net.add_device(Kind::AccessPoint, p);
                     self.net.dev_mut(id).unwrap().floor = f;
@@ -255,7 +255,7 @@ impl App {
                     self.issues = None;
                     self.cov_cache = None;
                 }
-                if ui.small_button(ic::X).on_hover_text("Hide the mark").clicked() {
+                if ui.small_button(ic::X).on_hover_text(tr("Hide the mark")).clicked() {
                     self.ap_hint = None;
                 }
             }
@@ -297,7 +297,7 @@ impl App {
                 ui.add(TextEdit::singleline(&mut o.name).desired_width(110.0));
                 let col = if c.good > 0.8 { pal().green } else if c.usable > 0.5 { pal().amber } else { pal().red };
                 ui.label(RichText::new(format!("{:.0}% good, {:.0}% usable · {:.0} m²", c.good * 100.0, c.usable * 100.0, c.area_m2)).color(col));
-                if ui.small_button(ic::TRASH).on_hover_text("Remove this outdoor area").clicked() {
+                if ui.small_button(ic::TRASH).on_hover_text(tr("Remove this outdoor area")).clicked() {
                     remove = Some(id);
                 }
             });
@@ -307,7 +307,7 @@ impl App {
             self.net.outdoor.retain(|o| o.id != id);
         }
         if self.net.outdoor.is_empty() {
-            ui.label(RichText::new("Garden or terrace? Measure across it (M) and press 'Make this an outdoor area'.").small().color(pal().dim));
+            ui.label(RichText::new(tr("Garden or terrace? Measure across it (M) and press 'Make this an outdoor area'.")).small().color(pal().dim));
         }
     }
 
@@ -316,7 +316,7 @@ impl App {
         if !Self::section_hint(ui, "Compare options", "Save each idea as its own plan (for example 'mesh' and 'cabled access points'), then compare this one with another: cost, cable, power, Wi-Fi coverage and problems.") {
             return;
         }
-        let pick = ui.button(format!("{}  Compare with another plan…", ic::SCALES)).clicked();
+        let pick = ui.button(format!("{}  {}", ic::SCALES, tr("Compare with another plan…"))).clicked();
         if pick {
             if let Some(path) = rfd::FileDialog::new().add_filter("Network plan", &["netplan", "json"]).pick_file() {
                 let ctx = ui.ctx().clone();
@@ -331,12 +331,12 @@ impl App {
             }
         }
         let Some((name, other, rows)) = self.compare.as_mut() else { return };
-        if rows.is_empty() || ui.small_button(format!("{}  Compare again", ic::ARROWS_CLOCKWISE)).clicked() {
+        if rows.is_empty() || ui.small_button(format!("{}  {}", ic::ARROWS_CLOCKWISE, tr("Compare again"))).clicked() {
             *rows = summary(&self.net).into_iter().zip(summary(other)).map(|((k, a), (_, b))| (k, a, b)).collect();
         }
         egui::Grid::new("compare").num_columns(3).striped(true).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
             ui.label("");
-            ui.label(RichText::new("This plan").strong());
+            ui.label(RichText::new(tr("This plan")).strong());
             ui.label(RichText::new(name.as_str()).strong());
             ui.end_row();
             for (k, a, b) in rows.iter() {

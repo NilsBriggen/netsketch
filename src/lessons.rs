@@ -75,13 +75,13 @@ pub const LESSONS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "Power, antennas, bands and channel width",
-        "A router's transmit power is legally capped (in the EU about 20 dBm on 2.4 GHz and 23 dBm on 5/6 GHz). Turning it up rarely helps: a phone sends with only about 15 dBm, so the router may be heard where the phone's answer never arrives.\n\nSpeed comes from the standard (Wi-Fi 5, 6, 6E, 7), the number of antenna streams (2×2 in most phones, 4×4 in good routers) and the channel width: 20, 40, 80, 160 or — with Wi-Fi 7 on 6 GHz — 320 MHz. Wider channels are faster up close but pick up more noise and collide with neighbours more easily. Band steering moves capable devices off crowded 2.4 GHz.",
+        "A router's transmit power is legally capped (in Europe about 20 dBm on 2.4 GHz, 23 dBm on the lower 5 GHz channels and on 6 GHz, up to 30 dBm on 5 GHz channels 100–140). Turning it up rarely helps: a phone sends with only about 15 dBm, so the router may be heard where the phone's answer never arrives.\n\nSpeed comes from the standard (Wi-Fi 5, 6, 6E, 7), the number of antenna streams (2×2 in most phones, 4×4 in good routers) and the channel width: 20, 40, 80, 160 or — with Wi-Fi 7 on 6 GHz — 320 MHz. Wider channels are faster up close but pick up more noise and collide with neighbours more easily. Band steering moves capable devices off crowded 2.4 GHz.",
         "Select the router, pick a different hardware preset and watch the speeds on the map and in the problem list change.",
         "",
     ),
     (
         "Neighbours and channels",
-        "Wi-Fi is polite: on one channel only one device talks at a time. If your neighbours use the same channel, you take turns with them — your speed drops even though your signal is great. On 2.4 GHz only channels 1, 6 and 11 don't overlap; the ones in between are worse because they collide with two others at once.\n\n5 GHz has many more channels, some of them shared with weather radar (DFS): the router must listen first and may jump away. 6 GHz is wide open and stops at walls — so it rarely meets the neighbours. Pick channels after looking at what's in the air.",
+        "Wi-Fi is polite: on one channel only one device talks at a time. If your neighbours use the same channel, you take turns with them — your speed drops even though your signal is great. On 2.4 GHz only channels 1, 6 and 11 don't overlap (in Europe 1, 5, 9, 13 also works at 20 MHz); the ones in between are worse because they collide with two others at once.\n\n5 GHz has many more channels, some of them shared with weather radar (DFS): the router must listen first and may jump away. 6 GHz is wide open and stops at walls — so it rarely meets the neighbours. Pick channels after looking at what's in the air.",
         "Open 'Crowded apartment block', run wifi on the laptop, then press 'Pick better channels'.",
         "apartment",
     ),
@@ -93,7 +93,7 @@ pub const LESSONS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "Spanning tree — and the speaker that ate the network",
-        "Two cables between the same switches form a loop: broadcasts circle forever and the network collapses (a broadcast storm). Spanning tree (STP/RSTP) prevents this. The switches elect a root bridge — lowest priority wins, then the lowest MAC address — and every other switch keeps only its best path to the root; the rest go on standby.\n\nSome multi-room speakers build their own wireless mesh and also run spanning tree. Wire two of them to different switches and they become part of your switch network. Everything ships with priority 32768, so the lowest MAC address decides — and that depends on the hardware you happen to own. Some speakers also count costs on the old short scale (1 Gbit/s = 4 instead of 20000) behind slow 100 Mbit ports, so to your modern switches the path through them looks cheap. If a speaker wins the election, your fast cable can go on standby while everything crawls through the speakers' 2.4 GHz mesh. Fix: give your main switch priority 4096, or wire only one speaker.",
+        "Two cables between the same switches form a loop: broadcasts circle forever and the network collapses (a broadcast storm). Spanning tree (STP/RSTP) prevents this. The switches elect a root bridge — lowest priority wins, then the lowest MAC address — and every other switch keeps only its best path to the root; the rest go on standby. Classic STP takes 30–50 seconds to settle, RSTP about one.\n\nSome multi-room speakers build their own wireless mesh and also run spanning tree. Wire two of them to different switches and they become part of your switch network. Everything ships with priority 32768, so the lowest MAC address decides — and that depends on the hardware you happen to own. Some speakers also count costs on the old short scale (1 Gbit/s = 4 instead of 20000) behind slow 100 Mbit ports, so to your modern switches the path through them looks cheap. If a speaker wins the election, your fast cable can go on standby while everything crawls through the speakers' 2.4 GHz mesh. Fix: give your main switch priority 4096, or wire only one speaker.",
         "Open 'The speaker that ate the network', run speedtest and stp on the Office PC, then press 'Make it the root'.",
         "speakers",
     ),
@@ -116,6 +116,42 @@ pub const LESSONS: &[(&str, &str, &str, &str)] = &[
         "home",
     ),
 ];
+
+/// A lesson in the chosen language: (title, body, try-it hint).
+pub fn lesson(i: usize) -> (&'static str, &'static str, &'static str) {
+    let (t, b, h, _) = LESSONS[i];
+    match german().get(i) {
+        Some(d) => (&d.title, &d.body, &d.hint),
+        None => (t, b, h),
+    }
+}
+
+/// A lesson's question in the chosen language: (question, answers, index of the right one, why).
+pub fn quiz(i: usize) -> Option<(&'static str, Vec<&'static str>, usize, &'static str)> {
+    let (q, a, right, why) = QUIZ.get(i)?;
+    Some(match german().get(i) {
+        Some(d) => (&d.quiz.0, d.quiz.1.iter().map(String::as_str).collect(), *right, &d.quiz.2),
+        None => (q, a.to_vec(), *right, why),
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct Lesson {
+    title: String,
+    body: String,
+    #[serde(rename = "try")]
+    hint: String,
+    quiz: (String, Vec<String>, String),
+}
+
+/// German lessons (data/lessons_de.json) when German is chosen, else none.
+fn german() -> &'static [Lesson] {
+    static DE: std::sync::OnceLock<Vec<Lesson>> = std::sync::OnceLock::new();
+    if !crate::i18n::german() {
+        return &[];
+    }
+    DE.get_or_init(|| serde_json::from_str(include_str!("../data/lessons_de.json")).expect("data/lessons_de.json is checked by the tests"))
+}
 
 /// One check-yourself question per lesson, in lesson order: (question, answers, index of the right one, why).
 pub const QUIZ: &[(&str, &[&str], usize, &str)] = &[
@@ -151,6 +187,16 @@ mod tests {
             let s = crate::scenarios::SCENARIOS.iter().find(|s| s.0 == *key).unwrap_or_else(|| panic!("{title}: no scenario '{key}'"));
             let name = s.1.split(" (").next().unwrap();
             assert!(try_it.contains(name) || try_it.contains(&format!("{key} template")), "{title}: the hint doesn't say '{name}'");
+        }
+    }
+
+    #[test]
+    fn the_german_lessons_match_the_english_ones() {
+        let de: Vec<super::Lesson> = serde_json::from_str(include_str!("../data/lessons_de.json")).unwrap();
+        assert_eq!(de.len(), super::LESSONS.len());
+        for (d, (q, answers, ..)) in de.iter().zip(super::QUIZ) {
+            assert!(!d.title.is_empty() && d.body.contains("\n\n") && !d.hint.is_empty(), "{}", d.title);
+            assert_eq!(d.quiz.1.len(), answers.len(), "{q}: the same answers in the same order");
         }
     }
 

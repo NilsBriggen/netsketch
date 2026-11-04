@@ -50,15 +50,15 @@ impl App {
         Self::header(ui, ic::TEXT_T, pal().accent, "Room label", "Drag it on the map to move it");
         ui.add_space(4.0);
         egui::Grid::new(("lbl", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(RichText::new("Text").color(pal().dim));
-            ui.add(TextEdit::singleline(&mut l.text).hint_text("e.g. Living room"));
+            ui.label(RichText::new(tr("Text")).color(pal().dim));
+            ui.add(TextEdit::singleline(&mut l.text).hint_text(tr("e.g. Living room")));
             ui.end_row();
-            ui.label(RichText::new("Storey").color(pal().dim));
+            ui.label(RichText::new(tr("Storey")).color(pal().dim));
             ui.add(egui::DragValue::new(&mut l.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
             ui.end_row();
         });
         ui.add_space(6.0);
-        if ui.small_button(RichText::new(format!("{}  Remove label", ic::TRASH)).color(pal().red)).clicked() {
+        if ui.small_button(RichText::new(format!("{}  {}", ic::TRASH, tr("Remove label"))).color(pal().red)).clicked() {
             self.snapshot();
             self.net.labels.retain(|l| l.id != id);
             self.sel = Sel::None;
@@ -70,7 +70,7 @@ impl App {
         let Some(d) = self.net.dev(id) else { return };
         let (name, off, design) = (d.name.clone(), d.off, self.mode == Mode::Design);
         ui.label(RichText::new(name).strong());
-        if ui.button(format!("{}  Try it", ic::PLAY)).clicked() {
+        if ui.button(format!("{}  {}", ic::PLAY, tr("Try it"))).clicked() {
             self.sel = Sel::Dev(id);
             if self.mode != Mode::Simulate {
                 self.mode = Mode::Simulate;
@@ -79,7 +79,7 @@ impl App {
             }
             ui.close();
         }
-        if design && ui.button(format!("{}  Duplicate", ic::COPY)).clicked() {
+        if design && ui.button(format!("{}  {}", ic::COPY, tr("Duplicate"))).clicked() {
             self.snapshot();
             if let Some(new) = self.net.duplicate(id) {
                 self.sel = Sel::Dev(new);
@@ -91,7 +91,7 @@ impl App {
             self.issues = None;
             ui.close();
         }
-        if design && ui.button(RichText::new(format!("{}  Delete", ic::TRASH)).color(pal().red)).clicked() {
+        if design && ui.button(RichText::new(format!("{}  {}", ic::TRASH, tr("Delete"))).color(pal().red)).clicked() {
             self.snapshot();
             self.net.remove_device(id);
             self.sel = Sel::None;
@@ -104,7 +104,7 @@ impl App {
         let Some((wall, link, at)) = self.ctx_at else { return };
         let design = self.mode == Mode::Design;
         if let (Some(w), true) = (wall, design) {
-            ui.label(RichText::new("Wall").strong());
+            ui.label(RichText::new(tr("Wall")).strong());
             ui.menu_button("Material", |ui| {
                 for k in WallKind::ALL {
                     if ui.button(k.label()).clicked() {
@@ -126,7 +126,7 @@ impl App {
                     ui.close();
                 }
             }
-            if ui.button(RichText::new(format!("{}  Remove wall", ic::TRASH)).color(pal().red)).clicked() {
+            if ui.button(RichText::new(format!("{}  {}", ic::TRASH, tr("Remove wall"))).color(pal().red)).clicked() {
                 self.snapshot();
                 self.net.walls.retain(|x| x.id != w);
                 self.sel = Sel::None;
@@ -135,7 +135,7 @@ impl App {
             ui.separator();
         } else if let Some(l) = link {
             let unplugged = self.net.links.iter().find(|x| x.id == l).is_some_and(|x| x.unplugged);
-            ui.label(RichText::new("Connection").strong());
+            ui.label(RichText::new(tr("Connection")).strong());
             if ui.button(if unplugged { "Plug it back in" } else { "Unplug — what if it breaks?" }).clicked() {
                 if let Some(x) = self.net.links.iter_mut().find(|x| x.id == l) {
                     x.unplugged = !unplugged;
@@ -143,7 +143,7 @@ impl App {
                 self.issues = None;
                 ui.close();
             }
-            if design && ui.button(RichText::new(format!("{}  Remove connection", ic::TRASH)).color(pal().red)).clicked() {
+            if design && ui.button(RichText::new(format!("{}  {}", ic::TRASH, tr("Remove connection"))).color(pal().red)).clicked() {
                 self.snapshot();
                 self.net.remove_link(l);
                 self.sel = Sel::None;
@@ -152,7 +152,7 @@ impl App {
             ui.separator();
         }
         if design {
-            ui.menu_button(format!("{}  Add a device here", ic::PLUS), |ui| {
+            ui.menu_button(format!("{}  {}", ic::PLUS, tr("Add a device here")), |ui| {
                 for k in Kind::SHELF {
                     if ui.button(format!("{}  {}", kind_icon(k), k.label())).clicked() {
                         self.snapshot();
@@ -163,14 +163,14 @@ impl App {
                     }
                 }
             });
-            if ui.button(format!("{}  Add a room label here", ic::TEXT_T)).clicked() {
+            if ui.button(format!("{}  {}", ic::TEXT_T, tr("Add a room label here"))).clicked() {
                 self.snapshot();
                 let id = self.net.add_label(at, self.floor, "Room");
                 self.sel = Sel::Label(id);
                 ui.close();
             }
         }
-        if ui.button(format!("{}  Fit to window (F)", ic::CORNERS_OUT)).clicked() {
+        if ui.button(format!("{}  {}", ic::CORNERS_OUT, tr("Fit to window (F)"))).clicked() {
             self.fit();
             ui.close();
         }
@@ -212,12 +212,12 @@ impl App {
     /// Left panel under the Measure tool: the distance, and fixing a floor-plan picture's scale from it.
     pub(crate) fn measure_panel(&mut self, ui: &mut egui::Ui) {
         let Some((a, Some(b))) = self.measure else {
-            ui.label(RichText::new("Click two points to measure. Esc clears.").small().color(pal().dim));
+            ui.label(RichText::new(tr("Click two points to measure. Esc clears.")).small().color(pal().dim));
             return;
         };
         let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / net::PX_PER_M;
         ui.label(RichText::new(format!("{len:.2} m on the map")).strong());
-        if ui.button(format!("{}  Make this an outdoor area", ic::TREE)).on_hover_text("A garden, terrace or yard with these two points as opposite corners: the Wi-Fi coverage section scores it").clicked() {
+        if ui.button(format!("{}  {}", ic::TREE, tr("Make this an outdoor area"))).on_hover_text(tr("A garden, terrace or yard with these two points as opposite corners: the Wi-Fi coverage section scores it")).clicked() {
             self.snapshot();
             self.net.next_id += 1;
             let n = self.net.outdoor.len() + 1;
@@ -226,10 +226,10 @@ impl App {
             return;
         }
         let Some(i) = self.net.plans.iter().position(|p| p.floor == self.floor) else { return };
-        ui.label(RichText::new("Measured a wall you know on the floor-plan picture? Type its real length:").small().color(pal().dim));
+        ui.label(RichText::new(tr("Measured a wall you know on the floor-plan picture? Type its real length:")).small().color(pal().dim));
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut self.measure_real).range(0.1..=500.0).speed(0.05).suffix(" m"));
-            if ui.button("Scale the picture").on_hover_text("Stretches the floor-plan picture so this distance comes out at its real length").clicked() && len > 0.0 {
+            if ui.button(tr("Scale the picture")).on_hover_text(tr("Stretches the floor-plan picture so this distance comes out at its real length")).clicked() && len > 0.0 {
                 self.snapshot();
                 let p = &mut self.net.plans[i];
                 let f = self.measure_real / len;
