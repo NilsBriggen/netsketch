@@ -725,8 +725,9 @@ pub struct Network {
     pub links: Vec<Link>,
     pub next_id: u32,
     pub walls: Vec<crate::wifi::Wall>,
-    /// What this scenario is about, shown in the overview.
+    /// What this scenario is about, shown in the overview, and its key in scenarios::SCENARIOS ("" for your own plans).
     pub story: String,
+    pub scenario: String,
     /// Makes this plan's "random" hardware (MAC addresses, neighbours' habits, house wiring) reproducible.
     pub seed: u64,
     /// What the floors between storeys are made of.
@@ -763,6 +764,7 @@ impl Default for Network {
             next_id: 0,
             walls: vec![],
             story: String::new(),
+            scenario: String::new(),
             seed: 1,
             slab: crate::wifi::WallKind::Concrete,
             plans: vec![],
@@ -2283,6 +2285,7 @@ pub fn template_seeded(name: &str, seed: u64) -> Network {
             w.b = [w.b[0] * f, w.b[1] * f];
         }
     }
+    n.scenario = name.into();
     n.assign_ports();
     n
 }

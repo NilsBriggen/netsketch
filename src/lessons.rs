@@ -1,4 +1,5 @@
-//! Short, up-to-date lessons shown in Learn mode: (title, body, try-it hint, the scenario key it uses or "").
+//! Short, up-to-date lessons shown in Learn mode: (title, body, try-it hint, the scenario key it uses or ""),
+//! and a check-yourself question for each.
 pub const LESSONS: &[(&str, &str, &str, &str)] = &[
     (
         "How a network fits together",
@@ -116,6 +117,29 @@ pub const LESSONS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// One check-yourself question per lesson, in lesson order: (question, answers, index of the right one, why).
+pub const QUIZ: &[(&str, &[&str], usize, &str)] = &[
+    ("What connects two separate networks, such as yours and your provider's?", &["A switch", "A router", "A hub"], 1, "A switch joins devices inside one network; a router forwards packets between networks. Hubs are obsolete."),
+    ("With the prefix /24, which address is a direct neighbour of 192.168.1.20?", &["192.168.2.20", "192.168.1.200", "10.0.1.20"], 1, "/24 means the first three numbers name the network: everything 192.168.1.x is on the same network."),
+    ("Why does IPv6 not need NAT at home?", &["It's slower", "There are enough addresses for every device", "Routers can't do NAT for IPv6"], 1, "With 128-bit addresses every device gets its own global address; the router's firewall keeps unwanted traffic out."),
+    ("A laptop shows the address 169.254.12.7. What happened?", &["It got a fixed address", "No DHCP server answered", "It is on IPv6"], 1, "169.254.x.x is what a device gives itself when nobody answers its DHCP request."),
+    ("What does a DNS resolver do?", &["Turns names into addresses", "Hands out addresses", "Encrypts web pages"], 0, "DNS looks up the address behind a name such as example.com. DHCP hands out addresses, TLS encrypts."),
+    ("Why can't you open a port at home when your provider uses carrier-grade NAT (100.64.x.x)?", &["The router has no public address of its own", "The firewall is too strict", "Port forwarding needs IPv6"], 0, "Behind CGNAT many customers share one public address; the provider's NAT, not yours, would have to forward the port."),
+    ("Which Wi-Fi band gives the most speed but reaches the least far?", &["2.4 GHz", "5 GHz", "6 GHz"], 2, "Higher frequencies lose more on the way and through walls, but 6 GHz has the widest, emptiest channels."),
+    ("Which Wi-Fi security should a new network use?", &["WEP", "WPA2 with TKIP", "WPA3"], 2, "WEP is broken in minutes and TKIP is retired; WPA3 (or WPA2/WPA3 mixed for old devices) is current."),
+    ("What's the longest a copper Ethernet cable may be?", &["30 m", "100 m", "500 m"], 1, "Twisted-pair Ethernet is specified for 100 m per run; longer needs fibre or a switch in between."),
+    ("What does the S in HTTPS add?", &["Speed", "Encryption and proof of who the server is (TLS)", "Compression"], 1, "TLS encrypts the connection and the certificate shows you're talking to the real site."),
+    ("Why put smart-home gadgets on a guest or IoT network?", &["They get more speed", "A hacked gadget can't reach your computers", "They need less power"], 1, "Cheap gadgets rarely get updates; a separate network keeps a compromised one away from your PCs and NAS."),
+    ("A signal drops from −50 dBm to −60 dBm. How much power is left?", &["Half", "A tenth", "Nine tenths"], 1, "Every 10 dB is a factor of ten; 3 dB is a factor of two."),
+    ("What's the catch with an 80 or 160 MHz channel?", &["It needs WPA3", "It reaches less far and meets more neighbours", "Phones can't use it"], 1, "Wider channels spread the same power thinner, so the range shrinks, and they overlap more networks."),
+    ("Which 2.4 GHz channels don't overlap each other in Europe?", &["1, 2, 3", "1, 6, 11 (or 1, 5, 9, 13)", "Any three"], 1, "2.4 GHz channels are 5 MHz apart but 20 MHz wide: only every fifth one stays clear."),
+    ("Why does a wireless extender halve the speed?", &["It has weaker antennas", "Every packet crosses the air twice on the same channel", "It runs WEP"], 1, "It receives and resends on the same channel, so the air is busy twice for every packet. A cable back to the router avoids that."),
+    ("What does spanning tree prevent?", &["Slow Wi-Fi", "Loops that flood the network with copies", "Duplicate IP addresses"], 1, "Switches forward broadcasts everywhere; with a loop they circle forever. Spanning tree blocks one link of each loop."),
+    ("What does a VLAN tag on a cable do?", &["Speeds it up", "Lets several separate networks share one cable", "Encrypts the traffic"], 1, "802.1Q adds a small tag to each frame naming its network, so one trunk cable carries many networks apart."),
+    ("You measured −72 dBm where the plan promised −60 dBm. What helps the plan most?", &["Ignore it", "Calibrate the model with real measurements", "Turn the router up to the maximum"], 1, "Real walls differ from the drawing; measurements let the app correct its estimate for each access point."),
+    ("The only cable between two switches breaks. What would have kept things running?", &["A second link with spanning tree", "A faster cable", "More DHCP servers"], 0, "A redundant link stays blocked by spanning tree until the first one fails, then takes over."),
+];
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -127,6 +151,14 @@ mod tests {
             let s = crate::scenarios::SCENARIOS.iter().find(|s| s.0 == *key).unwrap_or_else(|| panic!("{title}: no scenario '{key}'"));
             let name = s.1.split(" (").next().unwrap();
             assert!(try_it.contains(name) || try_it.contains(&format!("{key} template")), "{title}: the hint doesn't say '{name}'");
+        }
+    }
+
+    #[test]
+    fn every_lesson_has_a_quiz_with_a_valid_answer() {
+        assert_eq!(super::QUIZ.len(), super::LESSONS.len());
+        for (q, answers, right, why) in super::QUIZ {
+            assert!(answers.len() >= 2 && *right < answers.len() && !why.is_empty(), "{q}");
         }
     }
 }

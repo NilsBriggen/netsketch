@@ -603,6 +603,46 @@ fn campus(n: &mut Network) {
     n.join(visitor, "Campus-Guest", 40);
 }
 
+
+/// "Find the fault" scenarios: what to achieve, and a check of the plan that says whether it's done.
+pub const EXERCISES: &[(&str, &str)] = &[
+    ("nightmare", "Clear every red problem from the list."),
+    ("extender", "Make the extender share the router's network name, and let no device go through it when the router is just as strong."),
+    ("speakers", "Give a switch a lower spanning-tree priority so it's the root in every house, whatever hardware the speakers have."),
+    ("apartment", "Get your access points off the channels your neighbours crowd."),
+    ("office", "Get the mislabelled PC working: it must not have any red problem."),
+];
+
+/// Ok with praise when the exercise for this scenario is solved, Err with what's still wrong.
+pub fn check_exercise(n: &Network) -> Result<String, String> {
+    use crate::net::Level;
+    let issues = n.check();
+    let left = |what: &dyn Fn(&crate::net::Issue) -> bool| issues.iter().filter(|i| what(i)).map(|i| i.text.clone()).next();
+    let still = match n.scenario.as_str() {
+        "nightmare" => left(&|i| i.level == Level::Error),
+        "extender" => left(&|i| i.level != Level::Tip && (i.text.contains("crosses the air twice") || i.text.contains("its own name")))
+            .or_else(|| left(&|i| i.text.contains("uses its own name"))),
+        "speakers" => {
+            // Chosen on purpose: a switch with a priority below the default 32768.
+            match n.stp().root.and_then(|r| n.dev(r)) {
+                Some(d) if d.kind == Kind::Switch && d.priority < 32768 => None,
+                Some(d) => Some(format!("{} is the root only by chance (priority {}).", d.name, d.priority)),
+                None => Some("Nothing runs spanning tree.".into()),
+            }
+        }
+        "apartment" => left(&|i| i.level != Level::Tip && (i.text.contains("of the airtime") || i.text.contains("overlap"))),
+        "office" => {
+            let pc = n.devices.iter().find(|d| d.name == "Mislabelled PC").map(|d| d.id);
+            left(&|i| i.level == Level::Error && i.dev.is_some() && i.dev == pc)
+        }
+        _ => return Err("This plan has no exercise.".into()),
+    };
+    match still {
+        None => Ok("Solved — well done!".into()),
+        Some(t) => Err(format!("Not yet: {t}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::net::{template, template_seeded, Kind, Level};
@@ -720,6 +760,20 @@ mod tests {
             let n = template(key);
             let _ = n.check();
             assert!(!n.title.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_exercise_starts_unsolved_and_names_what_is_wrong() {
+        for (key, _) in super::EXERCISES {
+            let mut n = crate::net::template(key);
+            let r = super::check_exercise(&n);
+            assert!(r.as_ref().is_err_and(|e| e.starts_with("Not yet")), "{key}: {r:?}");
+            // The one-click fixes solve the ones a click can solve.
+            n.fix_all();
+            if ["extender", "apartment"].contains(key) {
+                assert!(super::check_exercise(&n).is_ok(), "{key}: {:?}", super::check_exercise(&n));
+            }
         }
     }
 }

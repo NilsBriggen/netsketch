@@ -181,11 +181,13 @@ struct Settings {
     theme: usize,
     /// Everything drawn bigger or smaller (1 = normal).
     zoom: f32,
+    /// Lessons whose question was answered right, one bit per lesson.
+    quiz: u64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, zoom: 1.0 }
+        Settings { theme: 0, zoom: 1.0, quiz: 0 }
     }
 }
 
@@ -364,6 +366,8 @@ struct App {
     settings: Settings,
     /// Tab (+1) or Shift+Tab (−1) pressed on the map: select the next or previous device.
     tab: Option<i32>,
+    /// The answer picked for this lesson's question: (lesson, answer).
+    quiz_pick: Option<(usize, usize)>,
     reading: f32,
     issues: Option<Vec<Issue>>,
     undo: Vec<Network>,
@@ -449,6 +453,7 @@ impl App {
             before: None,
             settings,
             tab: None,
+            quiz_pick: None,
             reading: -65.0,
             issues: None,
             undo: vec![],
@@ -1881,6 +1886,16 @@ impl App {
         });
         if !self.net.story.is_empty() && Self::section(ui, "About this setup") {
             ui.label(RichText::new(&self.net.story).color(pal().dim));
+            if let Some((_, goal)) = scenarios::EXERCISES.iter().find(|e| e.0 == self.net.scenario) {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("{}  Your task: {goal}", ic::TARGET)).color(pal().accent));
+                if ui.button(format!("{}  Check my work", ic::CHECK_SQUARE)).clicked() {
+                    let ctx = ui.ctx().clone();
+                    match scenarios::check_exercise(&self.net) {
+                        Ok(m) | Err(m) => self.say(&ctx, m),
+                    }
+                }
+            }
         }
         let n = &self.net;
         let (_, total) = shopping(n);
@@ -2339,12 +2354,26 @@ impl App {
 
     fn learn(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("lessons").exact_size(270.0).frame(egui::Frame::new().fill(pal().panel).inner_margin(Margin::same(12))).show(ui, |ui| {
-            ui.label(RichText::new("LESSONS").small().color(pal().dim));
-            egui::ScrollArea::vertical().show(ui, |ui| for (i, (title, ..)) in lessons::LESSONS.iter().enumerate() {
-                let on = self.lesson == i;
-                let b = egui::Button::new(RichText::new(format!("{:>2}  {title}", i + 1)).color(if on { pal().accent } else { pal().text })).fill(if on { pal().card } else { Color32::TRANSPARENT }).min_size(vec2(ui.available_width(), 30.0));
-                if ui.add(b).clicked() {
-                    self.lesson = i;
+            let done = (0..lessons::LESSONS.len()).filter(|i| self.settings.quiz >> i & 1 == 1).count();
+            ui.label(RichText::new(format!("LESSONS · {done} of {} checked", lessons::LESSONS.len())).small().color(pal().dim));
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (i, (title, ..)) in lessons::LESSONS.iter().enumerate() {
+                    let on = self.lesson == i;
+                    let mark = if self.settings.quiz >> i & 1 == 1 { ic::CHECK_CIRCLE } else { "" };
+                    let b = egui::Button::new(RichText::new(format!("{:>2}  {title}  {mark}", i + 1)).color(if on { pal().accent } else { pal().text })).fill(if on { pal().card } else { Color32::TRANSPARENT }).min_size(vec2(ui.available_width(), 30.0));
+                    if ui.add(b).clicked() {
+                        self.lesson = i;
+                    }
+                }
+                ui.add_space(10.0);
+                ui.label(RichText::new("FIND THE FAULT").small().color(pal().dim));
+                for (key, goal) in scenarios::EXERCISES {
+                    let label = scenarios::SCENARIOS.iter().find(|s| s.0 == *key).map_or(*key, |s| s.1);
+                    if ui.add(egui::Button::new(format!("{}  {label}", ic::TARGET)).fill(Color32::TRANSPARENT).min_size(vec2(ui.available_width(), 28.0))).on_hover_text(*goal).clicked() {
+                        self.load(net::template(key));
+                        self.file = None;
+                        self.mode = Mode::Design;
+                    }
                 }
             });
         });
@@ -2365,6 +2394,30 @@ impl App {
                         ui.label(try_it);
                     });
                 });
+                if let Some((question, answers, right, why)) = lessons::QUIZ.get(self.lesson) {
+                    ui.add_space(10.0);
+                    egui::Frame::new().fill(pal().card).corner_radius(10).inner_margin(Margin::same(14)).show(ui, |ui| {
+                        ui.label(RichText::new(format!("{}  Check yourself", ic::QUESTION)).strong().color(pal().accent));
+                        ui.label(*question);
+                        let picked = self.quiz_pick.filter(|p| p.0 == self.lesson).map(|p| p.1);
+                        for (i, a) in answers.iter().enumerate() {
+                            if ui.radio(picked == Some(i), *a).clicked() {
+                                self.quiz_pick = Some((self.lesson, i));
+                                if i == *right {
+                                    self.settings.quiz |= 1 << self.lesson;
+                                    self.settings.save();
+                                }
+                            }
+                        }
+                        if let Some(p) = picked {
+                            let (icon, verdict, col) = if p == *right { (ic::CHECK_CIRCLE, "Right.", pal().green) } else { (ic::X_CIRCLE, "Not quite — try another answer.", pal().amber) };
+                            ui.label(RichText::new(format!("{icon}  {verdict}")).strong().color(col));
+                            if p == *right {
+                                ui.label(RichText::new(*why).color(pal().dim));
+                            }
+                        }
+                    });
+                }
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     if self.lesson > 0 && ui.button(format!("{}  Previous", ic::ARROW_LEFT)).clicked() {
