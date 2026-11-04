@@ -91,8 +91,20 @@ public class SurveyJsonTest {
             s.points.add(p);
         }
         // A point that heard nothing isn't kept.
-        check(!s.add(new Survey.Point()) && s.points.size() == 3, "empty point refused");
+        check(!s.add(new Survey.Point(), null) && s.points.size() == 3, "empty point refused");
         String json = s.toJson();
+        // Measuring a spot again replaces that point where it was; the new one isn't sent yet.
+        Survey re = new Survey();
+        Survey.Point a1 = new Survey.Point(), a2 = new Survey.Point(), again = new Survey.Point();
+        for (Survey.Point x : new Survey.Point[] {a1, a2, again}) x.networks.add(seen("HomeNet", "d4:5d:64:aa:bb:c0", 2412, 20, -50, "WPA2", ""));
+        a1.sent = true;
+        re.add(a1, null);
+        re.add(a2, null);
+        check(re.add(again, a1) && re.points.size() == 2 && re.points.get(0) == again && !re.points.get(0).sent, "measured again replaces in place");
+        Survey.Point late = new Survey.Point();
+        late.networks.add(seen("X", "x", 2412, 20, -60, "", ""));
+        check(re.add(late, a1) && re.points.size() == 3 && re.points.get(2) == late, "a replaced point that's gone: added at the end");
+        check(!re.add(new Survey.Point(), again) && re.points.get(0) == again, "an empty re-measurement keeps the old point");
         check(json.contains("\"format\": \"netsketch-survey\"") && json.contains("\"utilization\": 0.42") && json.contains("Cafe \\\"Corner\\\""), "json");
         check(new Survey().toJson().contains("\"points\": []"), "empty survey");
         check(json.contains("\"up_mbps\": 48.50, \"jitter_ms\": 2.10"), "upload and jitter written");

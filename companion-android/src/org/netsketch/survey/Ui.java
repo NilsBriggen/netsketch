@@ -109,6 +109,7 @@ final class Ui {
         int ripple = primary || !dark ? Color.argb(primary ? 70 : 40, 0, 0, 0) : Color.argb(50, 255, 255, 255);
         b.setBackground(new RippleDrawable(ColorStateList.valueOf(ripple), shape, null));
         b.setPadding(dp(c, 16), dp(c, 10), dp(c, 16), dp(c, 10));
+        b.setMinHeight(dp(c, 48)); // a comfortable touch target
         return b;
     }
 
@@ -119,6 +120,7 @@ final class Ui {
         t.setBackground(round(c, filled ? color : Color.TRANSPARENT, 20, filled ? 0 : color));
         t.setPadding(dp(c, 12), dp(c, 5), dp(c, 12), dp(c, 5));
         t.setGravity(Gravity.CENTER);
+        t.setMinHeight(dp(c, 48));
         return t;
     }
 

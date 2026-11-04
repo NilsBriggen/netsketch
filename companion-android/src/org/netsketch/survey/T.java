@@ -38,6 +38,7 @@ public final class T {
         de("Your real Wi-Fi, spot by spot", "Ihr echtes WLAN, Punkt für Punkt");
         de("Link", "Verbinden");
         de("Linking…", "Verbinde…");
+        de("Not reachable", "Nicht erreichbar");
         de("Linked · %s", "Verbunden · %s");
         de("Your Wi-Fi right here", "Ihr WLAN genau hier");
         de("Not on Wi-Fi", "Nicht im WLAN");
@@ -74,7 +75,6 @@ public final class T {
         de("Listening… %d of %d", "Lausche… %d von %d");
         de("Stand still.", "Bitte stillstehen.");
         de("Android allows 4 Wi-Fi scans every 2 minutes. Fresh scan in %d s — stay where you are.", "Android erlaubt 4 WLAN-Suchen alle 2 Minuten. Neue Suche in %d s — bleiben Sie stehen.");
-        de("Waiting for Android… %d s", "Warte auf Android… %d s");
         de("Android limits scans: this spot used %d of %d rounds.", "Android begrenzt die Suchen: dieser Punkt nutzte %d von %d Runden.");
         de("Faster surveys: turn off \"Wi-Fi scan throttling\" in Developer options.", "Schneller messen: \"WLAN-Suchdrosselung\" in den Entwickleroptionen ausschalten.");
         de("Open", "Öffnen");
@@ -95,6 +95,18 @@ public final class T {
         de("No networks heard here. Try again.", "Hier war kein Netzwerk zu hören. Versuchen Sie es noch einmal.");
         de("Seeing nearby networks needs your precise location: choose \"Precise\" when Android asks.", "Für Netzwerke in der Nähe braucht es Ihren genauen Standort: wählen Sie \"Genau\", wenn Android fragt.");
         de("Open app settings", "App-Einstellungen öffnen");
+        de("Cancelled — no point added.", "Abgebrochen — kein Punkt hinzugefügt.");
+        // Quick point and ping test
+        de("Quick point (signal only)", "Schnellpunkt (nur Signal)");
+        de("Connect to your Wi-Fi first: a quick point measures the network you're on.", "Verbinden Sie sich zuerst mit Ihrem WLAN: ein Schnellpunkt misst das Netz, in dem Sie sind.");
+        de("Reading your Wi-Fi… %d s. Stand still.", "Lese Ihr WLAN… %d s. Bitte stillstehen.");
+        de("'%s': %.0f dBm. Walk to the next spot.", "'%s': %.0f dBm. Gehen Sie zum nächsten Punkt.");
+        de("Ping test", "Ping-Test");
+        de("Connect to your Wi-Fi first.", "Verbinden Sie sich zuerst mit Ihrem WLAN.");
+        de("Couldn't find your router's address.", "Die Adresse Ihres Routers wurde nicht gefunden.");
+        de("Pinging your router… %d of %d", "Pinge Ihren Router… %d von %d");
+        de("The router didn't answer any of %d tries.", "Der Router hat auf keinen der %d Versuche geantwortet.");
+        de("Router ping: %.0f ms average, ±%.0f ms jitter, %d%% lost.", "Router-Ping: %.0f ms im Schnitt, ±%.0f ms Schwankung, %d%% verloren.");
         // Results
         de("Networks here", "Netzwerke hier");
         de("Networks at %s · %d", "Netzwerke bei %s · %d");
@@ -129,6 +141,7 @@ public final class T {
         de("placed on the plan", "im Grundriss platziert");
         de("pin to place on the computer", "Punkt am Computer platzieren");
         de("%d networks · %s", "%d Netzwerke · %s");
+        de("Signal only · %s", "Nur Signal · %s");
         de(" · %.0f Mbit/s", " · %.0f Mbit/s");
         de("In NetSketch", "In NetSketch");
         de("On phone", "Auf dem Telefon");

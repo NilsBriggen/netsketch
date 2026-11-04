@@ -52,10 +52,15 @@ public final class Survey {
     public String device = "";
     public final List<Point> points = new ArrayList<>();
 
-    /** Keeps a new point; refuses one that heard no network at all (false): it would only be an empty pin. */
-    public boolean add(Point p) {
+    /**
+     * Keeps a new point; one measured again (replaces) takes the old one's place in the list. Refuses a
+     * point that heard no network at all (false): it would only be an empty pin.
+     */
+    public boolean add(Point p, Point replaces) {
         if (p.networks.isEmpty()) return false;
-        points.add(p);
+        int i = replaces == null ? -1 : points.indexOf(replaces);
+        if (i >= 0) points.set(i, p);
+        else points.add(p);
         return true;
     }
 
