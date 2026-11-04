@@ -296,7 +296,7 @@ impl Network {
         // --- Running on the mobile backup ---
         for l in self.links.iter().filter(|l| l.medium == Medium::Cellular) {
             if self.link_ok(l) && self.link_between(l.a, l.b).is_some_and(|m| m.id == l.id) {
-                v.push(issue(Level::Tip, None, Some(l.id), format!("The main internet line is down: {} runs on its mobile backup (≈ 150 Mbit/s, about 30 ms more delay). Calls and browsing keep working.", self.name(if self.dev(l.a).is_some_and(|d| d.kind == Kind::Internet) { l.b } else { l.a })), None));
+                v.push(issue(Level::Tip, None, Some(l.id), format!("The main internet line is down: {} runs on its mobile backup (≈ 300 Mbit/s down, 50 up, about 30 ms more delay). Calls and browsing keep working.", self.name(if self.dev(l.a).is_some_and(|d| d.kind == Kind::Internet) { l.b } else { l.a })), None));
             }
         }
 
@@ -355,7 +355,7 @@ impl Network {
         // --- Links that quietly slow things down ---
         for l in &self.links {
             match l.medium {
-                Medium::Cat5 => v.push(issue(Level::Tip, None, Some(l.id), format!("{}–{} runs at 100 Mbit/s (old cable or port): everything behind it is capped there.", self.name(l.a), self.name(l.b)), None)),
+                Medium::Cat5 => v.push(issue(Level::Tip, None, Some(l.id), format!("{}–{} is old Cat 5 cable: fine for 1 Gbit/s, nothing faster{}.", self.name(l.a), self.name(l.b), if self.negotiated(l) <= 100 { " — and here an old port runs it at 100 Mbit/s: everything behind it is capped there" } else { "" }), None)),
                 Medium::Powerline => v.push(issue(Level::Tip, None, Some(l.id), format!("Powerline {}–{}: speed depends on the house wiring and drops when appliances run.", self.name(l.a), self.name(l.b)), None)),
                 _ => {}
             }
@@ -558,7 +558,7 @@ impl Network {
                         o.lines.push(format!("  To the internet ≈ {e:.0} Mbit/s — {why}"));
                     }
                     if self.radar(ap) {
-                        o.lines.push(format!("  Radar on 5 GHz channel {}: {} has to stay quiet there for a while — devices fall back to another band.", self.channel(ap, Band::B5), ap.name));
+                        o.lines.push(format!("  Radar on 5 GHz channel {}: {} must leave it for 30 minutes and sends on channel {} meanwhile.", ap.ch[1], ap.name, self.channel(ap, Band::B5)));
                     }
                     let hidden = self.hidden(l);
                     if !hidden.is_empty() {

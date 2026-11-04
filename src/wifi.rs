@@ -1,6 +1,6 @@
 //! The air: walls, signal strength, Wi-Fi speed, channels, neighbours, extenders, roaming and hardware presets.
-//! shortcut: a 2-D indoor path-loss model (ITU-R P.1238 style) plus per-wall losses — good for planning
-//! and teaching, not a ray tracer; reflections are only described, not computed.
+//! shortcut: a 2-D multi-wall path-loss model (COST-231 style: near free-space distance loss plus each wall
+//! and floor crossed) — good for planning and teaching, not a ray tracer; reflections are only described, not computed.
 use crate::net::{Device, Kind, Link, Medium, Network, WifiStd, PX_PER_M};
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +35,7 @@ impl WallKind {
             WallKind::Wood => (4.0, 6.0),
             WallKind::Glass => (2.0, 4.0),
             WallKind::LowE => (25.0, 30.0),
-            WallKind::Brick => (8.0, 12.0),
+            WallKind::Brick => (9.0, 14.0),
             WallKind::Concrete => (15.0, 23.0),
             WallKind::Metal => (30.0, 35.0),
         }
@@ -45,7 +45,7 @@ impl WallKind {
             WallKind::LowE => "Energy-saving windows carry a metal coating: they block Wi-Fi almost like a wall of metal.",
             WallKind::Metal => "Metal reflects: a dead zone behind it, and echoes (multipath) in front that cost speed.",
             WallKind::Concrete => "Reinforced concrete and floor slabs are the main reason one router can't cover a house.",
-            WallKind::Brick => "Each brick wall costs roughly a third of the remaining signal on 5 GHz.",
+            WallKind::Brick => "Only about 1/25 of the 5 GHz signal gets through a brick wall (−14 dB), more if it's crossed at a slant.",
             _ => "Light material: costs a little signal per wall.",
         }
     }
@@ -80,13 +80,17 @@ impl Band {
     pub fn i(self) -> usize {
         self as usize
     }
-    /// Legal transmit power limit (EIRP, dBm) in the EU, for warnings.
+    /// Legal transmit power limit (EIRP, dBm) in the EU, for warnings (the lowest one on the band).
     pub fn eu_limit(self) -> f32 {
         match self {
             Band::B24 => 20.0,
             Band::B5 => 23.0,
             Band::B6 => 23.0,
         }
+    }
+    /// EU/CH limit (EIRP, dBm) on one channel: 5 GHz channels 100–140 allow 30 dBm (with power control).
+    pub fn eirp_limit(self, ch: u16) -> f32 {
+        if self == Band::B5 && ch >= 100 { 30.0 } else { self.eu_limit() }
     }
     pub fn widths(self) -> &'static [u16] {
         match self {
@@ -95,34 +99,49 @@ impl Band {
             Band::B6 => &[20, 40, 80, 160, 320],
         }
     }
-    /// Valid primary channels for a channel width (aligned to the width's blocks).
+    /// Valid primary channels for a channel width (aligned to the width's blocks), as allowed in the EU and
+    /// Switzerland: 5 GHz 36–64 and 100–140 (144 and 149–165 aren't Wi-Fi channels here), 6 GHz 1–93 (5945–6425 MHz).
     pub fn channels(self, width: u16) -> Vec<u16> {
         match self {
             Band::B24 => (1..=13).collect(),
             Band::B5 => {
-                let all: Vec<u16> = (36..=64).step_by(4).chain((100..=144).step_by(4)).chain((149..=165).step_by(4)).collect();
+                let all: Vec<u16> = (36..=64).step_by(4).chain((100..=140).step_by(4)).collect();
                 all.into_iter().filter(|c| range(self, *c, width).0 == 5000.0 + 5.0 * *c as f32 - 10.0 && width_fits(self, *c, width)).collect()
             }
-            Band::B6 => (1..=233).step_by(4).filter(|c| range(self, *c, width).0 == 5950.0 + 5.0 * *c as f32 - 10.0 && width_fits(self, *c, width)).collect(),
+            Band::B6 => (1..=93).step_by(4).filter(|c| range(self, *c, width).0 == 5950.0 + 5.0 * *c as f32 - 10.0 && width_fits(self, *c, width)).collect(),
         }
     }
 }
 
-/// The 5 GHz band has gaps; a wide channel must stay inside one sub-band.
+/// The 5 GHz band has a gap; a wide channel must stay inside one sub-band (and inside the EU's 6 GHz part).
 fn width_fits(band: Band, c: u16, w: u16) -> bool {
     let (lo, hi) = range(band, c, w);
     match band {
-        Band::B5 => [(5170.0, 5330.0), (5490.0, 5730.0), (5735.0, 5835.0)].iter().any(|(a, b)| lo >= *a && hi <= *b) && !(w == 160 && lo >= 5650.0),
-        _ => hi <= 7125.0,
+        Band::B5 => [(5170.0, 5330.0), (5490.0, 5710.0)].iter().any(|(a, b)| lo >= *a && hi <= *b),
+        _ => hi <= 6425.0,
     }
+}
+
+/// Radar (DFS) channel: anything touching 5250–5710 MHz must listen before sending and leave when radar shows up.
+pub fn dfs(band: Band, c: u16, w: u16) -> bool {
+    let (lo, hi) = range(band, c, w.max(20));
+    band == Band::B5 && hi > 5250.0 && lo < 5710.0
+}
+
+/// How long (s) a radio must listen for radar before it may send on a channel: 10 minutes on the
+/// weather-radar channels 120–128 (5590–5650 MHz), a minute on other DFS channels.
+pub fn cac_s(band: Band, c: u16, w: u16) -> f64 {
+    let (lo, hi) = range(band, c, w.max(20));
+    if !dfs(band, c, w) { 0.0 } else if hi > 5590.0 && lo < 5650.0 { 600.0 } else { 60.0 }
 }
 
 /// Frequency range (MHz) a radio occupies.
 fn range(band: Band, c: u16, w: u16) -> (f32, f32) {
     match band {
         Band::B24 => {
+            // OFDM channels are 20 MHz wide: 1/5/9/13 sit side by side, like 1/6/11.
             let f = 2407.0 + 5.0 * c as f32;
-            if w >= 40 { (f - 11.0, f + 31.0) } else { (f - 11.0, f + 11.0) }
+            if w >= 40 { (f - 10.0, f + 30.0) } else { (f - 10.0, f + 10.0) }
         }
         Band::B5 => {
             let lo = 5000.0 + 5.0 * c as f32 - 10.0;
@@ -150,7 +169,7 @@ fn overlap(band: Band, a: (u16, u16), b: (u16, u16)) -> f32 {
 /// How a Wi-Fi link is doing right now.
 #[derive(Clone, Copy, Debug)]
 pub struct Signal {
-    /// Router → device (dBm).
+    /// Router → device (dBm), as the device shows it (beacons, no beamforming).
     pub rssi: f32,
     /// Device → router (dBm): phones transmit weaker than routers.
     pub up: f32,
@@ -158,6 +177,10 @@ pub struct Signal {
     pub width: u16,
     pub streams: u8,
     pub mbps: f32,
+    /// Device → router throughput (Mbit/s): its own weaker transmitter.
+    pub up_mbps: f32,
+    /// Raw radio (PHY) rate down, before protocol overhead and shared airtime.
+    pub phy: f32,
     pub walls: usize,
     /// 1 = the channel is all yours; 2 = you get half the airtime.
     pub contention: f32,
@@ -189,19 +212,25 @@ pub fn crosses(p1: [f32; 2], p2: [f32; 2], q1: [f32; 2], q2: [f32; 2]) -> bool {
     (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0)
 }
 
-pub fn floor(band: Band) -> f32 {
-    if band == Band::B24 { -86.0 } else { -83.0 }
+/// Weakest signal any Wi-Fi link works at: the slowest rate on a 20 MHz channel (beacons go out on 20 MHz).
+pub fn floor(_band: Band) -> f32 {
+    sens(20)
+}
+
+/// Weakest signal a channel width still works at: −92 dBm at 20 MHz, 3 dB more per doubling (more noise).
+pub fn sens(width: u16) -> f32 {
+    -92.0 + 3.0 * (width.max(20) as f32 / 20.0).log2()
 }
 
 /// Share of the top rate left at a signal strength. Thresholds are for 80 MHz; wider channels
 /// collect more noise (−3 dB per doubling), narrower ones less.
-fn rate_fraction(rssi: f32, band: Band, width: u16) -> f32 {
+fn rate_fraction(rssi: f32, width: u16) -> f32 {
     let eff = rssi - 3.0 * (width as f32 / 80.0).log2();
-    let pts = [(-50.0, 1.0), (-58.0, 0.8), (-65.0, 0.55), (-70.0, 0.35), (-75.0, 0.18), (-80.0, 0.07), (floor(band), 0.02)];
+    let pts = [(-50.0, 1.0), (-58.0, 0.8), (-65.0, 0.55), (-70.0, 0.35), (-75.0, 0.18), (-80.0, 0.07), (sens(80), 0.02)];
     if eff >= -50.0 {
         return 1.0;
     }
-    if rssi < floor(band) || eff < floor(band) - 3.0 {
+    if eff < sens(80) {
         return 0.0;
     }
     for w in pts.windows(2) {
@@ -223,7 +252,19 @@ pub fn width_factor(w: u16) -> f32 {
     }
 }
 
-pub const CH24: [u16; 3] = [1, 6, 11];
+/// 2.4 GHz channels that don't overlap: the classic 1/6/11 plan first, then the European 1/5/9/13 plan.
+pub const CH24: [u16; 6] = [1, 6, 11, 5, 9, 13];
+
+/// Spatial streams a link can really use at a signal: extra streams need a clean signal.
+fn usable_streams(rssi: f32, n: u8) -> u8 {
+    n.min(if rssi < -75.0 { 1 } else if rssi < -67.0 { 2 } else { 4 })
+}
+
+/// Share of the radio rate left as data after preambles, acknowledgements and gaps: small at low rates,
+/// better at high ones where frames are packed together (aggregation).
+pub fn mac_eff(phy: f32) -> f32 {
+    (0.45 + 0.125 * (phy.max(1.0) / 10.0).log10()).clamp(0.45, 0.7)
+}
 
 /// Signal at which a client starts looking for a better access point. Each device has its own
 /// (some are much stickier); 802.11k/v lets the access point suggest moving earlier.
@@ -314,11 +355,12 @@ pub fn normalize_radio(d: &mut Device) {
             };
             d.tx[i] = if client && b == Band::B6 { base - 2.0 } else { base };
         }
-        d.tx[i] = d.tx[i].min(30.0);
         let chans = b.channels(d.width[i]);
         if !chans.contains(&d.ch[i]) {
             d.ch[i] = chans.first().copied().unwrap_or(d.ch[i]);
         }
+        // Hardware sold in Europe won't send above the channel's legal limit.
+        d.tx[i] = d.tx[i].min(b.eirp_limit(d.ch[i]));
     }
 }
 
@@ -333,8 +375,8 @@ pub fn dir_gain(d: &Device, to: [f32; 2]) -> f32 {
     }
     let ang = (to[1] - d.pos[1]).atan2(to[0] - d.pos[0]).to_degrees();
     let off = ((ang - d.aim + 540.0).rem_euclid(360.0) - 180.0).abs();
-    // A narrow beam concentrates the power: ~10·log10(360/beam), capped like a real dish (~24 dB).
-    let peak = (10.0 * (360.0 / d.beam).log10()).min(24.0);
+    // A beam `beam`° wide in both directions covers beam²/41253 of the sphere: that's its gain (dBi).
+    let peak = (10.0 * (41253.0 / (d.beam * d.beam)).log10()).min(30.0);
     if off <= d.beam / 2.0 { peak } else if off <= d.beam { peak - 12.0 } else { -12.0 }
 }
 
@@ -399,30 +441,44 @@ pub fn default_preset(k: Kind) -> Option<&'static Preset> {
 }
 
 impl Network {
-    /// Walls crossed between two points (only walls on the storeys of either end count).
+    /// Walls crossed between two points (only walls on the storeys of either end count). A wall crossed
+    /// at a slant is thicker on the way through: ×1/cos of the angle, at most double.
     pub fn wall_loss(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, band: Band) -> (f32, usize) {
         let mut loss = 0.0;
         let mut n = 0;
+        let p = [b[0] - a[0], b[1] - a[1]];
         for w in self.walls.iter().filter(|w| w.floor == fa || w.floor == fb) {
             if crosses(a, b, w.a, w.b) {
-                loss += band_loss(w.kind, band);
+                let v = [w.b[0] - w.a[0], w.b[1] - w.a[1]];
+                // |sin| of the angle between path and wall = cos of the angle to the wall's normal.
+                let cos = (p[0] * v[1] - p[1] * v[0]).abs() / ((p[0].hypot(p[1]) * v[0].hypot(v[1])).max(1e-6));
+                loss += band_loss(w.kind, band) / cos.max(0.5);
                 n += 1;
             }
         }
         (loss, n)
     }
 
-    /// Path loss (dB) between two spots: distance (3 m per storey), walls and floor slabs.
+    /// Path loss (dB) between two spots, multi-wall style: near free-space loss over the distance (3 m per
+    /// storey), plus every wall crossed, plus the floor slabs (each further slab costs a little less).
     pub fn path_loss(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, band: Band) -> f32 {
         let storeys = (fa as f32 - fb as f32).abs();
         let flat = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() / PX_PER_M;
         let d = (flat * flat + (storeys * 3.0).powi(2)).sqrt().max(1.0);
-        let (f_mhz, n) = match band {
-            Band::B24 => (2437.0f32, 28.0),
-            Band::B5 => (5500.0, 30.0),
-            Band::B6 => (6100.0, 31.0),
+        let f_mhz: f32 = match band {
+            Band::B24 => 2437.0,
+            Band::B5 => 5500.0,
+            Band::B6 => 6100.0,
         };
-        20.0 * f_mhz.log10() + n * d.log10() - 28.0 + self.wall_loss(a, fa, b, fb, band).0 + storeys * band_loss(self.slab, band)
+        // COST-231 multi-wall: k slabs cost Lf·k^((k+2)/(k+1) − 0.46).
+        let slabs = if storeys > 0.0 { band_loss(self.slab, band) * storeys.powf((storeys + 2.0) / (storeys + 1.0) - 0.46) } else { 0.0 };
+        20.0 * f_mhz.log10() + 22.0 * d.log10() - 28.0 + self.wall_loss(a, fa, b, fb, band).0 + slabs
+    }
+
+    /// Power (dBm EIRP) a radio sends towards a spot: a dish's gain counts, but never above the legal limit.
+    fn eirp(&self, t: &Device, to: [f32; 2], band: Band) -> f32 {
+        let p = t.tx[band.i()] + dir_gain(t, to);
+        if t.beam > 0.0 { p.min(band.eirp_limit(self.chan(t, band).0)) } else { p }
     }
 
     /// Average signal (dBm) from `ap` received at a spot: transmit power, antenna gain, distance, walls, floors.
@@ -430,8 +486,8 @@ impl Network {
         if !ap.bands[band.i()] {
             return -120.0;
         }
-        let gain = if ap.streams >= 4 { 2.0 } else { 0.0 } + dir_gain(ap, pos);
-        ap.tx[band.i()] + gain + ap.cal_db - self.path_loss(ap.pos, ap.floor, pos, floor, band)
+        let gain = if ap.streams >= 4 { 2.0 } else { 0.0 };
+        self.eirp(ap, pos, band) + gain + ap.cal_db - self.path_loss(ap.pos, ap.floor, pos, floor, band)
     }
 
     /// Best signal over the bands a radio has on (2.4 GHz counted 6 dB lower: it's the slow band).
@@ -455,24 +511,42 @@ impl Network {
             return 0.0;
         }
         let refl = self.reflectors(rx.pos, rx.floor).min(3) as f32;
-        let slow = 2.0 * crate::sim::wander(self.seed, key * 8 + band as u64, self.clock, 6.0);
+        let slow = 4.0 * crate::sim::wander(self.seed, key * 8 + band as u64, self.clock, 6.0);
         let fast = (1.2 + 1.3 * refl) * crate::sim::wander(self.seed, key * 8 + 4 + band as u64, self.clock, 0.4);
         slow + fast
     }
 
     /// Share of airtime a transmitter uses right now. Neighbours' traffic comes and goes (streaming, downloads).
-    fn busy_now(&self, t: &Device, live: bool) -> f32 {
-        // Your own access points are as busy as their clients make them.
-        let base = if t.kind.foreign() {
-            t.busy
-        } else {
-            let clients = self.links.iter().filter(|l| l.medium == Medium::WiFi && (l.a == t.id || l.b == t.id)).count();
-            (0.05 + 0.04 * clients as f32).min(0.8)
-        };
+    fn busy_now(&self, t: &Device, band: Band, live: bool) -> f32 {
+        let base = if t.kind.foreign() { t.busy } else { self.demand_airtime(t, band) };
         if !live {
             return base;
         }
         (base * (1.0 + 0.6 * crate::sim::wander(self.seed, t.id as u64 + 0x5EED, self.clock, 7.0))).clamp(0.0, 0.95)
+    }
+
+    /// Airtime your own radio needs on a band: its devices' apps at this hour over its radio rate, plus ~2% for beacons.
+    // shortcut: every device counted at the radio's full rate on this band; weak devices really take longer.
+    fn demand_airtime(&self, ap: &Device, band: Band) -> f32 {
+        let demand: f32 = self
+            .links
+            .iter()
+            .filter(|l| l.medium == Medium::WiFi && (l.a == ap.id || l.b == ap.id))
+            .filter_map(|l| self.dev(l.other(ap.id).0))
+            .filter(|c| !c.off && !c.kind.radio())
+            .flat_map(|c| c.uses.iter())
+            .map(|u| {
+                let (down, up) = u.demand();
+                (down + up) * crate::more::activity(*u, self.hour)
+            })
+            .sum();
+        let phy = ap.wifi.stream20(band.i()) * width_factor(ap.width[band.i()].max(20)) * ap.streams.max(1) as f32;
+        (0.02 + demand / (phy * mac_eff(phy))).min(0.8)
+    }
+
+    /// The radio whose channel a device really uses: single-radio repeaters follow their upstream.
+    fn chan_src<'a>(&'a self, d: &'a Device) -> &'a Device {
+        if d.kind.radio() && !d.backhaul && d.kind != Kind::HomeRouter { self.upstream(d).unwrap_or(d) } else { d }
     }
 
     /// The radio an extender (or wireless mesh point) repeats.
@@ -486,10 +560,12 @@ impl Network {
         })
     }
 
-    /// The (channel, width) a radio really uses: single-radio repeaters must follow their upstream.
+    /// The (channel, width) a radio really uses: single-radio repeaters must follow their upstream, and a radio
+    /// kept off its radar channel sends on channel 36 (at most 80 MHz, all radar-free) meanwhile.
     pub fn chan(&self, d: &Device, band: Band) -> (u16, u16) {
-        let src = if d.kind.radio() && !d.backhaul && d.kind != Kind::HomeRouter { self.upstream(d).unwrap_or(d) } else { d };
-        (src.ch[band.i()], src.width[band.i()].max(20))
+        let src = self.chan_src(d);
+        let (ch, w) = (src.ch[band.i()], src.width[band.i()].max(20));
+        if band == Band::B5 && self.dfs_wait(src).is_some() { (36, w.min(80)) } else { (ch, w) }
     }
 
     pub fn channel(&self, d: &Device, band: Band) -> u16 {
@@ -502,27 +578,36 @@ impl Network {
     }
 
     pub fn contention_at(&self, ap: &Device, band: Band, live: bool) -> (f32, Vec<u32>) {
-        let mine = self.chan(ap, band);
-        let mut load = 0.0;
-        let mut who = vec![];
         if !ap.bands[band.i()] {
-            return (1.0, who);
+            return (1.0, vec![]);
         }
-        for t in self.devices.iter().filter(|t| t.id != ap.id && !t.off && t.kind.transmits() && t.bands[band.i()]) {
+        let v = self.heard_load(ap, ap.id, ap.pos, ap.floor, band, live);
+        (1.0 + v.iter().map(|x| x.1).sum::<f32>(), v.into_iter().map(|x| x.0).collect())
+    }
+
+    /// Others on `ap`'s channel heard at a spot (the access point's, or that of its device `me`): who, and
+    /// the share of airtime each takes.
+    fn heard_load(&self, ap: &Device, me: u32, pos: [f32; 2], floor: i8, band: Band, live: bool) -> Vec<(u32, f32)> {
+        let mine = self.chan(ap, band);
+        let mut v = vec![];
+        for t in self.devices.iter().filter(|t| t.id != ap.id && t.id != me && !t.off && t.kind.transmits() && t.bands[band.i()]) {
             // An extender and its upstream are one conversation; that's counted as halving.
             if self.upstream(ap).map(|u| u.id) == Some(t.id) || self.upstream(t).map(|u| u.id) == Some(ap.id) {
                 continue;
             }
-            if self.rssi_at(t, ap.pos, ap.floor, band) < -82.0 {
+            let theirs = self.chan(t, band);
+            let ov = overlap(band, mine, theirs);
+            if ov == 0.0 {
                 continue;
             }
-            let ov = overlap(band, mine, self.chan(t, band));
-            if ov > 0.0 {
-                load += ov * self.busy_now(t, live);
-                who.push(t.id);
+            // Wi-Fi waits for anything it can decode on its main 20 MHz (from −82 dBm); traffic that only
+            // touches the extra width of a wide channel counts once it's loud (energy detect, −62 dBm).
+            let heard_from = if overlap(band, (mine.0, 20), theirs) > 0.0 { -82.0 } else { -62.0 };
+            if self.rssi_at(t, pos, floor, band) >= heard_from {
+                v.push((t.id, ov * self.busy_now(t, band, live)));
             }
         }
-        (1.0 + load, who)
+        v
     }
 
     /// Which end of a Wi-Fi link is the access point.
@@ -558,24 +643,39 @@ impl Network {
         let multipath = 1.0 - 0.04 * (self.reflectors(cl.pos, cl.floor) + self.reflectors(ap.pos, ap.floor)).min(4) as f32;
         let mut best: Option<Signal> = None;
         for band in Band::ALL {
-            let width = ap.width[band.i()].min(cl.width[band.i()]).min(std.max_width(band.i()));
+            let width = ap.width[band.i()].min(cl.width[band.i()]).min(std.max_width(band.i())).min(self.chan(ap, band).1);
             if !ap.bands[band.i()] || !cl.bands[band.i()] || width == 0 {
-                continue;
-            }
-            // Radar on a DFS channel: the access point must leave 5 GHz for a while; devices fall back.
-            if live && band == Band::B5 && self.radar(ap) {
                 continue;
             }
             let loss = self.path_loss(ap.pos, ap.floor, cl.pos, cl.floor, band);
             let fade = if live { self.fade(l.id as u64, band, cl) } else { 0.0 };
-            // Directional antennas help (or hurt) at both ends of the link.
-            let aim = dir_gain(ap, cl.pos) + dir_gain(cl, ap.pos);
-            let rssi = ap.tx[band.i()] + rx_gain + ap.cal_db + aim - loss + fade;
-            let up = cl.tx[band.i()] + rx_gain + ap.cal_db + aim - loss + fade;
-            let contention = self.contention_at(ap, band, live).0;
-            let usable = up >= floor(band);
-            let mbps = if usable { std.stream20(band.i()) * width_factor(width) * streams as f32 * rate_fraction(rssi, band, width) * 0.6 * multipath / contention } else { 0.0 };
-            let s = Signal { rssi, up, band, width, streams, mbps, walls, contention };
+            // Directional antennas help (or hurt) at both ends of the link; sending is capped at the legal limit.
+            let rssi = self.eirp(ap, cl.pos, band) + dir_gain(cl, ap.pos) + rx_gain + ap.cal_db - loss + fade;
+            let up = self.eirp(cl, ap.pos, band) + dir_gain(ap, cl.pos) + rx_gain + ap.cal_db - loss + fade;
+            // Multi-antenna access points aim their data at the device (beamforming; not on Wi-Fi 4-era 2.4 GHz).
+            let bf = if streams >= 2 && (band != Band::B24 || std >= WifiStd::Wifi6) { 3.0 } else { 0.0 };
+            // Others the access point hears make it wait; ones only the device hears drown out what it receives.
+            let at_ap = self.heard_load(ap, cl.id, ap.pos, ap.floor, band, live);
+            let near_me: f32 = self.heard_load(ap, cl.id, cl.pos, cl.floor, band, live).iter().filter(|x| !at_ap.iter().any(|a| a.0 == x.0)).map(|x| x.1).sum();
+            let contention = 1.0 + at_ap.iter().map(|x| x.1).sum::<f32>() + near_me;
+            // Radio rate at a signal: a weak link drops to fewer streams and to a narrower part of the channel.
+            let phy_at = |sig: f32| -> (f32, u16) {
+                let mut best = (0.0, width);
+                let mut w = 20;
+                while w <= width {
+                    let r = std.stream20(band.i()) * width_factor(w) * usable_streams(sig, streams) as f32 * rate_fraction(sig, w);
+                    if r > best.0 {
+                        best = (r, w);
+                    }
+                    w *= 2;
+                }
+                best
+            };
+            let ((phy, used), (phy_up, _)) = (phy_at(rssi + bf), phy_at(up));
+            // Data one way needs acknowledgements the other way: both directions must get through.
+            let usable = phy > 0.0 && phy_up > 0.0;
+            let rate = |p: f32| if usable { p * mac_eff(p) * multipath / contention } else { 0.0 };
+            let s = Signal { rssi, up, band, width: used, streams: usable_streams(rssi + bf, streams), mbps: rate(phy), up_mbps: rate(phy_up), phy, walls, contention };
             // With band steering the device lands on the fastest band; without, on the loudest.
             let better = match best {
                 None => true,
@@ -592,7 +692,8 @@ impl Network {
     /// What the cable itself carries (Mbit/s), whatever it's plugged into.
     pub fn cable_mbps(&self, l: &Link) -> u32 {
         match l.medium {
-            Medium::Cat5 => 100,
+            // Old Cat 5 still carries gigabit (1000BASE-T was made for it), but nothing faster.
+            Medium::Cat5 => 1000,
             Medium::Cat5e => 2500,
             Medium::Cat6 if self.link_len(l) <= 55.0 => 10000,
             Medium::Cat6 => 5000,
@@ -610,14 +711,14 @@ impl Network {
     pub fn link_rate(&self, l: &Link) -> f32 {
         let base = match l.medium {
             Medium::WiFi | Medium::Mesh => self.link_signal(l).map(|s| s.mbps).unwrap_or(0.0),
-            // A 5G home router: depends on the mast and how many people use it.
-            Medium::Cellular => 150.0 * if self.live { 1.0 + 0.3 * crate::sim::wander(self.seed, l.id as u64 + 0x5C, self.clock, 5.0) } else { 1.0 },
+            // A 5G home router: ~300 Mbit/s down (50 up), depending on the mast and how many people use it.
+            Medium::Cellular => 300.0 * self.cell_now(l),
             Medium::Powerline => {
                 // Old wiring, distance and other appliances: every house is different (seeded per link).
                 let wiring = 0.35 + 0.75 * crate::sim::unit(self.seed, l.id as u64, 0x9A);
                 let now = if self.live { 1.0 + 0.2 * crate::sim::wander(self.seed, l.id as u64 + 0x9B, self.clock, 4.0) } else { 1.0 };
                 let close = crate::catalog::find_kit(&l.kit).map_or(300.0, |k| k.real_mbps);
-                (close * (-self.link_len(l) / 70.0).exp() * wiring * now).min(self.negotiated(l) as f32 * 0.94)
+                (close * (-self.wiring_m(l) / 70.0).exp() * wiring * now * self.phase_factor(l)).min(self.negotiated(l) as f32 * 0.94)
             }
             // Ethernet carries about 94% of the line rate as data.
             _ => self.negotiated(l) as f32 * 0.94,
@@ -626,6 +727,55 @@ impl Network {
         let rate = isp.map(|i| base.min(i.plan_mbps)).unwrap_or(base);
         // Smart queueing shapes the line a little below its speed so the queue stays in the router.
         if self.sqm_on(l) { rate * 0.92 } else { rate }
+    }
+
+    /// Live swing of a mobile line (1 = its average).
+    fn cell_now(&self, l: &Link) -> f32 {
+        if self.live { 1.0 + 0.3 * crate::sim::wander(self.seed, l.id as u64 + 0x5C, self.clock, 5.0) } else { 1.0 }
+    }
+
+    /// Length of house wiring a powerline link runs over (m): the wires wander, ~1.5× the straight distance
+    /// plus 5 m per storey (unless the length was measured).
+    pub fn wiring_m(&self, l: &Link) -> f32 {
+        match (l.length_m, self.dev(l.a), self.dev(l.b)) {
+            (Some(m), _, _) => m,
+            (None, Some(a), Some(b)) => (a.pos[0] - b.pos[0]).hypot(a.pos[1] - b.pos[1]) / PX_PER_M * 1.5 + 5.0 * (a.floor as f32 - b.floor as f32).abs(),
+            _ => 0.0,
+        }
+    }
+
+    /// Powerline across storeys usually means another circuit or phase: the signal has to cross in the fuse box.
+    fn phase_factor(&self, l: &Link) -> f32 {
+        let floor = |id: u32| self.dev(id).map_or(0, |d| d.floor);
+        if floor(l.a) != floor(l.b) { 0.6 } else { 1.0 }
+    }
+
+    /// Throughput from the first device of a path to the last (an upload): radio hops in the direction they're
+    /// crossed (devices send weaker than routers), the mobile line's slower uplink, and same-channel radio hops
+    /// taking turns as in `path_rate`.
+    // shortcut: the internet plan's upload is taken to equal its download (Swiss fibre plans mostly are symmetric).
+    pub fn upload_rate(&self, path: &[u32]) -> f32 {
+        let mut worst = f32::MAX;
+        let mut shared: Vec<((Band, u16), f32)> = vec![];
+        for w in path.windows(2) {
+            let Some(l) = self.link_between(w[0], w[1]) else { continue };
+            let r = match (l.medium, self.link_signal(l)) {
+                (Medium::Cellular, _) => self.link_rate(l).min(50.0 * self.cell_now(l)),
+                (_, Some(s)) => {
+                    let ap = self.wifi_ends(l).map_or(l.a, |e| e.0.id);
+                    let r = if ap == w[0] { s.mbps } else { s.up_mbps };
+                    let key = (s.band, self.dev(ap).map_or(0, |d| self.chan(d, s.band).0));
+                    match shared.iter_mut().find(|g| g.0 == key) {
+                        Some(g) => g.1 += 1.0 / r.max(0.01),
+                        None => shared.push((key, 1.0 / r.max(0.01))),
+                    }
+                    r
+                }
+                _ => self.link_rate(l),
+            };
+            worst = worst.min(r);
+        }
+        shared.iter().fold(worst, |m, g| m.min(1.0 / g.1))
     }
 
     /// The internet link of a home router with smart queueing on.
@@ -649,11 +799,11 @@ impl Network {
         for w in path.windows(2) {
             let Some(l) = self.link_between(w[0], w[1]) else { continue };
             let Some(s) = self.link_signal(l) else { continue };
-            // Frame error rate from the margin above the noise floor; Wi-Fi retries up to ~4 times.
-            let margin = s.rssi.min(s.up + 3.0) - floor(s.band);
+            // Frame error rate from the margin above the weakest usable signal; Wi-Fi tries a frame up to 7 times.
+            let margin = s.rssi.min(s.up + 3.0) - sens(s.width);
             // Hidden stations add collisions on top (each one that can't hear us ~3%).
             let frame = (1.0 / (1.0 + ((margin - 4.0) / 1.3).exp()) + 0.03 * self.hidden(l).len() as f32).min(1.0);
-            let after_retries = frame.powi(4) + 0.01 * (s.contention - 1.0);
+            let after_retries = frame.powi(7) + 0.01 * (s.contention - 1.0);
             ok *= 1.0 - after_retries.clamp(0.0, 1.0);
             jitter += 0.6 + 2.5 * (s.contention - 1.0) + 2.0 * frame;
             worst = Some(worst.map_or(s.rssi, |w: f32| w.min(s.rssi)));
@@ -661,9 +811,36 @@ impl Network {
         (1.0 - ok, jitter, worst)
     }
 
-    /// Radar seen on a DFS channel right now (live only): rare, and the 5 GHz radio pauses for about a minute.
+    /// When radar last hit a radio's DFS channel (live clock, s), if that was under 30 minutes (plus the
+    /// listening time to come back) ago. Radar shows up now and then: about once in 10 half-hours (seeded).
+    fn radar_at(&self, d: &Device) -> Option<f64> {
+        let (c, w) = (d.ch[1], d.width[1]);
+        if !self.live || !d.bands[1] || !dfs(Band::B5, c, w) {
+            return None;
+        }
+        let slot = (self.clock / 1800.0).floor();
+        (0..3).map(|k| slot - k as f64).filter(|s| *s >= 0.0).find_map(|s| {
+            let k = d.id as u64 + 0xDF5;
+            let at = (s + crate::sim::unit(self.seed, k + 1, s as u64) as f64) * 1800.0;
+            (crate::sim::unit(self.seed, k, s as u64) < 0.1 && self.clock >= at && self.clock < at + 1800.0 + cac_s(Band::B5, c, w)).then_some(at)
+        })
+    }
+
+    /// Seconds a radio still stays off its radar (DFS) channel (live only): it listens for a minute (10 on the
+    /// weather-radar channels) after power-on, and must leave for 30 minutes when radar shows up.
+    pub fn dfs_wait(&self, d: &Device) -> Option<f64> {
+        let cac = cac_s(Band::B5, d.ch[1], d.width[1]);
+        let left = match self.radar_at(d) {
+            Some(at) => at + 1800.0 + cac - self.clock,
+            None if self.live && d.bands[1] => cac - self.clock,
+            None => 0.0,
+        };
+        (left > 0.0).then_some(left)
+    }
+
+    /// Radar was heard on the radio's DFS channel in the last 30 minutes (live only): it moved to channel 36.
     pub fn radar(&self, ap: &Device) -> bool {
-        self.live && ap.bands[1] && (52..=144).contains(&self.channel(ap, Band::B5)) && crate::sim::wander(self.seed, ap.id as u64 + 0xDF5, self.clock, 45.0) > 2.2
+        self.radar_at(self.chan_src(ap)).is_some()
     }
 
     /// Other devices on the same access point that this one can't hear ("hidden stations"):
@@ -856,6 +1033,7 @@ impl Network {
             let mut new = me.ch;
             for band in Band::ALL.into_iter().filter(|b| me.bands[b.i()]) {
                 let w = me.width[band.i()];
+                // 2.4 GHz: the 1/6/11 and 1/5/9/13 plans' channels; whichever overlaps least wins (1/6/11 on a tie).
                 let cands: Vec<u16> = if band == Band::B24 { CH24.to_vec() } else { band.channels(w) };
                 let cost = |ch: u16| -> f32 {
                     self.devices
@@ -866,8 +1044,9 @@ impl Network {
                             if heard < -85.0 { 0.0 } else { overlap(band, (ch, w), self.chan(t, band)) * if t.kind.foreign() { t.busy } else { 0.6 } * (1.0 + (heard + 85.0) / 30.0) }
                         })
                         .sum::<f32>()
-                        // Prefer non-radar channels on a tie.
-                        + if band == Band::B5 && (52..=144).contains(&ch) { 0.01 } else { 0.0 }
+                        // Radar channels cost a minute's silence at power-on (10 on weather-radar ones) and a
+                        // forced move whenever radar shows up.
+                        + if !dfs(band, ch, w) { 0.0 } else if cac_s(band, ch, w) > 60.0 { 0.25 } else { 0.08 }
                 };
                 if let Some(c) = cands.into_iter().min_by(|a, b| cost(*a).total_cmp(&cost(*b))) {
                     new[band.i()] = c;
@@ -1083,12 +1262,126 @@ mod tests {
 
     #[test]
     fn channel_lists_respect_widths() {
+        // EU/CH: no 144 or 149–165 on 5 GHz; 6 GHz only up to 6425 MHz (one 320 MHz channel, 5945–6265).
         assert_eq!(Band::B5.channels(160), vec![36, 100]);
-        assert_eq!(Band::B5.channels(80), vec![36, 52, 100, 116, 132, 149]);
-        assert_eq!(Band::B6.channels(320).len(), 3);
+        assert_eq!(Band::B5.channels(80), vec![36, 52, 100, 116]);
+        assert_eq!(*Band::B5.channels(20).last().unwrap(), 140);
+        assert_eq!(Band::B6.channels(320), vec![1]);
+        assert_eq!((Band::B6.channels(160).len(), *Band::B6.channels(20).last().unwrap()), (3, 93));
+        assert_eq!((Band::B5.eirp_limit(52), Band::B5.eirp_limit(100)), (23.0, 30.0));
+        assert!(dfs(Band::B5, 36, 160) && !dfs(Band::B5, 36, 80) && cac_s(Band::B5, 116, 80) == 600.0 && cac_s(Band::B5, 100, 20) == 60.0);
         assert_eq!(overlap(Band::B5, (36, 80), (44, 20)), 1.0);
         assert_eq!(overlap(Band::B24, (1, 20), (6, 20)), 0.0);
         assert_eq!(overlap(Band::B24, (1, 20), (3, 20)), 1.5);
+    }
+
+    #[test]
+    fn slanted_walls_and_extra_floors() {
+        let mut n = Network::default();
+        n.walls.push(Wall { id: 1, a: [100.0, -400.0], b: [100.0, 400.0], kind: WallKind::Brick, floor: 0 });
+        let straight = n.wall_loss([0.0, 0.0], 0, [200.0, 0.0], 0, Band::B5).0;
+        let slant = n.wall_loss([0.0, 0.0], 0, [200.0, 400.0], 0, Band::B5).0;
+        assert!(straight == 14.0 && slant > 20.0 && slant <= 28.0, "{straight} {slant}");
+        // Every further concrete slab costs less than the first one.
+        let pl = |f: i8| n.path_loss([0.0, 0.0], 0, [0.0, 0.0], f, Band::B5);
+        assert!(pl(2) - pl(1) < pl(1) - pl(0) - 5.0, "{} {} {}", pl(0), pl(1), pl(2));
+    }
+
+    #[test]
+    fn weak_links_drop_streams_and_width_and_send_back_slower() {
+        let mut n = Network::default();
+        let link = pair(&mut n, 100.0);
+        n.dev_mut(link.b).unwrap().bands = [false, true, false];
+        let near = n.signal(&link, false).unwrap();
+        assert!(near.streams == 2 && near.up_mbps < near.mbps * 1.01, "{near:?}");
+        // A phone far away: one stream, a narrow part of the channel, and its weaker radio uploads slower.
+        n.dev_mut(link.b).unwrap().pos = [800.0, 0.0];
+        n.walls.push(Wall { id: 50, a: [400.0, -100.0], b: [400.0, 100.0], kind: WallKind::Concrete, floor: 0 });
+        let far = n.signal(&link, false).unwrap();
+        assert!(far.alive() && far.streams == 1 && far.up_mbps < far.mbps / 2.0, "{far:?}");
+        assert!(mac_eff(10.0) < 0.5 && mac_eff(1200.0) == 0.7);
+    }
+
+    #[test]
+    fn wide_channels_and_interference_near_the_device() {
+        let mut n = Network::default();
+        let link = pair(&mut n, 100.0);
+        n.dev_mut(link.b).unwrap().bands = [false, true, false];
+        let base = n.signal(&link, false).unwrap().contention;
+        // A neighbour on the second half of our 80 MHz channel only counts once it's loud (−62 dBm).
+        let nb = n.add_device(Kind::Neighbor, [0.0, 1200.0]);
+        n.dev_mut(nb).unwrap().ch = [6, 52, 37];
+        n.dev_mut(nb).unwrap().width[1] = 20;
+        n.dev_mut(nb).unwrap().busy = 0.5;
+        n.dev_mut(link.a).unwrap().ch[1] = 36;
+        n.dev_mut(link.a).unwrap().width[1] = 160;
+        let ap = n.dev(link.a).unwrap().clone();
+        assert!(n.rssi_at(n.dev(nb).unwrap(), ap.pos, 0, Band::B5) > -82.0);
+        assert!(n.contention(&ap, Band::B5).0 < 1.01);
+        n.dev_mut(nb).unwrap().pos = [0.0, 200.0];
+        assert!(n.contention(n.dev(link.a).unwrap(), Band::B5).0 > 1.1);
+        // A neighbour behind the phone that the access point can't hear still slows the phone down.
+        n.dev_mut(nb).unwrap().ch[1] = 36;
+        n.dev_mut(nb).unwrap().pos = [300.0, 600.0];
+        n.walls.push(Wall { id: 7, a: [-50.0, 60.0], b: [120.0, 60.0], kind: WallKind::Metal, floor: 0 });
+        n.dev_mut(link.b).unwrap().pos = [300.0, 0.0];
+        let s = n.signal(&link, false).unwrap();
+        assert!(n.contention(n.dev(link.a).unwrap(), Band::B5).0 < 1.01 && s.contention > base + 0.1, "{s:?}");
+    }
+
+    #[test]
+    fn own_access_points_are_as_busy_as_their_apps() {
+        let mut n = template("home");
+        let r = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().clone();
+        let evening = n.demand_airtime(&r, Band::B5);
+        n.hour = 4.0;
+        assert!(n.demand_airtime(&r, Band::B5) < evening && evening < 0.5, "{evening}");
+    }
+
+    #[test]
+    fn radar_and_power_on_keep_the_radio_off_dfs_channels() {
+        let mut n = Network::default();
+        let r = n.add_device(Kind::HomeRouter, [0.0, 0.0]);
+        n.dev_mut(r).unwrap().ch[1] = 100;
+        n.live = true;
+        n.clock = 10.0;
+        let d = n.dev(r).unwrap().clone();
+        assert_eq!(n.chan(&d, Band::B5), (36, 80));
+        n.clock = 70.0;
+        assert_eq!(n.chan(&d, Band::B5).0, 100);
+        // Over a long day radar shows up now and then: each time the radio moves for 30 minutes.
+        let hits = (0..2000).filter(|i| {
+            n.clock = 61.0 + *i as f64 * 60.0;
+            n.radar(&d)
+        }).count();
+        assert!((10..800).contains(&hits), "{hits}");
+        n.live = false;
+        assert_eq!(n.chan(&d, Band::B5).0, 100);
+    }
+
+    #[test]
+    fn auto_channels_can_use_the_1_5_9_13_plan() {
+        let mut n = Network::default();
+        let r = n.add_device(Kind::HomeRouter, [0.0, 0.0]);
+        for (i, c) in [1, 5, 9].into_iter().enumerate() {
+            let nb = n.add_device(Kind::Neighbor, [100.0 + 50.0 * i as f32, 0.0]);
+            n.dev_mut(nb).unwrap().ch[0] = c;
+            n.dev_mut(nb).unwrap().busy = 0.5;
+        }
+        n.auto_channels();
+        assert_eq!(n.dev(r).unwrap().ch[0], 13);
+    }
+
+    #[test]
+    fn powerline_between_storeys_is_slower() {
+        let mut n = Network::default();
+        let a = n.add_device(Kind::Switch, [0.0, 0.0]);
+        let b = n.add_device(Kind::Desktop, [200.0, 0.0]);
+        let l = n.connect(a, b, Medium::Powerline).unwrap();
+        let l = n.links.iter().find(|x| x.id == l).unwrap().clone();
+        let same = n.link_rate(&l);
+        n.dev_mut(b).unwrap().floor = 1;
+        assert!(n.link_rate(&l) < same * 0.6 && (n.wiring_m(&l) - 20.0).abs() < 0.1, "{} {}", same, n.wiring_m(&l));
     }
 
     #[test]
