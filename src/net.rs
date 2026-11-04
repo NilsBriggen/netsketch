@@ -245,7 +245,7 @@ impl Medium {
             Medium::Cat6a => "Cat 6A cable",
             Medium::Fiber => "Fibre",
             Medium::WiFi => "Wi-Fi",
-            Medium::Cat5 => "Old Cat 5 / 100 Mbit port",
+            Medium::Cat5 => "Old Cat 5 cable",
             Medium::Powerline => "Powerline adapters",
             Medium::Mesh => "Speaker mesh (wireless)",
             Medium::Cellular => "Mobile 5G backup line",
@@ -258,10 +258,10 @@ impl Medium {
             Medium::Cat6a => "10 Gbit/s (≤ 100 m)",
             Medium::Fiber => "10+ Gbit/s, long distances",
             Medium::WiFi => "depends on signal, walls and neighbours",
-            Medium::Cat5 => "100 Mbit/s — a hidden bottleneck",
+            Medium::Cat5 => "1 Gbit/s at most — nothing faster (2.5G needs Cat 5e or better)",
             Medium::Powerline => "speed depends on the house wiring, distance and running appliances",
             Medium::Mesh => "2.4 GHz speaker radio link: speed from its signal, shared with every speaker",
-            Medium::Cellular => "≈ 100–200 Mbit/s, higher delay; only used when the main internet line fails",
+            Medium::Cellular => "≈ 300 Mbit/s down, 50 up, higher delay, no port forwarding (shared address); only used when the main internet line fails",
         }
     }
     pub fn price_per_m(self) -> f32 {
@@ -482,7 +482,8 @@ pub struct Device {
     pub join: String,
     /// Switched off (to try "what if this device fails?").
     pub off: bool,
-    /// Average electrical power (W) over a day.
+    /// Electrical power (W): while in use for TVs, computers and consoles (they sleep the rest of the day,
+    /// see `more::duty`), around the clock for everything else.
     pub watts: f32,
     /// Antenna: beam width in degrees (0 = all around) and where it points (degrees, 0 = right, 90 = down).
     pub beam: f32,
@@ -648,6 +649,8 @@ pub struct Trace {
     /// Source address as the destination sees it (after NAT).
     pub seen_src: Option<Ipv4Addr>,
     pub nat: Option<(u32, Ipv4Addr)>,
+    /// (device, address it now knows the MAC of) from the ARP questions on the way.
+    pub arp: Vec<(u32, Ipv4Addr)>,
 }
 
 #[derive(Default)]
@@ -744,6 +747,9 @@ pub struct Network {
     pub clock: f64,
     #[serde(skip)]
     pub live: bool,
+    /// Addresses each device learned a MAC address for from traffic (its ARP cache); not saved.
+    #[serde(skip)]
+    pub arp_seen: HashMap<u32, Vec<Ipv4Addr>>,
 }
 
 impl Default for Network {
@@ -769,6 +775,7 @@ impl Default for Network {
             hour: 20.5,
             clock: 0.0,
             live: false,
+            arp_seen: HashMap::new(),
         }
     }
 }
@@ -966,7 +973,7 @@ impl Network {
                 let hex = format!("{:04X}", crate::sim::hash(s, k, 1) & 0xffff);
                 d.ssid = crate::sim::pick(s, k, 2, &["WLAN-", "Home_", "Flat-", "Guest-", "DIRECT-Printer-", "NET-"]).to_string() + &hex;
                 let c24 = crate::sim::pick(s, k, 3, &["1", "1", "6", "6", "6", "11", "11", "3", "9"]);
-                let c5 = crate::sim::pick(s, k, 4, &["36", "36", "36", "44", "52", "100", "149"]);
+                let c5 = crate::sim::pick(s, k, 4, &["36", "36", "36", "44", "52", "100", "116"]);
                 d.ch = [c24.parse().unwrap(), c5.parse().unwrap(), 37];
                 d.wifi = WifiStd::Wifi6;
             }
@@ -1009,7 +1016,7 @@ impl Network {
         if matches!(kind, Kind::AccessPoint | Kind::HomeRouter) {
             let others: Vec<[u16; 3]> = self.devices.iter().filter(|o| o.kind.radio()).map(|o| o.ch).collect();
             let least = |opts: &[u16], i: usize| *opts.iter().min_by_key(|c| others.iter().filter(|o| o[i] == **c).count()).unwrap();
-            d.ch[0] = least(&crate::wifi::CH24, 0);
+            d.ch[0] = least(&crate::wifi::CH24[..3], 0);
             d.ch[1] = least(&crate::wifi::Band::B5.channels(d.width[1].max(20)), 1);
             d.ch[2] = least(&crate::wifi::Band::B6.channels(d.width[2].max(20)), 2);
         }
@@ -1282,6 +1289,8 @@ impl Network {
         let mut src = src;
         let mut dst = dst;
         let mut came_in: Option<usize> = None;
+        // A reply to something sent from inside: NAT lets it in.
+        let reply = nat_back.is_some();
         let mut nat_back = nat_back;
         for ttl in (1..=32u8).rev() {
             let d = self.dev(cur).unwrap();
@@ -1296,11 +1305,24 @@ impl Network {
                     nat_back = None;
                 }
             }
-            // Port forwarding: the router's public address passes this port on to a device inside.
-            if d.kind == Kind::HomeRouter && came_in == Some(1) && d.ifaces.get(1).and_then(|f| f.addr()).map(|a| a.0) == Some(dst) {
-                if let Some(inner) = self.forward_of(d, port) {
-                    t.log.push(Log { src: src.to_string(), dst: inner.to_string(), proto: "NAT", layer: "Network", info: format!("{} forwards port {port} to {inner}", d.name), dev: cur });
-                    dst = inner;
+            // Unsolicited traffic from outside: dropped unless a port forwarding rule passes it on to a device inside.
+            if d.kind == Kind::HomeRouter && came_in == Some(1) && !reply && d.ifaces.get(1).and_then(|f| f.addr()).map(|a| a.0) == Some(dst) {
+                let shared = self.cgnat(d);
+                match (self.forward_of(d, port), shared) {
+                    (_, Some(cg)) => {
+                        t.error = format!("{} is on the mobile line, behind the provider's carrier-grade NAT: it only has the shared address {cg}, so nothing from the internet reaches it and port forwarding can't work. IPv6 or a VPN/tunnel service gets around it.", d.name);
+                        t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Dropped at the provider's carrier-grade NAT: {} only has the shared address {cg}", d.name), dev: cur });
+                        return t;
+                    }
+                    (Some(inner), None) => {
+                        t.log.push(Log { src: src.to_string(), dst: inner.to_string(), proto: "NAT", layer: "Network", info: format!("{} forwards port {port} to {inner}", d.name), dev: cur });
+                        dst = inner;
+                    }
+                    (None, None) => {
+                        t.error = format!("{} drops it: nobody inside started this conversation and no port forwarding rule passes port {port} on.", d.name);
+                        t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("{} drops unsolicited traffic from the internet (no forwarding rule for port {port})", d.name), dev: cur });
+                        return t;
+                    }
                 }
             }
             if d.has_ip(dst) {
@@ -1356,6 +1378,11 @@ impl Network {
                 t.error = format!("Nobody answers ARP for {hop}: no device with that address is in {}'s network.", d.name);
                 return t;
             };
+            // Both ends of an ARP exchange remember each other.
+            t.arp.push((cur, hop));
+            if let Some((me, _)) = d.ifaces[out].addr() {
+                t.arp.push((next, me));
+            }
             if d.kind.routes() && cur != from {
                 let guest = |i: usize| d.ifaces.get(i).is_some_and(|f| f.vlan == crate::extras::GUEST_VLAN);
                 if d.kind == Kind::HomeRouter && ((came_in.is_some_and(guest) && out != 1) || (guest(out) && came_in != Some(1))) {
@@ -1388,6 +1415,9 @@ impl Network {
             if d.kind == Kind::HomeRouter && out == 1 && came_in.is_some_and(|i| i != 1) {
                 let wan = parse_ip(&d.ifaces[1].ip).unwrap_or(src);
                 t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("{} replaces sender {src} with its public address {wan}", d.name), dev: cur });
+                if let Some(cg) = self.cgnat(d) {
+                    t.log.push(Log { src: cg.clone(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Mobile line: the provider translates {cg} once more to an address shared by many customers (carrier-grade NAT)"), dev: cur });
+                }
                 t.nat = Some((cur, src));
                 src = wan;
             }
@@ -1400,6 +1430,15 @@ impl Network {
         }
         t.error = "TTL expired: the packet went in circles (routing loop).".into();
         t
+    }
+
+    /// The shared address (100.64.0.0/10) a router gets while its internet runs over the mobile line
+    /// (carrier-grade NAT), or None on a normal line.
+    // shortcut: inside the simulation the router keeps its usual WAN address; the 100.64 one is shown and explained.
+    pub fn cgnat(&self, r: &Device) -> Option<String> {
+        let inet = self.devices.iter().find(|d| d.kind == Kind::Internet)?;
+        let h = crate::sim::hash(self.seed, r.id as u64, 0xC6);
+        (self.link_between(r.id, inet.id)?.medium == Medium::Cellular).then(|| format!("100.{}.{}.{}", 64 + h % 64, (h >> 8) % 256, 1 + (h >> 16) % 254))
     }
 
     fn src_ip(&self, id: u32) -> Option<Ipv4Addr> {
@@ -1508,6 +1547,11 @@ impl Network {
             return;
         }
         let name = d.name.clone();
+        // Leases belong to the network card's MAC address: the same device keeps (or gets back) the same address.
+        let mac = crate::sim::hash(0, d.ifaces[ifi].mac.bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64)), 0xD4);
+        let had = d.ifaces[ifi].addr().map(|a| u32::from(a.0));
+        // Without an answer a device picks its own 169.254.1.0–169.254.254.255 address (from its MAC).
+        let link_local = format!("169.254.{}.{}", 1 + mac % 254, (mac >> 8) % 256);
         let Some(&seg) = segs.get(&(id, ifi)).filter(|_| self.connected(id)) else {
             let d = self.dev_mut(id).unwrap();
             d.ifaces[ifi].ip.clear();
@@ -1529,7 +1573,7 @@ impl Network {
         // With two DHCP servers in one network, whichever answers first wins — it differs per device.
         let server = (!servers.is_empty()).then(|| servers[(crate::sim::hash(self.seed, id as u64, 0xD7) % servers.len() as u64) as usize]);
         let Some((s, j)) = server else {
-            let ip = format!("169.254.{}.{}", (id / 250) % 254 + 1, id % 250 + 1);
+            let ip = link_local;
             log.push(Log { src: name.clone(), dst: "-".into(), proto: "DHCP", layer: "Application", info: format!("No answer — {name} gives itself the link-local address {ip}"), dev: id });
             let d = self.dev_mut(id).unwrap();
             d.ifaces[ifi].ip = ip;
@@ -1554,13 +1598,17 @@ impl Network {
             _ if j > 0 && spfx <= 24 => Some((base + 100, base + 199)),
             _ => None,
         };
-        let pick = range.and_then(|(f, t)| (f..=t).map(Ipv4Addr::from).find(|ip| !used.contains(ip)));
+        let free = |ip: u32| !used.contains(&Ipv4Addr::from(ip));
+        let pick = range.filter(|(f, t)| t >= f).and_then(|(f, t)| {
+            let n = t - f + 1;
+            had.filter(|ip| (f..=t).contains(ip) && free(*ip)).or_else(|| (0..n).map(|k| f + ((mac % n as u64) as u32 + k) % n).find(|ip| free(*ip)))
+        });
+        let pick = pick.map(Ipv4Addr::from);
         let Some(ip) = pick else {
             // A full (or broken) pool means no answer: the device falls back to a link-local address.
             log.push(Log { src: sip.to_string(), dst: name.clone(), proto: "DHCP", layer: "Application", info: format!("{sname} has no free address in its pool (or the pool doesn't match its network)"), dev: sid });
-            let ll = format!("169.254.{}.{}", (id / 250) % 254 + 1, id % 250 + 1);
             let d = self.dev_mut(id).unwrap();
-            d.ifaces[ifi].ip = ll;
+            d.ifaces[ifi].ip = link_local;
             d.ifaces[ifi].prefix = 16;
             d.gateway.clear();
             d.dns.clear();
@@ -1957,6 +2005,28 @@ impl Network {
 
     /// Runs one command typed into a device's terminal.
     pub fn exec(&mut self, id: u32, line: &str) -> Outcome {
+        let mut o = self.run_cmd(id, line);
+        for &(d, ip) in o.traces.iter().flat_map(|t| t.arp.iter()) {
+            let known = self.arp_seen.entry(d).or_default();
+            if !known.contains(&ip) {
+                known.push(ip);
+            }
+        }
+        match line.split_whitespace().next().unwrap_or("").to_lowercase().as_str() {
+            "speedtest" | "iperf" => {
+                if let (Some(i), Some(t)) = (o.lines.iter().position(|l| l.starts_with("  Download")), o.traces.last()) {
+                    // Uploads ride on the devices' own (weaker) radios; TCP never quite fills the pipe.
+                    let up = self.upload_rate(&t.path) * 0.93;
+                    o.lines.insert(i + 1, format!("  Upload   ≈ {up:.0} Mbit/s"));
+                }
+            }
+            "stp" | "spanning-tree" => o.lines.extend(self.stp_convergence(&self.stp())),
+            _ => {}
+        }
+        o
+    }
+
+    fn run_cmd(&mut self, id: u32, line: &str) -> Outcome {
         let mut o = Outcome::default();
         let words: Vec<&str> = line.split_whitespace().collect();
         let Some(&cmd) = words.first() else { return o };
@@ -1993,6 +2063,10 @@ impl Network {
                 match self.v6_of(&d) {
                     Some(v6) => o.lines.push(format!("IPv6: {v6}/64 (global, from the router via SLAAC) + fe80:: link-local")),
                     None => o.lines.push("IPv6: fe80:: link-local only (no IPv6 from the router)".into()),
+                }
+                o.lines.extend(self.v6_delegation(&d));
+                if let Some(cg) = self.cgnat(&d) {
+                    o.lines.push(format!("Mobile line: the provider only gives this router the shared address {cg} (carrier-grade NAT) — no port forwarding."));
                 }
             }
             "ping6" => self.ping6(id, arg, &mut o),
@@ -2087,13 +2161,15 @@ impl Network {
                 }
             }
             "arp" => {
+                // Only neighbours it has talked to: ARP asks for a MAC address the first time it's needed.
                 let segs = self.segments();
+                let known = self.arp_seen.get(&id).cloned().unwrap_or_default();
                 let mut any = false;
                 for (i, _) in d.ifaces.iter().enumerate() {
                     let Some(&s) = segs.get(&(id, i)) else { continue };
                     for x in &self.devices {
                         for (j, f) in x.ifaces.iter().enumerate() {
-                            if x.id != id && segs.get(&(x.id, j)) == Some(&s) && !f.ip.is_empty() {
+                            if x.id != id && segs.get(&(x.id, j)) == Some(&s) && f.addr().is_some_and(|a| known.contains(&a.0)) {
                                 o.lines.push(format!("{:<16} {}   {}", f.ip, f.mac, x.name));
                                 any = true;
                             }
@@ -2101,7 +2177,7 @@ impl Network {
                     }
                 }
                 if !any {
-                    o.lines.push("No neighbours.".into());
+                    o.lines.push("No entries yet: a device learns a neighbour's MAC address (ARP) the first time it talks to it — try a ping first.".into());
                 }
             }
             "route" | "netstat" => {
@@ -2255,6 +2331,26 @@ mod tests {
     fn run(n: &mut Network, name: &str, cmd: &str) -> String {
         let id = n.lookup_dev(name).unwrap().id;
         n.exec(id, cmd).lines.join("\n")
+    }
+
+    #[test]
+    fn leases_follow_the_mac_and_arp_learns_from_traffic() {
+        let mut n = template("home");
+        let pc = n.lookup_dev("office-pc").unwrap().id;
+        let ip = n.dev(pc).unwrap().ifaces[0].ip.clone();
+        n.run_dhcp();
+        assert_eq!(n.dev(pc).unwrap().ifaces[0].ip, ip);
+        n.dev_mut(pc).unwrap().ifaces[0].ip.clear();
+        n.run_dhcp();
+        assert_eq!(n.dev(pc).unwrap().ifaces[0].ip, ip);
+        assert!(run(&mut n, "office-pc", "arp").contains("No entries"));
+        run(&mut n, "office-pc", "ping example.com");
+        assert!(run(&mut n, "office-pc", "arp").contains("Home router"));
+        // Speed tests report both directions; nothing from the internet gets in without a forwarding rule.
+        assert!(run(&mut n, "office-pc", "speedtest").contains("Upload"));
+        let wan = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().ifaces[1].ip.clone();
+        let inet = n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id;
+        assert!(n.exec(inet, &format!("open {wan}")).lines.join(" ").contains("forwarding"));
     }
 
     #[test]

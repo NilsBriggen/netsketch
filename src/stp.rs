@@ -1,4 +1,5 @@
-//! Spanning tree (802.1D/RSTP outcome): root election, the tree, blocked backup links and loops nobody blocks.
+//! Spanning tree (802.1D/RSTP outcome): root election, the tree, blocked backup links, loops nobody blocks
+//! and how long it takes to settle.
 use crate::net::{Kind, Network};
 use std::collections::{HashMap, HashSet};
 
@@ -30,7 +31,7 @@ impl Network {
     /// Speed a port reports to spanning tree (Mbit/s): the negotiated Ethernet speed, or the radio's link rate.
     pub fn port_speed(&self, l: &crate::net::Link) -> u32 {
         match self.signal(l, false) {
-            Some(s) => ((s.mbps * s.contention / 0.6).max(1.0)) as u32,
+            Some(s) => s.phy.max(1.0) as u32,
             None => self.negotiated(l),
         }
     }
@@ -56,6 +57,21 @@ impl Network {
             // 802.1D-2004: 20 Tbit/s divided by the port speed.
             (20_000_000 / speed.max(1)).max(1)
         }
+    }
+
+    /// How long ports stay silent after a cable or bridge changes. Rapid spanning tree (RSTP, today's default)
+    /// agrees in about a second; classic 802.1D waits out its timers: up to 20 s for the old news to age out,
+    /// then 15 s listening and 15 s learning. None when no bridge runs spanning tree.
+    // shortcut: a bridge on the old short cost scale is taken to speak only classic spanning tree.
+    pub fn stp_convergence(&self, stp: &Stp) -> Option<String> {
+        let bridges: Vec<&crate::net::Device> = stp.cost.keys().filter_map(|id| self.dev(*id)).filter(|d| d.stp).collect();
+        if bridges.is_empty() {
+            return None;
+        }
+        Some(match bridges.iter().find(|d| d.stp_short) {
+            Some(old) => format!("After a change: 30–50 s without traffic on the affected ports — {} only speaks classic spanning tree (20 s max age + 15 s listening + 15 s learning). With rapid spanning tree (RSTP) everywhere it takes about 1 s.", old.name),
+            None => "After a change: about 1 s (rapid spanning tree, RSTP).".into(),
+        })
     }
 
     pub fn stp(&self) -> Stp {
@@ -159,6 +175,15 @@ mod tests {
             assert!(!n.stp().blocked.contains(&wired), "seed {seed}: fix failed");
         }
         assert!(taken > 0 && fine > 0, "takeover {taken}, fine {fine}");
+    }
+
+    #[test]
+    fn classic_spanning_tree_is_slow_to_settle() {
+        let mut n = template_seeded("speakers", 1);
+        let pc = n.devices.iter().find(|d| d.name == "Office PC").unwrap().id;
+        assert!(n.exec(pc, "stp").lines.join(" ").contains("30–50 s"));
+        let home = template_seeded("home", 1);
+        assert!(home.stp_convergence(&home.stp()).is_none_or(|t| t.contains("about 1 s")));
     }
 
     #[test]

@@ -38,7 +38,8 @@ impl Use {
             Use::Music => "Music streaming",
         }
     }
-    /// Typical busy-hour demand (down, up) in Mbit/s.
+    /// Typical busy-hour demand (down, up) in Mbit/s. A big download really takes whatever the internet
+    /// line has left (see `loads`); 150 is its demand where there's no internet line.
     pub fn demand(self) -> (f32, f32) {
         match self {
             Use::Browsing => (3.0, 0.5),
@@ -97,6 +98,8 @@ impl Network {
     /// Adds up everyone's apps along their real paths.
     pub fn loads(&self) -> Load {
         let mut out = Load::default();
+        // (device, app, how active, path, goes out to the internet)
+        let mut flows = vec![];
         for d in self.devices.iter().filter(|d| !d.uses.is_empty() && !d.off) {
             let Some(src) = d.first_ip() else { continue };
             for u in &d.uses {
@@ -106,12 +109,23 @@ impl Network {
                 }
                 let Some(dst) = self.target(*u) else { continue };
                 let t = self.send(d.id, src, dst, "TCP", 443, None);
-                if !t.ok {
-                    continue;
+                if t.ok {
+                    flows.push((d.id, *u, act, t.path, t.site.is_some()));
                 }
-                let (down, up) = u.demand();
-                let (down, up) = (down * act, up * act);
-                for w in t.path.windows(2) {
+            }
+        }
+        // A big download (TCP) fills whatever the internet line has left, shared between all of them.
+        let line = self.devices.iter().find(|d| d.kind == Kind::Internet).map(|d| d.plan_mbps);
+        let busy: f32 = flows.iter().filter(|f| f.4 && f.1 != Use::Download).map(|f| f.1.demand().0 * f.2).sum();
+        let downloads: f32 = flows.iter().filter(|f| f.4 && f.1 == Use::Download).map(|f| f.2).sum();
+        for (id, u, act, path, net) in flows {
+            let (mut down, up) = u.demand();
+            if let (Use::Download, true, Some(l)) = (u, net, line) {
+                down = (l - busy).max(l * 0.1) / downloads.max(1.0);
+            }
+            let (down, up) = (down * act, up * act);
+            {
+                for w in path.windows(2) {
                     if let Some(l) = self.link_between(w[0], w[1]) {
                         // Direction "a→b" vs "b→a" for full-duplex cables.
                         let fwd = l.a == w[0];
@@ -123,7 +137,7 @@ impl Network {
                             e.0 += down;
                             e.1 += up;
                         }
-                        out.who.entry(l.id).or_default().push(d.id);
+                        out.who.entry(l.id).or_default().push(id);
                     }
                 }
             }
@@ -171,6 +185,14 @@ impl Network {
 /// Per-port PoE standards: (label, watts at the switch port).
 pub const POE: [(&str, f32); 5] = [("No PoE", 0.0), ("PoE 802.3af — 15.4 W/port", 15.4), ("PoE+ 802.3at — 30 W/port", 30.0), ("PoE++ 802.3bt — 60 W/port", 60.0), ("PoE++ 802.3bt — 90 W/port", 90.0)];
 
+/// Power a switch port reserves for a device that draws `draw` W: its PoE class maximum at the port
+/// (af 15.4 W, at 30 W, bt 60 or 90 W), which also covers what the cable loses on the way (~16%, ~20% on bt).
+/// None: more than PoE can carry.
+// shortcut: switches reserve by class; ones that negotiate the real need (LLDP) can fit a few more devices.
+pub fn poe_reserve(draw: f32) -> Option<f32> {
+    [(12.95, 15.4), (25.5, 30.0), (51.0, 60.0), (71.3, 90.0)].into_iter().find(|(pd, _)| draw <= *pd).map(|x| x.1)
+}
+
 /// Typical power a device draws over the cable (W); 0 = it has its own power supply.
 pub fn default_poe_draw(kind: Kind) -> f32 {
     match kind {
@@ -189,20 +211,20 @@ impl Network {
             let Some(l) = self.links.iter().find(|l| (l.a == d.id || l.b == d.id) && !l.medium.wireless() && l.medium != Medium::Powerline) else { continue };
             let src = self.dev(l.other(d.id).0).unwrap();
             let port_w = POE[src.poe_class as usize].1;
-            // The cable loses a little on the way (up to ~16% at 100 m).
-            let need = d.poe_draw * (1.0 + 0.16 * (self.link_len(l) / 100.0).min(1.0));
+            let need = poe_reserve(d.poe_draw);
             if port_w == 0.0 {
                 v.push((d.id, format!("{} needs about {:.0} W over the cable, but {} has no PoE. Use a PoE switch or an injector.", d.name, d.poe_draw, src.name), Some(src.id)));
-            } else if need > port_w {
-                v.push((d.id, format!("{} needs {:.0} W but {}'s ports give only {:.1} W ({}). It won't start or keeps rebooting.", d.name, need, src.name, port_w, POE[src.poe_class as usize].0), Some(src.id)));
+            } else if need.is_none_or(|w| w > port_w) {
+                let class = need.map_or("more than PoE can carry".to_string(), |w| format!("a {w:.1} W port"));
+                v.push((d.id, format!("{} draws {:.0} W, so it needs {class}, but {}'s ports give only {:.1} W ({}). It won't start or keeps rebooting.", d.name, d.poe_draw, src.name, port_w, POE[src.poe_class as usize].0), Some(src.id)));
             } else {
-                *used.entry(src.id).or_default() += need;
+                *used.entry(src.id).or_default() += need.unwrap_or(0.0);
             }
         }
         for (sw, w) in used {
             let s = self.dev(sw).unwrap();
             if w > s.poe_budget {
-                v.push((sw, format!("{} has a PoE budget of {:.0} W but its devices need {:.0} W. The last ones to start get no power.", s.name, s.poe_budget, w), None));
+                v.push((sw, format!("{} has a PoE budget of {:.0} W but reserves {:.0} W for its devices (each one's class maximum). The last ones to start get no power.", s.name, s.poe_budget, w), None));
             }
         }
         v
@@ -264,9 +286,38 @@ impl Network {
 // ---------- IPv6 ----------
 
 impl Network {
-    /// The /64 a home router hands to its network (documentation range 2001:db8::/32).
+    /// The /64 a home router hands to its network (documentation range 2001:db8::/32). The provider delegates a
+    /// /56 (256 networks) to the router on the line (DHCPv6-PD), which uses the first /64; a router behind it
+    /// asks it for one more /64 out of that /56 the same way.
+    // shortcut: one level of routers behind routers; a third one gets no further delegation.
     pub fn v6_prefix(&self, router: &Device) -> Option<String> {
-        (router.kind == Kind::HomeRouter && router.ipv6).then(|| format!("2001:db8:{:x}:{:x}", (self.seed & 0xffff) as u16, router.id))
+        if router.kind != Kind::HomeRouter || !router.ipv6 {
+            return None;
+        }
+        let segs = self.segments();
+        let wan = segs.get(&(router.id, 1));
+        let up = self.devices.iter().find(|u| u.id != router.id && u.kind == Kind::HomeRouter && wan.is_some() && segs.get(&(u.id, 0)) == wan);
+        let (top, sub) = match up {
+            Some(u) if !u.ipv6 => return None,
+            Some(u) => (u, 1 + (router.id % 255) as u16),
+            None => (router, 0),
+        };
+        Some(format!("2001:db8:{:x}:{:x}", (self.seed & 0xffff) as u16, self.v6_site(top) << 8 | sub))
+    }
+
+    /// Which /56 the provider delegates to a router (the high byte of its networks' fourth group).
+    fn v6_site(&self, top: &Device) -> u16 {
+        (crate::sim::hash(self.seed, top.id as u64, 0x56) & 0xff) as u16
+    }
+
+    /// ipconfig lines on a home router: where its IPv6 networks come from.
+    pub fn v6_delegation(&self, r: &Device) -> Vec<String> {
+        let Some(p) = self.v6_prefix(r) else { return vec![] };
+        let site = format!("2001:db8:{:x}:{:x}00::/56", (self.seed & 0xffff) as u16, p.rsplit(':').next().and_then(|g| u16::from_str_radix(g, 16).ok()).unwrap_or(0) >> 8);
+        vec![
+            format!("IPv6 networks: {site} delegated by the provider (DHCPv6-PD); this router uses {p}::/64"),
+            "Local-only IPv6 (ULA, fd00::/8) also works without the provider, like 192.168.x.x does for IPv4.".into(),
+        ]
     }
 
     /// A device's global IPv6 address (SLAAC: prefix + its own interface id), if its network has IPv6.
@@ -514,7 +565,9 @@ mod tests {
         }
         let busy = n.loads();
         let inet = n.links.iter().find(|l| n.dev(l.a).unwrap().kind == Kind::Internet || n.dev(l.b).unwrap().kind == Kind::Internet).unwrap().id;
-        assert!(n.utilisation(&busy, inet) > 1.0);
+        // Downloads fill the line, and no more.
+        let u = n.utilisation(&busy, inet);
+        assert!((0.95..1.05).contains(&u), "{u}");
         let pc = id(&n, "Office PC");
         let path = n.send(pc, n.dev(pc).unwrap().first_ip().unwrap(), crate::net::site_ip(0), "TCP", 443, None).path;
         assert!(n.queue_ms(&busy, &path) > n.queue_ms(&quiet, &path) + 20.0);
@@ -558,6 +611,26 @@ mod tests {
         assert!(n.poe_problems().iter().any(|p| p.1.contains("budget")));
         n.dev_mut(sw).unwrap().poe_budget = 60.0;
         assert!(n.poe_problems().is_empty());
+        // Two 18 W access points reserve 30 W each: 36 W of real draw doesn't fit a 50 W budget.
+        let ap2 = n.add_device(Kind::AccessPoint, [120.0, 0.0]);
+        n.connect(sw, ap2, Medium::Cat6).unwrap();
+        n.dev_mut(sw).unwrap().poe_budget = 50.0;
+        assert!(n.poe_problems().iter().any(|p| p.1.contains("budget")));
+        assert_eq!((poe_reserve(6.5), poe_reserve(60.0), poe_reserve(80.0)), (Some(15.4), Some(90.0), None));
+    }
+
+    #[test]
+    fn a_router_behind_a_router_gets_a_slice_of_the_providers_ipv6() {
+        let mut n = template_seeded("home", 2);
+        let (r1, sw) = (id(&n, "Home router"), id(&n, "Switch 1"));
+        let r2 = n.add_device(Kind::HomeRouter, [700.0, 700.0]);
+        let l = n.connect(sw, r2, Medium::Cat6).unwrap();
+        n.set_wan(r2, l, true);
+        let (p1, p2) = (n.v6_prefix(n.dev(r1).unwrap()).unwrap(), n.v6_prefix(n.dev(r2).unwrap()).unwrap());
+        // Same /56 (all but the last byte of the fourth group), different /64.
+        let site = |p: &str| p.rsplit_once(':').map(|(head, g)| (head.to_string(), u16::from_str_radix(g, 16).unwrap() >> 8)).unwrap();
+        assert!(p1 != p2 && site(&p1) == site(&p2), "{p1} {p2}");
+        assert!(n.exec(r1, "ipconfig").lines.join(" ").contains("/56"));
     }
 
     #[test]

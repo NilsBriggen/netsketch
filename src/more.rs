@@ -1,31 +1,52 @@
 //! Resilience ("what if this breaks?"), power use, traffic by time of day, router-behind-router (WAN port),
 //! extra Wi-Fi names per access point, a simple content filter and duplicating devices.
-use crate::extras::{Use, GUEST_VLAN};
+use crate::extras::{default_uses, Use, GUEST_VLAN};
 use crate::net::{Device, Kind, Link, Network};
 use std::collections::{HashSet, VecDeque};
 
-/// Typical average power draw (W) over a day, including standby.
+/// Typical power draw (W): while in use for TVs, computers and consoles (see `duty`), else the average over a
+/// day including standby.
 pub fn default_watts(k: Kind) -> f32 {
     use Kind::*;
     match k {
         Internet | Neighbor | Interference => 0.0,
         HomeRouter => 12.0,
         Router => 20.0,
-        Switch => 8.0,
+        Switch => 3.0, // small unmanaged switch
         AccessPoint => 0.0, // powered over the cable: counted at its switch
         Extender => 5.0,
-        Desktop => 45.0,
-        Laptop => 12.0,
+        Desktop => 60.0,
+        Laptop => 20.0,
         Phone => 2.0,
         Server => 90.0,
         Nas => 25.0,
         Printer => 4.0,
-        Tv => 35.0,
+        Tv => 80.0,
         SmartHome => 1.0,
         Speaker => 6.0,
         Camera => 0.0, // powered over the cable
-        Console => 25.0,
+        Console => 70.0,
     }
+}
+
+/// Standby draw (W) of devices that sleep when nobody uses them; None = on around the clock.
+fn standby_w(k: Kind) -> Option<f32> {
+    match k {
+        Kind::Tv => Some(0.5),
+        Kind::Desktop => Some(1.5),
+        Kind::Laptop => Some(1.0),
+        Kind::Console => Some(2.0),
+        _ => None,
+    }
+}
+
+/// Share of the day a device is in use: its busiest app's time-of-day curve, averaged over 24 hours.
+pub fn duty(d: &Device) -> f32 {
+    let uses = if d.uses.is_empty() { default_uses(d.kind) } else { d.uses.clone() };
+    if uses.is_empty() {
+        return 1.0;
+    }
+    (0..96).map(|q| uses.iter().map(|u| activity(*u, q as f32 / 4.0)).fold(0.0, f32::max)).sum::<f32>() / 96.0
 }
 
 /// How active an app is at a given hour, relative to its busy-hour demand (0..1).
@@ -103,8 +124,17 @@ impl Network {
     }
 
     /// Average power of everything in the plan (W), with PoE devices counted once (at their switch, plus losses).
+    /// Network gear runs 24/7; TVs, computers and consoles only while in use, on standby the rest of the day.
     pub fn power_w(&self) -> f32 {
-        let own: f32 = self.devices.iter().filter(|d| !d.off).map(|d| d.watts).sum();
+        let own: f32 = self
+            .devices
+            .iter()
+            .filter(|d| !d.off)
+            .map(|d| match standby_w(d.kind) {
+                Some(sb) => d.watts * duty(d) + sb * (1.0 - duty(d)),
+                None => d.watts,
+            })
+            .sum();
         let poe: f32 = self.devices.iter().filter(|d| !d.off && d.poe_draw > 0.0).map(|d| d.poe_draw * 0.6 * 1.1).sum();
         own + poe
     }
@@ -260,7 +290,14 @@ mod tests {
         let fibre = n.links.iter().find(|l| l.medium == Medium::Fiber).unwrap().id;
         n.links.iter_mut().find(|l| l.id == fibre).unwrap().unplugged = true;
         let out = n.exec(pc, "speedtest").lines.join(" ");
-        assert!(out.contains("Mobile 5G backup") || out.contains("150"), "{out}");
+        assert!(out.contains("Mobile 5G backup") || out.contains("300"), "{out}");
+        // Behind the mobile line's carrier-grade NAT, port forwarding can't work.
+        let nas_ip = n.dev(id(&n, "NAS 1")).unwrap().first_ip().unwrap();
+        n.dev_mut(r).unwrap().rules = format!("forward 443 {nas_ip}");
+        let wan = n.dev(r).unwrap().ifaces[1].ip.clone();
+        let from_outside = n.exec(inet, &format!("open {wan}")).lines.join(" ");
+        assert!(from_outside.contains("carrier-grade NAT"), "{from_outside}");
+        assert!(n.exec(r, "ipconfig").lines.join(" ").contains("100."));
         assert!(n.exec(pc, "ping example.com").lines.join(" ").contains(", 4 received"));
         assert!(n.check().iter().any(|i| i.link == Some(backup) && i.text.contains("mobile backup")));
         // Without a backup, the same failure takes the house offline.
@@ -320,7 +357,15 @@ mod tests {
     #[test]
     fn power_and_time_of_day() {
         let mut n = template_seeded("home", 1);
-        assert!(n.power_w() > 50.0 && n.yearly_kwh() > 400.0);
+        let kwh = n.yearly_kwh();
+        assert!(n.power_w() > 50.0 && (400.0..1500.0).contains(&kwh), "{kwh}");
+        // A TV is on for part of the day: far below 80 W around the clock (700 kWh), above standby alone.
+        let tv = id(&n, "Living room TV");
+        let one = |n: &Network| n.yearly_kwh();
+        n.dev_mut(tv).unwrap().off = true;
+        let tv_kwh = kwh - one(&n);
+        n.dev_mut(tv).unwrap().off = false;
+        assert!((50.0..400.0).contains(&tv_kwh), "{tv_kwh}");
         let tv = id(&n, "Living room TV");
         let l = n.links.iter().find(|l| l.a == tv || l.b == tv).unwrap().id;
         let evening = n.utilisation(&n.loads(), l);

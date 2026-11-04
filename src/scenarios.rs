@@ -566,7 +566,8 @@ fn campus(n: &mut Network) {
     for b in [b1, b2] {
         let d = n.dev_mut(b).unwrap();
         crate::wifi::RADIO_PRESETS.iter().find(|p| p.beam > 0.0).unwrap().apply(d);
-        (d.ssid, d.ch[1], d.poe_draw) = ("(bridge)".into(), 149, 8.0);
+        // Outdoor links must use 5 GHz channels 100–140 (up to 30 dBm with the dish).
+        (d.ssid, d.ch[1], d.poe_draw) = ("(bridge)".into(), 100, 8.0);
     }
     n.connect(dorm, b1, Medium::Cat6a).unwrap();
     n.connect(b1, b2, Medium::WiFi).unwrap();
@@ -649,7 +650,7 @@ mod tests {
         let mut n = template_seeded("nightmare", 9);
         let texts: Vec<String> = n.check().into_iter().map(|i| i.text).collect();
         let all = texts.join("\n");
-        for needle in ["broadcast storm", "both use 192.168.1.150", "hand out addresses in the same network", "WEP", "has no PoE", "EU limit", "disturbs it", "100 Mbit/s", "can't hear"] {
+        for needle in ["broadcast storm", "both use 192.168.1.150", "hand out addresses in the same network", "WEP", "has no PoE", "EU limit", "disturbs it", "100 Mbit/s", "doesn't make it back"] {
             assert!(all.contains(needle), "missing '{needle}' in:\n{all}");
         }
         // Everything stops while the loop rages...
