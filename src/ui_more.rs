@@ -71,6 +71,10 @@ impl App {
                 ui.label(RichText::new(format!("— if it fails, {n} device{} lose the network", if *n == 1 { "" } else { "s" })).color(col));
             });
         }
+        let bare: Vec<String> = self.net.no_ups().iter().map(|id| self.net.name(*id)).collect();
+        if !bare.is_empty() {
+            ui.label(RichText::new(trf("In a power cut these go down with no battery to bridge it (no UPS): {}", &[&bare.join(", ")])).small().color(pal().dim));
+        }
         if let Some(id) = pick {
             self.focus(id);
         }
@@ -85,6 +89,12 @@ impl App {
             ui.label(RichText::new(tr("Power use")).color(pal().dim));
             ui.label(format!("≈ {w:.0} W around the clock · {kwh:.0} kWh a year"));
             ui.end_row();
+            for (id, watts, h) in self.net.ups_runtime() {
+                ui.label(RichText::new(tr("Power cut")).color(pal().dim));
+                let time = if h >= 1.0 { format!("{}h {:02}min", h.floor(), ((h.fract()) * 60.0).round() as u32) } else { format!("{:.0} min", h * 60.0) };
+                ui.label(trf("{}'s UPS carries {} W for ≈ {}", &[&self.net.name(id), &format!("{watts:.0}"), &time])).on_hover_text(tr("Runtime on battery for this device and what it powers over its cables (PoE)"));
+                ui.end_row();
+            }
             ui.label(RichText::new(tr("Electricity")).color(pal().dim));
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut self.net.kwh_price).range(0.0..=2.0).speed(0.01).prefix(cur.clone()).suffix(" /kWh"));

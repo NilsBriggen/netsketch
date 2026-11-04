@@ -120,6 +120,10 @@ impl Product {
         d.tx = [0.0; 3];
         d.backhaul = self.backhaul;
         d.beam = if self.beam >= 360.0 { 0.0 } else { self.beam };
+        // Business access points hang on the ceiling.
+        if self.role == Role::Ap {
+            d.mount = 2.5;
+        }
         // Plug its cables in again afterwards (Network::replug): the ports changed.
         if !d.kind.foreign() {
             d.ports = self.ports.clone();

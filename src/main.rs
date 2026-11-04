@@ -405,6 +405,8 @@ struct App {
     autosave_last: String,
     wall_kind: WallKind,
     wall_start: Option<[f32; 2]>,
+    /// The cable whose route is being drawn on the map.
+    route: Option<u32>,
     walks: HashMap<u32, Walk>,
     /// Signal history per device: (time, dBm, hand-over happened).
     hist: HashMap<u32, Vec<(f64, f32, bool)>>,
@@ -483,6 +485,7 @@ impl App {
             autosave_last: String::new(),
             wall_kind: WallKind::Brick,
             wall_start: None,
+            route: None,
             walks: HashMap::new(),
             hist: HashMap::new(),
             last_sample: 0.0,
@@ -834,6 +837,15 @@ impl App {
                         self.net.storey_names.retain(|s| s.0 != f);
                         self.net.storey_names.push((f, name));
                     }
+                    let mut h = self.net.storey_h(f);
+                    ui.horizontal(|ui| {
+                        ui.label(tr("Height"));
+                        if ui.add(egui::DragValue::new(&mut h).range(2.0..=10.0).speed(0.05).max_decimals(2).suffix(" m")).on_hover_text(tr("Floor to floor, ceiling and slab included: the signal between storeys travels this far")).changed() {
+                            self.net.storey_heights.retain(|s| s.0 != f);
+                            self.net.storey_heights.push((f, h));
+                            self.heat_cache = None;
+                        }
+                    });
                     let below: Vec<crate::wifi::Wall> = self.net.walls.iter().filter(|w| w.floor == f - 1).cloned().collect();
                     if !below.is_empty() && ui.button(format!("{}  Copy walls from {}", ic::COPY, self.net.storey(f - 1))).on_hover_text(tr("Outer walls are usually the same on every storey")).clicked() {
                         self.snapshot();
@@ -1037,6 +1049,8 @@ impl App {
         let mut hovered_link = None;
         for l in &self.net.links {
             let (a, b) = (self.dev_pos(l.a), self.dev_pos(l.b));
+            // A drawn cable route: through its points.
+            let pts: Vec<Pos2> = std::iter::once(a).chain(l.path.iter().map(|p| self.to_screen(vec2(p[0], p[1])))).chain(std::iter::once(b)).collect();
             let selected = self.sel == Sel::Link(l.id);
             // Cables entirely on other storeys are faded like their devices and can't be picked.
             let elsewhere = [l.a, l.b].iter().all(|x| self.net.dev(*x).is_some_and(|d| d.floor != self.floor));
@@ -1047,7 +1061,7 @@ impl App {
                 }
                 p
             };
-            let near = !elsewhere && pointer.is_some_and(|p| dist_to_segment(p, a, b) < 6.0);
+            let near = !elsewhere && pointer.is_some_and(|p| pts.windows(2).any(|w| dist_to_segment(p, w[0], w[1]) < 6.0));
             if near {
                 hovered_link = Some(l.id);
             }
@@ -1067,16 +1081,17 @@ impl App {
             }
             let w = if selected { 3.5 } else if near { 2.8 } else { 2.0 } * z.max(0.6) + if storm { 2.0 } else { 0.0 };
             if selected {
-                painter.line_segment([a, b], Stroke::new(w + 6.0, pal().accent.gamma_multiply(0.2)));
+                painter.line(pts.clone(), Stroke::new(w + 6.0, pal().accent.gamma_multiply(0.2)));
             }
             if sig.is_some_and(|s| !s.alive()) {
-                painter.extend(Shape::dashed_line(&[a, b], Stroke::new(w, pal().red.gamma_multiply(0.7)), 2.0 * z, 6.0 * z));
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(w, pal().red.gamma_multiply(0.7)), 2.0 * z, 6.0 * z));
             } else if l.medium.wireless() || standby {
-                painter.extend(Shape::dashed_line(&[a, b], Stroke::new(w, col.gamma_multiply(0.85)), 6.0 * z, 5.0 * z));
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(w, col.gamma_multiply(0.85)), 6.0 * z, 5.0 * z));
             } else {
-                painter.line_segment([a, b], Stroke::new(w, col));
+                painter.line(pts.clone(), Stroke::new(w, col));
             }
-            let m = a + (b - a) * 0.5;
+            let k = (pts.len() - 1) / 2;
+            let m = pts[k] + (pts[k + 1] - pts[k]) * 0.5;
             if standby || storm {
                 let (t, c) = if storm {
                     (format!("{} {}", ic::FIRE, tr("loop!")), pal().red)
@@ -1107,6 +1122,12 @@ impl App {
             }
         }
 
+        // Thread/Zigbee gadgets: a dotted line to the hub they joined.
+        for d in self.net.devices.iter().filter(|d| d.on_802154() && d.floor == self.floor) {
+            if let Some((h, _)) = self.net.smart_hub(d) {
+                painter.extend(Shape::dotted_line(&[self.dev_pos(d.id), self.dev_pos(h)], kind_color(Kind::SmartHome).gamma_multiply(0.7), 7.0 * z.max(0.6), 1.3));
+            }
+        }
         // Directional antennas: draw their beam when selected or on the Wi-Fi map.
         for d in self.net.devices.iter().filter(|d| d.beam > 0.0 && d.floor == self.floor && (self.heat || self.sel == Sel::Dev(d.id))) {
             let c = self.dev_pos(d.id);
@@ -1127,7 +1148,9 @@ impl App {
         if self.tool == Tool::Measure && self.mode == Mode::Design {
             self.measure_tool(&resp, &painter, pointer);
         }
-        if self.tool == Tool::Wall && self.mode == Mode::Design {
+        if let Some(lid) = self.route.filter(|_| self.mode == Mode::Design) {
+            self.route_tool(lid, &resp, &painter, pointer);
+        } else if self.tool == Tool::Wall && self.mode == Mode::Design {
             self.wall_tool(&resp, &painter, pointer);
             if pointer.is_some() && hovered_link.is_none() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -1307,7 +1330,8 @@ impl App {
                 self.try_connect(ui.ctx(), from, to);
             }
         }
-        if let Some(id) = clicked_dev.filter(|_| !(self.tool == Tool::Wall && self.mode == Mode::Design)) {
+        let drawing = (self.tool == Tool::Wall || self.route.is_some()) && self.mode == Mode::Design;
+        if let Some(id) = clicked_dev.filter(|_| !drawing) {
             if self.tool == Tool::Connect && self.mode == Mode::Design {
                 match self.sel {
                     Sel::Dev(prev) if prev != id => {
@@ -1318,10 +1342,9 @@ impl App {
             } else {
                 self.sel = Sel::Dev(id);
             }
-        } else if resp.clicked() && !(self.tool == Tool::Wall && self.mode == Mode::Design) {
+        } else if resp.clicked() && !drawing {
             self.sel = hovered_link.map(Sel::Link).or(hovered_wall.filter(|_| self.mode == Mode::Design).map(Sel::Wall)).unwrap_or(Sel::None);
         }
-        let drawing = self.tool == Tool::Wall && self.mode == Mode::Design;
         // Right-click: a menu for the wall or cable under the pointer, or for the empty spot (the wall tool uses right-click to stop).
         if !drawing {
             if resp.secondary_clicked() {
@@ -1741,9 +1764,17 @@ impl App {
                 ui.label(tr("Storey"));
                 ui.add(egui::DragValue::new(&mut d.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
                 ui.end_row();
+                if kind.transmits() || kind.wifi_client() {
+                    ui.label(tr("Mounted at"));
+                    ui.add(egui::DragValue::new(&mut d.mount).range(0.0..=10.0).speed(0.05).max_decimals(2).suffix(" m above the floor")).on_hover_text(tr("Antenna height: desks and hands about 1 m, a ceiling access point 2.5 m"));
+                    ui.end_row();
+                }
                 if !kind.foreign() {
                     ui.label(tr("Power draw"));
                     ui.add(egui::DragValue::new(&mut d.watts).range(0.0..=2000.0).speed(0.5).suffix(" W average")).on_hover_text(tr("Average over a day, standby included. Devices powered over the cable count at their switch."));
+                    ui.end_row();
+                    ui.label(tr("UPS battery"));
+                    ui.add(egui::DragValue::new(&mut d.ups_wh).range(0.0..=5000.0).speed(1.0).suffix(" Wh")).on_hover_text(tr("Plugged into an uninterruptible power supply with this much battery (0 = none). It also carries what this device powers over its cables."));
                     ui.end_row();
                 }
             });
@@ -1810,6 +1841,16 @@ impl App {
             let l = self.net.links.iter().find(|l| l.id == id).unwrap();
             (self.net.dev(l.a).unwrap().kind, self.net.dev(l.b).unwrap().kind)
         };
+        // Other cables between the same two switches: they can be bundled (LACP).
+        let (parallel, next_lag) = {
+            let l = self.net.links.iter().find(|l| l.id == id).unwrap();
+            let p: Vec<u32> = self.net.links.iter().filter(|o| o.id != id && o.medium.cable() && ((o.a, o.b) == (l.a, l.b) || (o.a, o.b) == (l.b, l.a))).map(|o| o.id).collect();
+            (p, self.net.links.iter().map(|l| l.lag).max().unwrap_or(0).saturating_add(1))
+        };
+        let both_switches = kinds.0 == Kind::Switch && kinds.1 == Kind::Switch;
+        let mut route = false;
+        let mut bundle = None;
+        let design = self.mode == Mode::Design;
         let l = self.net.links.iter_mut().find(|l| l.id == id).unwrap();
         let old = l.clone();
         Self::header(ui, if l.medium == Medium::WiFi { ic::WIFI_HIGH } else { ic::LINK }, medium_color(l.medium), "Connection", &format!("{a}  {}  {b}", ic::ARROWS_LEFT_RIGHT));
@@ -1858,12 +1899,47 @@ impl App {
                 }
             });
             ui.end_row();
+            if l.medium.cable() && design {
+                ui.label(RichText::new(tr("Route")).color(pal().dim));
+                ui.horizontal(|ui| {
+                    if ui.small_button(format!("{}  {}", ic::PATH, tr("Draw its route"))).on_hover_text(tr("Click points along the walls where the cable runs; its length then follows the route")).clicked() {
+                        route = true;
+                    }
+                    if !l.path.is_empty() && ui.small_button(tr("Straight")).on_hover_text(tr("Forget the drawn route")).clicked() {
+                        l.path.clear();
+                    }
+                });
+                ui.end_row();
+            }
+            if l.medium.cable() && both_switches && !parallel.is_empty() {
+                ui.label(RichText::new(tr("Bundle")).color(pal().dim));
+                let mut on = l.lag != 0;
+                if ui.checkbox(&mut on, tr("Link aggregation (LACP)")).on_hover_text(tr("All cables between these two switches act as one faster link, and spanning tree doesn't see a loop. Both switches must support LACP.")).changed() {
+                    bundle = Some(on);
+                }
+                ui.end_row();
+            }
         });
+        if route {
+            self.snapshot();
+            self.net.links.iter_mut().find(|l| l.id == id).unwrap().path.clear();
+            self.route = Some(id);
+        }
+        if let Some(on) = bundle {
+            self.snapshot();
+            let lag = if on { next_lag } else { 0 };
+            for l in self.net.links.iter_mut().filter(|l| l.id == id || (on && parallel.contains(&l.id))) {
+                l.lag = lag;
+            }
+        }
         let l = self.net.links.iter().find(|l| l.id == id).unwrap().clone();
         let mesh_hint = if l.medium == Medium::Mesh { "Speaker mesh: slow in reality, but announced to spanning tree with a low cost — that's how speakers end up carrying the network." } else { "" };
         if Self::section_hint(ui, "How it performs", mesh_hint) {
             if let Some(s) = self.net.link_signal(&l) {
                 ui.label(RichText::new(format!("{:.0} dBm ({}) on {} {} MHz · {}×{} streams", s.rssi, s.quality(), s.band.label(), s.width, s.streams, s.streams)).color(quality_color(s.rssi)));
+                if let Some(b) = s.also {
+                    ui.label(RichText::new(trf("Multi-Link: {} carries data at the same time", &[&b.label()])).color(pal().green));
+                }
                 ui.label(RichText::new(format!("Answer back {:.0} dBm · {} wall(s) · airtime ×{:.1}", s.up, s.walls, s.contention)).color(pal().dim));
             }
             ui.label(format!("≈ {:.0} Mbit/s real throughput", self.net.link_rate(&l)));
@@ -2517,6 +2593,11 @@ fn shopping(n: &Network) -> (Vec<(String, usize, f32)>, f32) {
             items.push((what, ls.len(), len * m.price_per_m() + each));
         }
     }
+    let ups: Vec<f32> = n.devices.iter().map(|d| d.ups_wh).filter(|w| *w > 0.0).collect();
+    if !ups.is_empty() {
+        // shortcut: a rough street price from the battery size; one UPS per device that has one set.
+        items.push(("UPS".to_string(), ups.len(), ups.iter().map(|w| 60.0 + 0.5 * w).sum()));
+    }
     let total = items.iter().map(|i| i.2).sum();
     (items, total)
 }
@@ -2639,7 +2720,9 @@ impl eframe::App for App {
             self.connect_from = None;
             self.wall_start = None;
             self.measure = None;
-            self.sel = Sel::None;
+            if self.route.take().is_none() {
+                self.sel = Sel::None;
+            }
         }
         // Planning and problem checks use long-run averages; only Simulate runs live variation.
         let live = self.mode == Mode::Simulate && self.live_var;

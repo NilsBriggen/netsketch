@@ -361,6 +361,48 @@ impl Security {
     }
 }
 
+/// How a smart-home gadget talks: Wi-Fi like a laptop, or a low-power 802.15.4 mesh on 2.4 GHz through a hub.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum SmartLink {
+    #[default]
+    WiFi,
+    /// IPv6 mesh (Matter over Thread) through a Thread border router.
+    Thread,
+    /// Its own non-IP network through a Zigbee hub.
+    Zigbee,
+}
+
+impl SmartLink {
+    pub const ALL: [SmartLink; 3] = [SmartLink::WiFi, SmartLink::Thread, SmartLink::Zigbee];
+    pub fn label(self) -> &'static str {
+        match self {
+            SmartLink::WiFi => "Wi-Fi",
+            SmartLink::Thread => "Thread",
+            SmartLink::Zigbee => "Zigbee",
+        }
+    }
+}
+
+/// Which traffic a full link serves first (Ord: high < normal < low).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum Qos {
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
+impl Qos {
+    pub const ALL: [Qos; 3] = [Qos::High, Qos::Normal, Qos::Low];
+    pub fn label(self) -> &'static str {
+        match self {
+            Qos::High => "High",
+            Qos::Normal => "Normal",
+            Qos::Low => "Low",
+        }
+    }
+}
+
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Services {
@@ -488,6 +530,26 @@ pub struct Device {
     /// Antenna: beam width in degrees (0 = all around) and where it points (degrees, 0 = right, 90 = down).
     pub beam: f32,
     pub aim: f32,
+    /// Height (m) of the antenna above its storey's floor: desks and hands about 1 m, ceiling access points 2.5 m.
+    pub mount: f32,
+    /// Wi-Fi 7 Multi-Link Operation: sends on two bands at once.
+    pub mlo: bool,
+    /// Smart-home gadgets: Wi-Fi, Thread or Zigbee.
+    pub smart: SmartLink,
+    /// Thread border router / Zigbee hub (home routers, speakers and smart-home hubs), on 802.15.4 channel `zb_ch` (11–26).
+    pub hub: bool,
+    pub zb_ch: u8,
+    /// Home router: WireGuard VPN server for remote access, reached at the dynamic DNS name `ddns`.
+    pub vpn: bool,
+    pub ddns: String,
+    /// Home router: UPnP lets consoles and games open ports by themselves.
+    pub upnp: bool,
+    /// Home router: its DNS answers 0.0.0.0 for ad and tracker names.
+    pub adblock: bool,
+    /// Hosts: which traffic goes first when a link is full.
+    pub qos: Qos,
+    /// Battery (Wh) of the UPS this device is plugged into; 0 = none.
+    pub ups_wh: f32,
 }
 
 impl Default for Device {
@@ -548,6 +610,17 @@ impl Default for Device {
             watts: 0.0,
             beam: 0.0,
             aim: 0.0,
+            mount: 1.0,
+            mlo: false,
+            smart: SmartLink::WiFi,
+            hub: false,
+            zb_ch: 15,
+            vpn: false,
+            ddns: String::new(),
+            upnp: false,
+            adblock: false,
+            qos: Qos::Normal,
+            ups_wh: 0.0,
         }
     }
 }
@@ -568,6 +641,10 @@ impl Device {
     }
     pub fn first_ip(&self) -> Option<Ipv4Addr> {
         self.ifaces.iter().find_map(|f| f.addr().map(|a| a.0))
+    }
+    /// A Thread or Zigbee gadget: no Wi-Fi, no DHCP; it talks to a hub over 802.15.4.
+    pub fn on_802154(&self) -> bool {
+        self.kind == Kind::SmartHome && self.smart != SmartLink::WiFi
     }
     pub fn has_ip(&self, ip: Ipv4Addr) -> bool {
         self.ifaces.iter().any(|f| f.addr().map(|a| a.0) == Some(ip))
@@ -596,6 +673,12 @@ pub struct Link {
     /// Powerline links: the adapter kit (catalog::powerline), empty = a typical one.
     #[serde(default)]
     pub kit: String,
+    /// The way the cable runs (map points between its ends); empty = straight along the walls.
+    #[serde(default)]
+    pub path: Vec<[f32; 2]>,
+    /// Link aggregation (LACP) group: cables between the same two switches with the same non-zero number are one bundle.
+    #[serde(default)]
+    pub lag: u16,
 }
 
 impl Link {
@@ -745,6 +828,8 @@ pub struct Network {
     /// Room names written on the map, and names people gave their storeys ("Loft").
     pub labels: Vec<RoomLabel>,
     pub storey_names: Vec<(i8, String)>,
+    /// Storey heights (m, floor to floor) where they differ from 2.8 m.
+    pub storey_heights: Vec<(i8, f32)>,
     /// Garden, terrace or yard: places outside the walls where Wi-Fi should reach too.
     pub outdoor: Vec<crate::plan::Outdoor>,
     /// Electricity price per kWh, for the yearly running cost.
@@ -782,6 +867,7 @@ impl Default for Network {
             measured: vec![],
             labels: vec![],
             storey_names: vec![],
+            storey_heights: vec![],
             outdoor: vec![],
             kwh_price: 0.30,
             hour: 20.5,
@@ -824,6 +910,16 @@ impl Network {
         self.storey_names.iter().find(|s| s.0 == f && !s.1.trim().is_empty()).map(|s| s.1.clone()).unwrap_or_else(|| floor_name(f))
     }
 
+    /// A storey's height (m, floor to floor).
+    pub fn storey_h(&self, f: i8) -> f32 {
+        self.storey_heights.iter().find(|s| s.0 == f).map_or(2.8, |s| s.1)
+    }
+
+    /// Height (m) of a storey's floor above the ground floor's.
+    pub fn floor_z(&self, f: i8) -> f32 {
+        if f >= 0 { (0..f).map(|s| self.storey_h(s)).sum() } else { -(f..0).map(|s| self.storey_h(s)).sum::<f32>() }
+    }
+
     pub fn add_label(&mut self, pos: [f32; 2], floor: i8, text: &str) -> u32 {
         self.next_id += 1;
         self.labels.push(RoomLabel { id: self.next_id, pos, floor, text: text.into() });
@@ -848,6 +944,17 @@ impl Network {
         for d in self.devices.iter_mut() {
             crate::wifi::normalize_radio(d);
             d.floor = d.floor.clamp(-3, 20);
+            d.mount = if d.mount.is_finite() { d.mount.clamp(0.0, 10.0) } else { 1.0 };
+            d.ups_wh = if d.ups_wh.is_finite() { d.ups_wh.clamp(0.0, 100_000.0) } else { 0.0 };
+            d.zb_ch = d.zb_ch.clamp(11, 26);
+        }
+        self.storey_heights.retain(|s| s.1.is_finite());
+        for s in self.storey_heights.iter_mut() {
+            s.1 = s.1.clamp(2.0, 10.0);
+        }
+        for l in self.links.iter_mut() {
+            l.path.retain(|p| p.iter().all(|v| v.is_finite()));
+            l.path.truncate(200);
         }
         // Storeys out of range or repeated ids in a damaged file would trip up the map.
         for w in self.walls.iter_mut() {
@@ -1080,11 +1187,13 @@ impl Network {
         if a == b {
             return Err("A device can't be connected to itself.".into());
         }
-        // A mobile backup line may run next to the main internet line; anything else only once.
-        if self.links.iter().any(|l| ((l.a == a && l.b == b) || (l.a == b && l.b == a)) && (medium != Medium::Cellular || l.medium == Medium::Cellular)) {
+        let (ka, kb) = (self.dev(a).ok_or("gone")?.kind, self.dev(b).ok_or("gone")?.kind);
+        // A mobile backup line may run next to the main internet line, and switches may take several cables
+        // (a backup, or a bundle); anything else only once.
+        let spare = ka == Kind::Switch && kb == Kind::Switch && medium.cable();
+        if self.links.iter().any(|l| ((l.a == a && l.b == b) || (l.a == b && l.b == a)) && (medium != Medium::Cellular || l.medium == Medium::Cellular) && !(spare && l.medium.cable())) {
             return Err("These two are already connected.".into());
         }
-        let (ka, kb) = (self.dev(a).ok_or("gone")?.kind, self.dev(b).ok_or("gone")?.kind);
         if ka == Kind::Neighbor || kb == Kind::Neighbor {
             return Err("That's the neighbours' network — it only shares the air with yours. Place it to see its interference.".into());
         }
@@ -1106,7 +1215,7 @@ impl Network {
         let b_if = self.bind_iface(b, ka);
         self.next_id += 1;
         let id = self.next_id;
-        self.links.push(Link { id, a, a_if, b, b_if, medium, length_m: None, unplugged: false, a_port: None, b_port: None, kit: String::new() });
+        self.links.push(Link { id, a, a_if, b, b_if, medium, length_m: None, unplugged: false, a_port: None, b_port: None, kit: String::new(), path: vec![], lag: 0 });
         Ok(id)
     }
 
@@ -1158,8 +1267,13 @@ impl Network {
         match (self.dev(l.a), self.dev(l.b)) {
             (Some(a), Some(b)) => {
                 let (dx, dy) = ((a.pos[0] - b.pos[0]).abs(), (a.pos[1] - b.pos[1]).abs());
-                let storeys = (a.floor as f32 - b.floor as f32).abs() * 3.0;
-                if l.medium.cable() || l.medium == Medium::Powerline {
+                let storeys = (self.floor_z(a.floor) - self.floor_z(b.floor)).abs();
+                if l.medium.cable() && !l.path.is_empty() {
+                    // A drawn route: along its points, up through floors, plus a metre at each end.
+                    let pts: Vec<[f32; 2]> = std::iter::once(a.pos).chain(l.path.iter().copied()).chain(std::iter::once(b.pos)).collect();
+                    let run: f32 = pts.windows(2).map(|w| ((w[0][0] - w[1][0]).powi(2) + (w[0][1] - w[1][1]).powi(2)).sqrt()).sum();
+                    (run / PX_PER_M + storeys + 2.0).round().max(1.0)
+                } else if l.medium.cable() || l.medium == Medium::Powerline {
                     // Cables run along walls and ceilings at right angles, up through floors, plus a metre at each end.
                     ((dx + dy) / PX_PER_M + storeys + 2.0).round().max(1.0)
                 } else {
@@ -1356,7 +1470,7 @@ impl Network {
             // Unsolicited traffic from outside: dropped unless a port forwarding rule passes it on to a device inside.
             if d.kind == Kind::HomeRouter && came_in == Some(1) && !reply && d.ifaces.get(1).and_then(|f| f.addr()).map(|a| a.0) == Some(dst) {
                 let shared = self.cgnat(d);
-                match (self.forward_of(d, port), shared) {
+                match (self.forward_of(d, port, proto), shared) {
                     (_, Some(cg)) => {
                         t.error = format!("{} is on the mobile line, behind the provider's carrier-grade NAT: it only has the shared address {cg}, so nothing from the internet reaches it and port forwarding can't work. IPv6 or a VPN/tunnel service gets around it.", d.name);
                         t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Dropped at the provider's carrier-grade NAT: {} only has the shared address {cg}", d.name), dev: cur });
@@ -1437,7 +1551,7 @@ impl Network {
                     t.error = format!("{}: the guest network is isolated from the home network — guests only get the internet.", d.name);
                     return t;
                 }
-                if let Some((false, rule)) = self.rule_verdict(d, src, dst, port) {
+                if let Some((false, rule)) = self.rule_verdict(d, src, dst, port, proto) {
                     t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("Dropped by {}'s firewall rule '{rule}'", d.name), dev: cur });
                     t.error = format!("Blocked by {}'s firewall rule '{rule}'.", d.name);
                     return t;
@@ -1529,8 +1643,8 @@ impl Network {
         for _ in 0..4 {
             let s = self.dev(server)?;
             if let Some(site) = self.blocked_by(s, &name) {
-                out.lines.push(format!("Blocked: {name} is on {}'s filter list ({site}).", s.name));
-                out.log.push(Log { src: s.name.clone(), dst: src.to_string(), proto: "DNS", layer: "Application", info: format!("{name} blocked by the content filter"), dev: server });
+                out.lines.push(format!("Blocked: {name} is on {}'s filter list ({site}); it answers 0.0.0.0, an address that goes nowhere.", s.name));
+                out.log.push(Log { src: s.name.clone(), dst: src.to_string(), proto: "DNS", layer: "Application", info: format!("{name} blocked by the content filter: answer 0.0.0.0"), dev: server });
                 return None;
             }
             if let Some(ip) = self.answer(s, &name) {
@@ -1870,7 +1984,8 @@ impl Network {
         }
         for d in &self.devices {
             let id = Some(d.id);
-            if d.kind.foreign() {
+            // Thread and Zigbee gadgets join their hub by radio instead (issues.rs checks that).
+            if d.kind.foreign() || d.on_802154() {
                 continue;
             }
             if !self.connected(d.id) {
@@ -2430,16 +2545,23 @@ mod tests {
     #[test]
     fn damaged_plan_files_are_repaired_not_fatal() {
         let mut n = template("home");
-        n.links.push(Link { id: 900, a: 9999, a_if: 0, b: 1, b_if: 0, medium: Medium::Cat6, length_m: None, unplugged: false, a_port: None, b_port: None, kit: String::new() });
+        n.links.push(Link { id: 900, a: 9999, a_if: 0, b: 1, b_if: 0, medium: Medium::Cat6, length_m: None, unplugged: false, a_port: None, b_port: None, kit: String::new(), path: vec![], lag: 0 });
         let r = n.devices.iter().position(|d| d.kind == Kind::HomeRouter).unwrap();
         n.devices[r].ifaces.truncate(1);
         n.devices[r].poe_class = 77;
         let pc = n.devices.iter().position(|d| d.kind == Kind::Desktop).unwrap();
         n.devices[pc].ifaces.clear();
+        // Heights, batteries and channels far out of range.
+        n.devices[r].mount = 1e30;
+        n.devices[r].ups_wh = -1e30;
+        n.devices[r].zb_ch = 200;
+        n.storey_heights = vec![(0, 1e30), (1, -5.0)];
         let json = serde_json::to_string(&n).unwrap();
         let mut back: Network = serde_json::from_str(&json).unwrap();
         back.sanitize();
         assert!(back.links.iter().all(|l| l.a != 9999));
+        let d = &back.devices[r];
+        assert!(d.mount == 10.0 && d.ups_wh == 0.0 && d.zb_ch == 26 && back.floor_z(2) <= 20.0 && back.floor_z(2) >= 4.0);
         let _ = back.check();
         let _ = back.stp();
         let _ = back.loads();

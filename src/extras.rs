@@ -1,6 +1,6 @@
-//! Planning extras: everyday app traffic, Power over Ethernet, firewall rules, IPv6, the guest network,
+//! Planning extras: everyday app traffic with QoS priorities, Power over Ethernet, firewall rules, IPv6, the guest network,
 //! real measurements for calibration, floor plan pictures and a library of device models.
-use crate::net::{parse_ip, same_net, Device, Kind, Medium, Network, Outcome, SITES};
+use crate::net::{parse_ip, same_net, Device, Kind, Medium, Network, Outcome, Qos, SITES};
 use crate::wifi::Band;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -82,6 +82,8 @@ pub struct Load {
     pub per_link: HashMap<u32, (f32, f32)>,
     /// Who causes load on each link.
     pub who: HashMap<u32, Vec<u32>>,
+    /// The same per link and QoS priority of the device that causes it.
+    pub per_class: HashMap<(u32, Qos), (f32, f32)>,
 }
 
 impl Network {
@@ -119,6 +121,7 @@ impl Network {
         let busy: f32 = flows.iter().filter(|f| f.4 && f.1 != Use::Download).map(|f| f.1.demand().0 * f.2).sum();
         let downloads: f32 = flows.iter().filter(|f| f.4 && f.1 == Use::Download).map(|f| f.2).sum();
         for (id, u, act, path, net) in flows {
+            let qos = self.dev(id).map_or(Qos::Normal, |d| d.qos);
             let (mut down, up) = u.demand();
             if let (Use::Download, true, Some(l)) = (u, net, line) {
                 down = (l - busy).max(l * 0.1) / downloads.max(1.0);
@@ -128,14 +131,10 @@ impl Network {
                 for w in path.windows(2) {
                     if let Some(l) = self.link_between(w[0], w[1]) {
                         // Direction "a→b" vs "b→a" for full-duplex cables.
-                        let fwd = l.a == w[0];
-                        let e = out.per_link.entry(l.id).or_default();
-                        if fwd {
-                            e.0 += up;
-                            e.1 += down;
-                        } else {
-                            e.0 += down;
-                            e.1 += up;
+                        let (to_a, to_b) = if l.a == w[0] { (up, down) } else { (down, up) };
+                        for e in [out.per_link.entry(l.id).or_default(), out.per_class.entry((l.id, qos)).or_default()] {
+                            e.0 += to_a;
+                            e.1 += to_b;
                         }
                         out.who.entry(l.id).or_default().push(id);
                     }
@@ -147,8 +146,18 @@ impl Network {
 
     /// How full a link is (0..): radio links share the air both ways, cables are full duplex.
     pub fn utilisation(&self, load: &Load, link: u32) -> f32 {
-        let Some(l) = self.links.iter().find(|l| l.id == link) else { return 0.0 };
-        let Some(&(a, b)) = load.per_link.get(&link) else { return 0.0 };
+        self.fill(link, load.per_link.get(&link).copied())
+    }
+
+    /// How full a link looks to traffic of priority `q`: a full link serves higher priorities first, so only
+    /// traffic of the same or a higher priority is in its way (with nobody prioritised: everyone's).
+    pub fn utilisation_for(&self, load: &Load, link: u32, q: Qos) -> f32 {
+        let ahead = Qos::ALL.iter().filter(|c| **c <= q).filter_map(|c| load.per_class.get(&(link, *c))).fold((0.0, 0.0), |s, x| (s.0 + x.0, s.1 + x.1));
+        self.fill(link, Some(ahead))
+    }
+
+    fn fill(&self, link: u32, load: Option<(f32, f32)>) -> f32 {
+        let (Some(l), Some((a, b))) = (self.links.iter().find(|l| l.id == link), load) else { return 0.0 };
         let rate = self.link_rate(l).max(0.1);
         if l.medium.wireless() { (a + b) / rate } else { a.max(b) / rate }
     }
@@ -162,12 +171,13 @@ impl Network {
         links.iter().map(|l| self.utilisation(load, l.id) * if modern(l) { packing } else { 1.0 }).sum()
     }
 
-    /// Extra delay (ms) from full queues along a path ("bufferbloat").
+    /// Extra delay (ms) from full queues along a path ("bufferbloat"), for the QoS priority of the device it starts at.
     pub fn queue_ms(&self, load: &Load, path: &[u32]) -> f32 {
+        let q = path.first().and_then(|id| self.dev(*id)).map_or(Qos::Normal, |d| d.qos);
         path.windows(2)
             .filter_map(|w| self.link_between(w[0], w[1]))
             .map(|l| {
-                let u = self.utilisation(load, l.id).min(0.98);
+                let u = self.utilisation_for(load, l.id, q).min(0.98);
                 if self.sqm_on(l) {
                     // SQM keeps the queue short even when the line is full.
                     0.5 + 2.0 * u
@@ -237,8 +247,40 @@ fn private(ip: Ipv4Addr) -> bool {
     ip.is_private() || ip.is_link_local()
 }
 
+/// Does a rule's port ("443", "any") or range ("50000-50100") cover `port`?
+fn port_in(spec: &str, port: u16) -> bool {
+    match spec.split_once('-') {
+        Some((a, b)) => a.parse::<u16>().ok().zip(b.parse::<u16>().ok()).is_some_and(|(a, b)| (a..=b).contains(&port)),
+        None => spec == "any" || spec.parse() == Ok(port),
+    }
+}
+
+/// How rules name a simulated packet's transport protocol (ping has none).
+fn l4(proto: &str) -> &'static str {
+    match proto {
+        "TCP" | "HTTP" | "HTTPS" => "tcp",
+        "UDP" | "DNS" | "DHCP" | "QUIC" => "udp",
+        _ => "",
+    }
+}
+
+/// Is `hour` inside a time window like "22:00-06:30" (it may run past midnight)? None: not a time window.
+fn in_window(spec: &str, hour: f32) -> Option<bool> {
+    let t = |s: &str| -> Option<f32> {
+        let (h, m) = s.split_once(':')?;
+        Some(h.parse::<f32>().ok()? + m.parse::<f32>().ok()? / 60.0)
+    };
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (t(a)?, t(b)?);
+    Some(if a <= b { (a..b).contains(&hour) } else { hour >= a || hour < b })
+}
+
+/// Ports games and consoles ask a router to open over UPnP (Xbox, PlayStation, Steam).
+// shortcut: the usual game ports go to the first gaming device; real games ask for exactly the ports they need.
+const UPNP_PORTS: [(u16, u16); 3] = [(3074, 3074), (3478, 3480), (27015, 27030)];
+
 impl Network {
-    /// Does `what` ("any", "lan", "guest", "internet", an address or a network/prefix) cover `ip`?
+    /// Does `what` ("any", "lan", "guest", "internet", an address, a network/prefix or a device's name) cover `ip`?
     fn matches(&self, what: &str, ip: Ipv4Addr) -> bool {
         match what {
             "any" | "*" => true,
@@ -247,7 +289,7 @@ impl Network {
             "internet" | "wan" => !private(ip),
             w => match w.split_once('/') {
                 Some((n, p)) => parse_ip(n).zip(p.parse().ok()).is_some_and(|(n, p)| same_net(n, ip, p)),
-                None => parse_ip(w) == Some(ip),
+                None => parse_ip(w).map_or_else(|| self.devices.iter().any(|d| (d.hostname() == w || d.name.eq_ignore_ascii_case(w)) && d.has_ip(ip)), |a| a == ip),
             },
         }
     }
@@ -257,7 +299,8 @@ impl Network {
     }
 
     /// First matching allow/deny line on a router. None = no rule matched (allowed).
-    pub fn rule_verdict(&self, d: &Device, src: Ipv4Addr, dst: Ipv4Addr, port: u16) -> Option<(bool, String)> {
+    /// A line: allow|deny <from> <to> [port or range] [tcp|udp] [time window like 22:00-06:30, from the plan's hour].
+    pub fn rule_verdict(&self, d: &Device, src: Ipv4Addr, dst: Ipv4Addr, port: u16, proto: &str) -> Option<(bool, String)> {
         for line in d.rules.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let w: Vec<&str> = line.split_whitespace().collect();
             let allow = match w.first() {
@@ -266,19 +309,50 @@ impl Network {
                 _ => continue,
             };
             let (from, to) = (w.get(1).copied().unwrap_or("any"), w.get(2).copied().unwrap_or("any"));
-            let port_ok = w.get(3).is_none_or(|p| *p == "any" || p.parse() == Ok(port));
-            if self.matches(from, src) && self.matches(to, dst) && port_ok {
+            let extra_ok = w.iter().skip(3).all(|t| match *t {
+                "tcp" | "udp" => *t == l4(proto),
+                t => in_window(t, self.hour).unwrap_or_else(|| port_in(t, port)),
+            });
+            if self.matches(from, src) && self.matches(to, dst) && extra_ok {
                 return Some((allow, line.to_string()));
             }
         }
         None
     }
 
-    /// Port forwarding on a home router: "forward 443 192.168.1.10".
-    pub fn forward_of(&self, d: &Device, port: u16) -> Option<Ipv4Addr> {
-        d.rules.lines().find_map(|l| {
+    /// Port forwarding on a home router: "forward 443 192.168.1.10", "forward 50000-50100 192.168.1.20 udp";
+    /// with UPnP on, games open their usual ports themselves.
+    pub fn forward_of(&self, d: &Device, port: u16, proto: &str) -> Option<Ipv4Addr> {
+        let rule = d.rules.lines().find_map(|l| {
             let w: Vec<&str> = l.split_whitespace().collect();
-            (w.first() == Some(&"forward") && w.get(1).and_then(|p| p.parse().ok()) == Some(port)).then(|| w.get(2).and_then(|i| parse_ip(i))).flatten()
+            let proto_ok = w.get(3).is_none_or(|p| *p == l4(proto));
+            (w.first() == Some(&"forward") && w.get(1).is_some_and(|p| port_in(p, port)) && proto_ok).then(|| w.get(2).and_then(|i| parse_ip(i))).flatten()
+        });
+        let gamer = || self.devices.iter().find(|g| (g.kind == Kind::Console || g.uses.contains(&Use::Gaming)) && !g.off).and_then(|g| g.first_ip());
+        rule.or_else(|| (d.upnp && UPNP_PORTS.iter().any(|r| (r.0..=r.1).contains(&port))).then(gamer).flatten())
+    }
+}
+
+// ---------- remote access ----------
+
+impl Network {
+    /// Whether the home router's WireGuard VPN can be reached from outside, and why. None = the VPN is off.
+    pub fn remote_access(&self, r: &Device) -> Option<(bool, String)> {
+        if r.kind != Kind::HomeRouter || !r.vpn {
+            return None;
+        }
+        let name = if r.ddns.trim().is_empty() { "the router's address".to_string() } else { r.ddns.trim().to_string() };
+        let v6 = self.v6_prefix(r).is_some();
+        let wan = r.ifaces.get(1).and_then(|f| f.addr()).map(|a| a.0);
+        Some(match (self.cgnat(r), wan) {
+            (Some(cg), _) if v6 => (true, format!("Works over IPv6 only. On the mobile line the router shares the IPv4 address {cg} with other customers (carrier-grade NAT), but {name} also points at its public IPv6 address. From a network without IPv6 it fails.")),
+            (Some(cg), _) => (false, format!("Doesn't work. On the mobile line the router only has the shared address {cg} (carrier-grade NAT), so nothing from outside reaches it. Turn on IPv6, or use a relay service.")),
+            (None, Some(ip)) if private(ip) => (false, format!("Doesn't work yet: {} sits behind another router ({ip} is a private address). Forward UDP port 51820 on the router in front, or run the VPN there.", r.name)),
+            (None, Some(ip)) => (
+                true,
+                format!("Works: {name} leads to the public address {ip}, WireGuard listens on UDP port 51820, and phones and laptops are inside the home network from anywhere.{}", if r.ddns.trim().is_empty() { " Set a dynamic DNS name: the provider may change the address." } else { "" }),
+            ),
+            (None, None) => (false, format!("Doesn't work: {} has no internet address yet.", r.name)),
         })
     }
 }
@@ -356,7 +430,7 @@ impl Network {
                     let Some(r) = self.devices.iter().find(|r| r.kind == Kind::HomeRouter && r.ipv6 && self.v6_of(t).is_some_and(|a| a.starts_with(&self.v6_prefix(r).unwrap_or_default()))) else {
                         return;
                     };
-                    let allowed = self.rule_verdict(r, Ipv4Addr::new(198, 51, 100, 99), t.first_ip().unwrap_or(Ipv4Addr::UNSPECIFIED), 0).is_some_and(|v| v.0);
+                    let allowed = self.rule_verdict(r, Ipv4Addr::new(198, 51, 100, 99), t.first_ip().unwrap_or(Ipv4Addr::UNSPECIFIED), 0, "ICMP").is_some_and(|v| v.0);
                     o.lines.push(format!("PING {v6} from {mine}"));
                     if !allowed {
                         o.lines.push(format!("Blocked by {}'s firewall: with IPv6 every device has a public address, so the router drops unsolicited traffic from the internet. Add 'allow internet {} any' to open it.", r.name, t.first_ip().map(|i| i.to_string()).unwrap_or_default()));
@@ -576,6 +650,23 @@ mod tests {
     }
 
     #[test]
+    fn high_priority_goes_first_on_a_full_line() {
+        let mut n = template_seeded("home", 3);
+        for d in n.devices.iter_mut().filter(|d| d.kind.is_host()) {
+            d.uses.push(Use::Download);
+        }
+        let pc = id(&n, "Office PC");
+        let path = n.send(pc, n.dev(pc).unwrap().first_ip().unwrap(), crate::net::site_ip(0), "TCP", 443, None).path;
+        let normal = n.queue_ms(&n.loads(), &path);
+        let speed = |n: &mut Network| n.exec(pc, "speedtest").lines.iter().find_map(|l| l.trim().strip_prefix("Download ≈ ").and_then(|r| r.split(' ').next()?.parse::<f32>().ok())).unwrap();
+        let before = speed(&mut n);
+        n.dev_mut(pc).unwrap().qos = Qos::High;
+        assert!(n.queue_ms(&n.loads(), &path) < normal / 3.0, "{normal}");
+        assert!(speed(&mut n) > before * 1.5, "{before}");
+        assert!(n.exec(pc, "speedtest").lines.join(" ").contains("priority"));
+    }
+
+    #[test]
     fn sqm_and_microwaves() {
         let mut n = template_seeded("home", 3);
         for d in n.devices.iter_mut().filter(|d| d.kind.is_host()) {
@@ -659,6 +750,54 @@ mod tests {
         // IPv6: outbound fine, inbound blocked until a rule allows it.
         assert!(n.exec(pc, "ping6 example.com").lines.join(" ").contains("no NAT"));
         assert!(n.exec(inet, "ping6 office-pc").lines.join(" ").contains("Blocked"));
+    }
+
+    #[test]
+    fn port_ranges_protocols_schedules_upnp_and_ad_blocking() {
+        let mut n = template_seeded("home", 5);
+        let (r, pc, nas) = (id(&n, "Home router"), id(&n, "Office PC"), id(&n, "NAS 1"));
+        let nas_ip = n.dev(nas).unwrap().first_ip().unwrap();
+        let wan = n.dev(r).unwrap().ifaces[1].addr().unwrap().0;
+        let inet = n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id;
+        let from = n.dev(inet).unwrap().first_ip().unwrap();
+        let reach = |n: &Network, port: u16, proto: &'static str| n.send(inet, from, wan, proto, port, None).dst_dev;
+        n.dev_mut(r).unwrap().rules = format!("forward 50000-50100 {nas_ip} udp");
+        assert_eq!(reach(&n, 50050, "UDP"), Some(nas));
+        assert_eq!(reach(&n, 50050, "TCP"), None);
+        assert_eq!(reach(&n, 50101, "UDP"), None);
+        // UPnP: the game opens its own port.
+        n.dev_mut(r).unwrap().rules.clear();
+        n.dev_mut(pc).unwrap().uses.push(Use::Gaming);
+        assert_eq!(reach(&n, 3074, "UDP"), None);
+        n.dev_mut(r).unwrap().upnp = true;
+        assert_eq!(reach(&n, 3074, "UDP"), Some(pc));
+        assert!(n.check().iter().any(|i| i.text.contains("UPnP")));
+        // Bedtime for the office PC: no internet from 22:00 to 06:30.
+        n.dev_mut(r).unwrap().rules = "deny office-pc internet 22:00-06:30".into();
+        n.hour = 23.0;
+        assert!(n.exec(pc, "ping example.com").lines.join(" ").contains("firewall"));
+        n.hour = 12.0;
+        assert!(n.exec(pc, "ping example.com").lines.join(" ").contains(", 4 received"));
+        // The ad blocker answers 0.0.0.0 for tracker names, and only for those.
+        n.dev_mut(r).unwrap().adblock = true;
+        assert!(n.exec(pc, "nslookup ads.doubleclick.net").lines.join(" ").contains("0.0.0.0"));
+        assert!(!n.exec(pc, "nslookup example.com").lines.join(" ").contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn remote_access_needs_a_reachable_address() {
+        let mut n = template_seeded("home", 1);
+        let r = id(&n, "Home router");
+        assert!(n.remote_access(n.dev(r).unwrap()).is_none());
+        n.dev_mut(r).unwrap().vpn = true;
+        assert!(n.remote_access(n.dev(r).unwrap()).unwrap().0);
+        // On the mobile line: carrier-grade NAT; only IPv6 gets in.
+        let inet = n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id;
+        n.links.iter_mut().find(|l| [l.a, l.b].contains(&inet) && [l.a, l.b].contains(&r)).unwrap().medium = Medium::Cellular;
+        assert!(n.remote_access(n.dev(r).unwrap()).unwrap().1.contains("IPv6 only"));
+        n.dev_mut(r).unwrap().ipv6 = false;
+        assert!(!n.remote_access(n.dev(r).unwrap()).unwrap().0);
+        assert!(n.check().iter().any(|i| i.text.contains("Remote access")));
     }
 
     #[test]

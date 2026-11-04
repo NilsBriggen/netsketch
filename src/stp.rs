@@ -1,5 +1,5 @@
 //! Spanning tree (802.1D/RSTP outcome): root election, the tree, blocked backup links, loops nobody blocks
-//! and how long it takes to settle.
+//! and how long it takes to settle; link aggregation (LACP bundles count as one link).
 use crate::net::{Kind, Network};
 use std::collections::{HashMap, HashSet};
 
@@ -17,6 +17,14 @@ pub struct Stp {
 }
 
 impl Network {
+    /// The working cables bundled with `l` (LACP: same group number, same two ends), `l` included.
+    pub fn bundle<'a>(&'a self, l: &'a crate::net::Link) -> Vec<&'a crate::net::Link> {
+        if l.lag == 0 {
+            return vec![l];
+        }
+        self.links.iter().filter(|o| o.id == l.id || (o.lag == l.lag && o.medium.cable() && self.link_ok(o) && ((o.a, o.b) == (l.a, l.b) || (o.a, o.b) == (l.b, l.a)))).collect()
+    }
+
     /// Devices that forward frames between their ports (home routers on their LAN side).
     fn bridge_ends(&self, id: u32, iface: usize) -> bool {
         self.dev(id).is_some_and(|d| d.kind.bridges() || (d.kind == Kind::HomeRouter && iface == 0))
@@ -79,7 +87,9 @@ impl Network {
             .links
             .iter()
             .filter(|l| self.bridge_ends(l.a, l.a_if) && self.bridge_ends(l.b, l.b_if) && self.link_ok(l) && self.link_up(l))
-            .map(|l| (l.id, l.a, l.b, self.port_speed(l)))
+            // A bundle is one link to spanning tree (its first cable stands for all, at their summed speed).
+            .filter(|l| self.bundle(l).iter().all(|o| o.id >= l.id))
+            .map(|l| (l.id, l.a, l.b, self.bundle(l).iter().map(|o| self.port_speed(o)).sum()))
             .collect();
         let mut nodes: Vec<u32> = edges.iter().flat_map(|e| [e.1, e.2]).collect();
         nodes.sort();
@@ -139,10 +149,11 @@ impl Network {
             }
             for e in edges.iter().filter(|e| group.contains(&e.1) && !tree.contains(&e.0)) {
                 let can_block = [e.1, e.2].iter().any(|x| self.dev(*x).is_some_and(|d| d.stp));
+                let all: Vec<u32> = self.links.iter().find(|l| l.id == e.0).map(|l| self.bundle(l).iter().map(|o| o.id).collect()).unwrap_or_default();
                 if can_block {
-                    out.blocked.insert(e.0);
+                    out.blocked.extend(all);
                 } else {
-                    out.storm.push(e.0);
+                    out.storm.extend(all);
                 }
             }
         }
@@ -184,6 +195,25 @@ mod tests {
         assert!(n.exec(pc, "stp").lines.join(" ").contains("30–50 s"));
         let home = template_seeded("home", 1);
         assert!(home.stp_convergence(&home.stp()).is_none_or(|t| t.contains("about 1 s")));
+    }
+
+    #[test]
+    fn bundled_cables_are_one_faster_link() {
+        let mut n = template_seeded("blank", 1);
+        let a = n.add_device(Kind::Switch, [0.0, 0.0]);
+        let b = n.add_device(Kind::Switch, [100.0, 0.0]);
+        let l1 = n.connect(a, b, Medium::Cat6).unwrap();
+        let l2 = n.connect(a, b, Medium::Cat6).unwrap();
+        assert_eq!(n.stp().blocked.len(), 1);
+        let one = n.link_rate(n.links.iter().find(|l| l.id == l1).unwrap());
+        assert!(n.check().iter().any(|i| i.text.contains("LACP")));
+        for l in n.links.iter_mut() {
+            l.lag = 1;
+        }
+        assert!(n.stp().blocked.is_empty() && n.stp().storm.is_empty());
+        let both = n.link_rate(n.links.iter().find(|l| l.id == l2).unwrap());
+        assert!((both - 2.0 * one).abs() < 1.0, "{one} {both}");
+        assert!(!n.check().iter().any(|i| i.text.contains("LACP")));
     }
 
     #[test]

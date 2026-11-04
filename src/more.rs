@@ -1,8 +1,12 @@
 //! Resilience ("what if this breaks?"), power use, traffic by time of day, router-behind-router (WAN port),
-//! extra Wi-Fi names per access point, a simple content filter and duplicating devices.
+//! extra Wi-Fi names per access point, a simple content filter with an ad/tracker blocklist, UPS runtime and duplicating devices.
 use crate::extras::{Use, GUEST_VLAN};
 use crate::net::{Device, Kind, Link, Network};
 use std::collections::{HashSet, VecDeque};
+
+/// A few well-known ad and tracker domains.
+// shortcut: real blocklists hold hundreds of thousands of names and are updated daily.
+pub const AD_LIST: [&str; 8] = ["doubleclick.net", "googlesyndication.com", "googleadservices.com", "adnxs.com", "scorecardresearch.com", "taboola.com", "criteo.com", "ads.example.com"];
 
 /// Typical power draw (W): while in use for TVs, computers and consoles (see `duty`), else the average over a
 /// day including standby.
@@ -143,6 +147,31 @@ impl Network {
         own + poe
     }
 
+    /// Who powers a device: itself, or the switch it gets PoE from.
+    fn power_source(&self, d: &Device) -> u32 {
+        let src = self.links.iter().filter(|_| d.poe_draw > 0.0).find(|l| (l.a == d.id || l.b == d.id) && l.medium.takes_port()).and_then(|l| self.dev(l.other(d.id).0));
+        src.filter(|s| s.poe_class > 0).map_or(d.id, |s| s.id)
+    }
+
+    /// Each UPS during a power cut: (device it's on, watts it carries — what it powers over cables included,
+    /// hours it lasts). About 15% of the battery goes to the UPS's own conversion losses.
+    pub fn ups_runtime(&self) -> Vec<(u32, f32, f32)> {
+        self.devices
+            .iter()
+            .filter(|d| d.ups_wh > 0.0 && !d.off)
+            .map(|d| {
+                let poe: f32 = self.devices.iter().filter(|o| o.id != d.id && !o.off && self.power_source(o) == d.id).map(|o| o.poe_draw * 1.1).sum();
+                let w = d.watts + poe;
+                (d.id, w, d.ups_wh * 0.85 / w.max(0.1))
+            })
+            .collect()
+    }
+
+    /// Weak spots (see `weak_spots`) that a power cut switches off: no UPS of their own or at their PoE switch.
+    pub fn no_ups(&self) -> Vec<u32> {
+        self.weak_spots().into_iter().map(|x| x.0).filter(|id| self.dev(*id).and_then(|d| self.dev(self.power_source(d))).is_some_and(|p| p.ups_wh <= 0.0)).collect()
+    }
+
     pub fn yearly_kwh(&self) -> f32 {
         self.power_w() * 24.0 * 365.0 / 1000.0
     }
@@ -190,13 +219,16 @@ impl Network {
         self.dhcp_one(client, &mut log);
     }
 
-    /// A router's content filter: "block-site example.net" lines (also covers sub-domains).
+    /// A router's content filter: "block-site example.net" lines and, when on, the ad and tracker blocklist
+    /// (both also cover sub-domains).
     pub fn blocked_by(&self, d: &Device, name: &str) -> Option<String> {
-        d.rules.lines().find_map(|l| {
+        let hit = |site: &str| name == site || name.ends_with(&format!(".{site}"));
+        let own = d.rules.lines().find_map(|l| {
             let w: Vec<&str> = l.split_whitespace().collect();
             let site = w.get(1)?;
-            (w.first() == Some(&"block-site") && (name == *site || name.ends_with(&format!(".{site}")))).then(|| site.to_string())
-        })
+            (w.first() == Some(&"block-site") && hit(site)).then(|| site.to_string())
+        });
+        own.or_else(|| AD_LIST.iter().find(|s| d.adblock && hit(s)).map(|s| format!("{s}, ad and tracker blocklist")))
     }
 
     /// Points a directional antenna straight at another device.
@@ -356,6 +388,18 @@ mod tests {
             assert!(issues.iter().all(|i| i.level != crate::net::Level::Error || i.dev != Some(d.id)), "{k:?}: {:?}", issues.iter().filter(|i| i.dev == Some(d.id)).collect::<Vec<_>>());
         }
         let _ = (n.weak_spots(), n.power_w(), n.loads(), n.stp());
+    }
+
+    #[test]
+    fn ups_runtime_counts_what_it_powers() {
+        let mut n = template_seeded("home", 1);
+        let r = id(&n, "Home router");
+        assert!(n.no_ups().contains(&r));
+        n.dev_mut(r).unwrap().ups_wh = 100.0;
+        let w = n.dev(r).unwrap().watts;
+        let (dev, carried, hours) = n.ups_runtime()[0];
+        assert!(dev == r && carried >= w && (hours - 85.0 / carried).abs() < 1e-3, "{carried} {hours}");
+        assert!(!n.no_ups().contains(&r));
     }
 
     #[test]
