@@ -2396,6 +2396,9 @@ pub fn template_seeded(name: &str, seed: u64) -> Network {
         }
     }
     n.scenario = name.into();
+    // A template is new text: it starts in the interface's language.
+    n.title = crate::i18n::tr(&n.title).to_string();
+    n.story = crate::i18n::tr(&n.story).to_string();
     n.assign_ports();
     n
 }
