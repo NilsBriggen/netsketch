@@ -230,7 +230,9 @@ impl Settings {
             w.corner_radius = CornerRadius::same(8);
         }
         v.widgets.inactive.weak_bg_fill = pal().card;
-        v.widgets.inactive.bg_fill = pal().card;
+        // Checkboxes, radios and slider rails use bg_fill: the page colour keeps them visible on cards and menus.
+        v.widgets.inactive.bg_fill = pal().bg;
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, pal().line);
         v.widgets.hovered.weak_bg_fill = pal().hover;
         v.widgets.active.weak_bg_fill = pal().press;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, pal().line);
@@ -670,7 +672,7 @@ impl App {
             match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| fls::import(&b)) {
                 Ok((mut n, skipped)) => {
                     n.title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n.title);
-                    let msg = format!("Imported {} devices and {} connections{}. Save keeps it as a new plan; the .fls file is left untouched.", n.devices.len(), n.links.len(), if skipped > 0 { format!(" ({skipped} connections couldn't be brought over)") } else { String::new() });
+                    let msg = trf("Imported {} devices and {} connections{}. Save keeps it as a new plan; the .fls file is left untouched.", &[&(n.devices.len()), &(n.links.len()), &(if skipped > 0 { format!(" ({skipped} connections couldn't be brought over)") } else { String::new() })]);
                     self.load(n);
                     self.say(ctx, msg);
                     // Never write our format over the old project.
@@ -684,7 +686,7 @@ impl App {
             Ok(n) => {
                 let newer = n.version > net::FORMAT;
                 self.load(n);
-                self.say(ctx, if newer { format!("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", path.display()) } else { format!("Opened {}", path.display()) });
+                self.say(ctx, if newer { trf("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", &[&(path.display())]) } else { format!("Opened {}", path.display()) });
                 self.file = Some(path);
             }
             Err(e) => self.say(ctx, trf("Couldn't open that file: {}", &[&e])),
@@ -705,22 +707,22 @@ impl App {
         }
         s += "\n## Wi-Fi hardware\n\n";
         for d in n.devices.iter().filter(|d| d.kind.radio()) {
-            let bands: Vec<String> = wifi::Band::ALL.iter().filter(|b| d.bands[b.i()]).map(|b| format!("{} ch {} / {} MHz / {:.0} dBm", b.label(), n.channel(d, *b), d.width[b.i()], d.tx[b.i()])).collect();
+            let bands: Vec<String> = wifi::Band::ALL.iter().filter(|b| d.bands[b.i()]).map(|b| trf("{} ch {} / {} MHz / {} dBm", &[&(b.label()), &(n.channel(d, *b)), &(d.width[b.i()]), &format!("{:.0}", d.tx[b.i()])])).collect();
             s += &format!("- {} ({}): '{}', {}, {} streams — {}{}\n", d.name, if d.model.is_empty() { "custom" } else { &d.model }, d.ssid, d.wifi.label(), d.streams, bands.join("; "), if d.fast_roam { ", fast roaming on" } else { "" });
         }
         let stp = n.stp();
-        s += &format!("\nSpanning-tree root: {}. Walls drawn: {}.\n", stp.root.map(|r| n.name(r)).unwrap_or_else(|| "none".into()), n.walls.len());
-        s += "\n## Weak spots\n\n";
+        s += &trf("\nSpanning-tree root: {}. Walls drawn: {}.\n", &[&(stp.root.map(|r| n.name(r)).unwrap_or_else(|| "none".into())), &(n.walls.len())]);
+        s += tr("\n## Weak spots\n\n");
         for (id, k) in n.weak_spots().iter().take(5) {
-            s += &format!("- If {} fails, {k} device(s) lose the network\n", n.name(*id));
+            s += &trf("- If {} fails, {} device(s) lose the network\n", &[&(n.name(*id)), &k]);
         }
-        s += &format!("\nPower: ≈ {:.0} W, {:.0} kWh a year (≈ {}{:.0} a year at {}{:.2}/kWh).\n", n.power_w(), n.yearly_kwh(), n.currency, n.yearly_kwh() * n.kwh_price, n.currency, n.kwh_price);
-        s += "\n## Shopping list (estimates)\n\n";
+        s += &trf("\nPower: ≈ {} W, {} kWh a year (≈ {}{} a year at {}{}/kWh).\n", &[&format!("{:.0}", n.power_w()), &format!("{:.0}", n.yearly_kwh()), &n.currency, &format!("{:.0}", n.yearly_kwh() * n.kwh_price), &n.currency, &format!("{:.2}", n.kwh_price)]);
+        s += tr("\n## Shopping list (estimates)\n\n");
         let (items, total) = shopping(n);
         for (what, qty, cost) in items {
             s += &format!("- {qty} × {what}: {}{cost:.0}\n", n.currency);
         }
-        s += &format!("\n**Total: {}{total:.0}**\n\n## Open problems\n\n", n.currency);
+        s += &trf("\n**Total: {}{}**\n\n## Open problems\n\n", &[&n.currency, &format!("{:.0}", total)]);
         for i in n.check() {
             s += &format!("- {:?}: {}\n", i.level, i.text);
         }
@@ -746,7 +748,7 @@ impl App {
             ui.add(TextEdit::singleline(&mut self.net.title).desired_width(if compact { 130.0 } else { 180.0 }).frame(egui::Frame::NONE).text_color(pal().dim));
             ui.add_space(if compact { 6.0 } else { 16.0 });
             let before = self.mode;
-            for (m, icon, label) in [(Mode::Design, ic::PENCIL_SIMPLE, "Design"), (Mode::Simulate, ic::PLAY, "Simulate"), (Mode::Learn, ic::BOOK_OPEN, "Learn")] {
+            for (m, icon, label) in [(Mode::Design, ic::PENCIL_SIMPLE, tr("Design")), (Mode::Simulate, ic::PLAY, tr("Simulate")), (Mode::Learn, ic::BOOK_OPEN, tr("Learn"))] {
                 let on = self.mode == m;
                 let text = if tiny && !on { icon.to_string() } else { format!("{icon}  {}", tr(label)) };
                 let b = egui::Button::new(RichText::new(text).color(if on { pal().bg } else { pal().text }))
@@ -769,7 +771,7 @@ impl App {
                     }
                     ui.add_space(6.0);
                     ui.label(RichText::new(tr("Look")).strong());
-                    for (i, name) in ["Dark", "Light", "High contrast"].into_iter().enumerate() {
+                    for (i, name) in [tr("Dark"), tr("Light"), tr("High contrast")].into_iter().enumerate() {
                         ui.radio_value(&mut self.settings.theme, i, tr(name));
                     }
                     ui.add_space(6.0);
@@ -797,13 +799,13 @@ impl App {
                 })
                 .response
                 .on_hover_text(tr("Keyboard shortcuts"));
-                if ui.button(lab(ic::EXPORT, "Export")).on_hover_text(tr("Export: the plan, addresses and shopping list as a document")).clicked() {
+                if ui.button(lab(ic::EXPORT, tr("Export"))).on_hover_text(tr("Export: the plan, addresses and shopping list as a document")).clicked() {
                     self.export(&ctx);
                 }
-                if ui.button(lab(ic::FLOPPY_DISK, "Save")).on_hover_text(tr("Save (Ctrl+S)")).clicked() {
+                if ui.button(lab(ic::FLOPPY_DISK, tr("Save"))).on_hover_text(tr("Save (Ctrl+S)")).clicked() {
                     self.save(&ctx, false);
                 }
-                if ui.button(lab(ic::FOLDER_OPEN, "Open")).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O)")).clicked() {
+                if ui.button(lab(ic::FOLDER_OPEN, tr("Open"))).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O)")).clicked() {
                     self.open(&ctx);
                 }
                 if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(ic::ARROW_CLOCKWISE)).on_hover_text(tr("Redo (Ctrl+Y)")).clicked() {
@@ -812,7 +814,7 @@ impl App {
                 if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(ic::ARROW_COUNTER_CLOCKWISE)).on_hover_text(tr("Undo (Ctrl+Z)")).clicked() {
                     self.undo_once(&ctx);
                 }
-                ui.menu_button(lab(ic::FILE_PLUS, "New"), |ui| {
+                ui.menu_button(lab(ic::FILE_PLUS, tr("New")), |ui| {
                     ui.set_min_width(340.0);
                     if Self::autosave_path().exists() && ui.button(RichText::new(format!("{}  {}", ic::CLOCK_COUNTER_CLOCKWISE, tr("Recover last session"))).strong()).on_hover_text(tr("The plan as it was at the last automatic save")).clicked() {
                         if let Some(n) = std::fs::read_to_string(Self::autosave_path()).ok().and_then(|t| serde_json::from_str::<Network>(&t).ok()) {
@@ -853,7 +855,7 @@ impl App {
                     ui.separator();
                     let f = self.floor;
                     let mut name = self.net.storey_names.iter().find(|s| s.0 == f).map(|s| s.1.clone()).unwrap_or_default();
-                    if ui.add(TextEdit::singleline(&mut name).hint_text(format!("Name for {}", net::floor_name(f))).desired_width(200.0)).changed() {
+                    if ui.add(TextEdit::singleline(&mut name).hint_text(trf("Name for {}", &[&(net::floor_name(f))])).desired_width(200.0)).changed() {
                         self.net.storey_names.retain(|s| s.0 != f);
                         self.net.storey_names.push((f, name));
                     }
@@ -959,7 +961,7 @@ impl App {
             let logs = self.net.auto_address();
             self.push_logs(logs);
             let ctx = ui.ctx().clone();
-            self.say(&ctx, "Addresses planned. Check the problem list for anything left.");
+            self.say(&ctx, tr("Addresses planned. Check the problem list for anything left."));
         }
         if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  {}", ic::WIFI_HIGH, tr("Pick better channels")))).on_hover_text(tr("Chooses non-overlapping channels for your access points, avoiding the neighbours")).clicked() {
             self.snapshot();
@@ -1063,7 +1065,7 @@ impl App {
             let pulse = 1.0 + 0.15 * (now * 3.0).sin() as f32;
             painter.circle_stroke(c, 22.0 * z.max(0.6) * pulse, Stroke::new(2.5, pal().green));
             painter.text(c, Align2::CENTER_CENTER, ic::PLUS, FontId::proportional(20.0 * z.max(0.6)), pal().green);
-            painter.text(c + vec2(0.0, 28.0 * z.max(0.6)), Align2::CENTER_TOP, "new access point here?", FontId::proportional(11.5), pal().green);
+            painter.text(c + vec2(0.0, 28.0 * z.max(0.6)), Align2::CENTER_TOP, tr("new access point here?"), FontId::proportional(11.5), pal().green);
             ui.ctx().request_repaint();
         }
         let over_device = pointer.is_some_and(|p| self.net.devices.iter().any(|d| Rect::from_center_size(self.dev_pos(d.id), Vec2::splat(58.0 * z)).contains(p)));
@@ -1141,7 +1143,7 @@ impl App {
             if selected || near {
                 let mut txt = format!("{} · {} m · ≈ {:.0} Mbit/s", l.medium.label(), self.net.link_len(l), self.net.link_rate(l));
                 if let Some(s) = sig {
-                    txt = format!("Wi-Fi {:.0} dBm on {} · {} wall(s) · ≈ {:.0} Mbit/s", s.rssi, s.band.label(), s.walls, s.mbps);
+                    txt = trf("Wi-Fi {} dBm on {} · {} wall(s) · ≈ {} Mbit/s", &[&format!("{:.0}", s.rssi), &s.band.label(), &s.walls, &format!("{:.0}", s.mbps)]);
                 }
                 let g = painter.layout_no_wrap(txt, FontId::proportional(11.5), pal().text);
                 let r = Rect::from_center_size(m, g.size() + vec2(12.0, 6.0));
@@ -1316,7 +1318,7 @@ impl App {
             } else if let (Mode::Simulate, Some(s)) = (self.mode, wifi_sig.filter(|_| !d.kind.radio())) {
                 // The speed it really gets (the whole way to the internet), not just its own Wi-Fi link.
                 let mbps = self.e2e.get(&d.id).map_or(s.mbps, |e| e.0.min(s.mbps));
-                (format!("{} {:.0} dBm · {:.0} Mbit/s", ic::WIFI_HIGH, s.rssi, mbps), FontId::proportional(11.0 * z), quality_color(s.rssi))
+                (trf("{} {} dBm · {} Mbit/s", &[&(ic::WIFI_HIGH), &format!("{:.0}", s.rssi), &format!("{:.0}", mbps)]), FontId::proportional(11.0 * z), quality_color(s.rssi))
             } else {
                 (ip, FontId::monospace(10.5 * z), pal().dim)
             };
@@ -1421,7 +1423,7 @@ impl App {
             painter.rect_filled(r.expand(2.0), 8, pal().card.gamma_multiply(0.92));
             ui.put(r.shrink2(vec2(6.0, 0.0)), |ui: &mut egui::Ui| {
                 ui.horizontal(|ui| {
-                    for (i, t) in ["Best band", "2.4", "5", "6 GHz"].iter().enumerate() {
+                    for (i, t) in [tr("Best band"), "2.4", "5", "6 GHz"].iter().enumerate() {
                         ui.selectable_value(&mut self.heat_band, i, tr(t));
                     }
                 })
@@ -1499,7 +1501,7 @@ impl App {
                 self.issues = None;
                 self.say(ctx, "Undone.");
             }
-            None => self.say(ctx, "Nothing to undo."),
+            None => self.say(ctx, tr("Nothing to undo.")),
         }
     }
 
@@ -1514,7 +1516,7 @@ impl App {
                 self.issues = None;
                 self.say(ctx, "Redone.");
             }
-            None => self.say(ctx, "Nothing to redo."),
+            None => self.say(ctx, tr("Nothing to redo.")),
         }
     }
 
@@ -1641,7 +1643,7 @@ impl App {
         {
             // Header: icon, editable name, kind.
             let d = self.net.dev_mut(id).unwrap();
-            let host = (d.kind.is_host() || d.kind == Kind::HomeRouter).then(|| format!("On the network as {}.home.arpa", d.hostname()));
+            let host = (d.kind.is_host() || d.kind == Kind::HomeRouter).then(|| trf("On the network as {}.home.arpa", &[&(d.hostname())]));
             ui.horizontal(|ui| {
                 let (r, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
                 ui.painter().rect_filled(r, 10, kind_color(d.kind).gamma_multiply(0.15));
@@ -1695,7 +1697,7 @@ impl App {
             // Thread and Zigbee gadgets get no address from DHCP (their hub speaks for them; see Smart-home radio).
             if !d.ifaces.is_empty() && !kind.bridges() && !d.on_802154() && Self::section(ui, "Addresses") {
                 if kind.is_host() || kind == Kind::HomeRouter {
-                    let label = tr(if kind == Kind::HomeRouter { "Get internet address automatically (DHCP)" } else { "Get address automatically (DHCP)" });
+                    let label = tr(if kind == Kind::HomeRouter { tr("Get internet address automatically (DHCP)") } else { tr("Get address automatically (DHCP)") });
                     if ui.checkbox(&mut d.dhcp_client, label).changed() && d.dhcp_client {
                         renew = true;
                     }
@@ -1742,15 +1744,15 @@ impl App {
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("plan").selected_text(format!("{:.0} Mbit/s", d.plan_mbps)).width(150.0).show_ui(ui, |ui| {
                         // Typical down/up speeds: DSL and cable upload far slower, fibre is symmetric.
-                        for (n, v, up) in [("DSL 50", 50.0, 10.0), ("DSL vectoring 250", 250.0, 40.0), ("Cable 500", 500.0, 50.0), ("Fibre 1 Gbit/s", 1000.0, 1000.0), ("Fibre 10 Gbit/s", 10000.0, 10000.0), ("5G home internet", 300.0, 50.0), ("Satellite (low orbit)", 150.0, 20.0)] {
+                        for (n, v, up) in [("DSL 50", 50.0, 10.0), (tr("DSL vectoring 250"), 250.0, 40.0), ("Cable 500", 500.0, 50.0), (tr("Fibre 1 Gbit/s"), 1000.0, 1000.0), (tr("Fibre 10 Gbit/s"), 10000.0, 10000.0), (tr("5G home internet"), 300.0, 50.0), (tr("Satellite (low orbit)"), 150.0, 20.0)] {
                             if ui.selectable_label(d.plan_mbps == v && d.plan_up_mbps == up, format!("{} — {v:.0} / {up:.0} Mbit/s", tr(n))).clicked() {
                                 (d.plan_mbps, d.plan_up_mbps) = (v, up);
                             }
                         }
                     });
-                    ui.add(egui::DragValue::new(&mut d.plan_mbps).range(1.0..=25000.0).prefix("↓ ").suffix(" Mbit/s"));
+                    ui.add(egui::DragValue::new(&mut d.plan_mbps).range(1.0..=25000.0).prefix(format!("{} ", ic::ARROW_DOWN)).suffix(tr(" Mbit/s")));
                     let mut up = if d.plan_up_mbps > 0.0 { d.plan_up_mbps } else { d.plan_mbps };
-                    if ui.add(egui::DragValue::new(&mut up).range(1.0..=25000.0).prefix("↑ ").suffix(" Mbit/s")).on_hover_text(tr("Upload speed: backups, video calls and cameras send this way")).changed() {
+                    if ui.add(egui::DragValue::new(&mut up).range(1.0..=25000.0).prefix(format!("{} ", ic::ARROW_UP)).suffix(tr(" Mbit/s"))).on_hover_text(tr("Upload speed: backups, video calls and cameras send this way")).changed() {
                         d.plan_up_mbps = up;
                     }
                 });
@@ -1826,12 +1828,12 @@ impl App {
                 ui.end_row();
                 if kind.transmits() || kind.wifi_client() {
                     ui.label(tr("Mounted at"));
-                    ui.add(egui::DragValue::new(&mut d.mount).range(0.0..=10.0).speed(0.05).max_decimals(2).suffix(" m above the floor")).on_hover_text(tr("Antenna height: desks and hands about 1 m, a ceiling access point 2.5 m"));
+                    ui.add(egui::DragValue::new(&mut d.mount).range(0.0..=10.0).speed(0.05).max_decimals(2).suffix(tr(" m above the floor"))).on_hover_text(tr("Antenna height: desks and hands about 1 m, a ceiling access point 2.5 m"));
                     ui.end_row();
                 }
                 if !kind.foreign() {
                     ui.label(tr("Power draw"));
-                    ui.add(egui::DragValue::new(&mut d.watts).range(0.0..=2000.0).speed(0.5).suffix(" W average")).on_hover_text(tr("Average over a day, standby included. Devices powered over the cable count at their switch."));
+                    ui.add(egui::DragValue::new(&mut d.watts).range(0.0..=2000.0).speed(0.5).suffix(tr(" W average"))).on_hover_text(tr("Average over a day, standby included. Devices powered over the cable count at their switch."));
                     ui.end_row();
                     ui.label(tr("UPS battery"));
                     ui.add(egui::DragValue::new(&mut d.ups_wh).range(0.0..=5000.0).speed(1.0).suffix(" Wh")).on_hover_text(tr("Plugged into an uninterruptible power supply with this much battery (0 = none). It also carries what this device powers over its cables."));
@@ -1913,7 +1915,7 @@ impl App {
         let design = self.mode == Mode::Design;
         let l = self.net.links.iter_mut().find(|l| l.id == id).unwrap();
         let old = l.clone();
-        Self::header(ui, if l.medium == Medium::WiFi { ic::WIFI_HIGH } else { ic::LINK }, medium_color(l.medium), "Connection", &format!("{a}  {}  {b}", ic::ARROWS_LEFT_RIGHT));
+        Self::header(ui, if l.medium == Medium::WiFi { ic::WIFI_HIGH } else { ic::LINK }, medium_color(l.medium), tr("Connection"), &format!("{a}  {}  {b}", ic::ARROWS_LEFT_RIGHT));
         // Only link types these two devices can actually use.
         let (ka, kb) = (kinds.0, kinds.1);
         let radio_pair = (ka.radio() && (kb.wifi_client() || kb.radio())) || (kb.radio() && (ka.wifi_client() || ka.radio()));
@@ -1937,11 +1939,11 @@ impl App {
             ui.end_row();
             if l.medium == Medium::Powerline && !catalog::powerline().is_empty() {
                 ui.label(RichText::new(tr("Kit")).color(pal().dim));
-                let shown = if l.kit.is_empty() { "A typical kit (≈ 300 Mbit/s up close)".to_string() } else { l.kit.clone() };
+                let shown = if l.kit.is_empty() { tr("A typical kit (≈ 300 Mbit/s up close)").to_string() } else { l.kit.clone() };
                 egui::ComboBox::from_id_salt(("kit", id)).selected_text(shown).width(200.0).show_ui(ui, |ui| {
                     ui.selectable_value(&mut l.kit, String::new(), tr("A typical kit (≈ 300 Mbit/s up close)"));
                     for k in catalog::powerline() {
-                        ui.selectable_value(&mut l.kit, k.title(), format!("{} — {}, ≈ {:.0} Mbit/s up close", k.title(), k.standard, k.real_mbps)).on_hover_text(trf("{}\n{}\nSpecs from {}", &[&(k.summary()), &k.note, &k.source]));
+                        ui.selectable_value(&mut l.kit, k.title(), trf("{} — {}, ≈ {} Mbit/s up close", &[&(k.title()), &k.standard, &format!("{:.0}", k.real_mbps)])).on_hover_text(trf("{}\n{}\nSpecs from {}", &[&(k.summary()), &k.note, &k.source]));
                     }
                 });
                 ui.end_row();
@@ -1993,7 +1995,7 @@ impl App {
             }
         }
         let l = self.net.links.iter().find(|l| l.id == id).unwrap().clone();
-        let mesh_hint = if l.medium == Medium::Mesh { "Speaker mesh: slow in reality, but announced to spanning tree with a low cost — that's how speakers end up carrying the network." } else { "" };
+        let mesh_hint = if l.medium == Medium::Mesh { tr("Speaker mesh: slow in reality, but announced to spanning tree with a low cost — that's how speakers end up carrying the network.") } else { "" };
         if Self::section_hint(ui, "How it performs", mesh_hint) {
             if let Some(s) = self.net.link_signal(&l) {
                 ui.label(RichText::new(trf("{} dBm ({}) on {} {} MHz · {}×{} streams", &[&format!("{:.0}", s.rssi), &(s.quality()), &(s.band.label()), &s.width, &s.streams, &s.streams])).color(quality_color(s.rssi)));
@@ -2021,7 +2023,7 @@ impl App {
     }
 
     fn overview(&mut self, ui: &mut egui::Ui, issues: &[Issue]) {
-        Self::header(ui, ic::HOUSE_LINE, pal().accent, &self.net.title.clone(), "Plan overview");
+        Self::header(ui, ic::HOUSE_LINE, pal().accent, &self.net.title.clone(), tr("Plan overview"));
         let stp = self.stp();
         let n = &self.net;
         let errors = issues.iter().filter(|i| i.level == Level::Error).count();
@@ -2056,7 +2058,7 @@ impl App {
         let vlans = if vl.is_empty() { tr("none").to_string() } else { vl.len().to_string() };
         if Self::section(ui, "At a glance") {
             egui::Grid::new("glance").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
-                for (k, v) in [("Estimated cost", format!("{cur}{total:.0}")), ("Cable to lay", format!("{cable:.0} m")), ("Wi-Fi devices", wifi.to_string()), ("Spanning-tree root", root), ("VLANs in use", vlans)] {
+                for (k, v) in [(tr("Estimated cost"), format!("{cur}{total:.0}")), (tr("Cable to lay"), format!("{cable:.0} m")), ("Wi-Fi devices", wifi.to_string()), (tr("Spanning-tree root"), root), (tr("VLANs in use"), vlans)] {
                     ui.label(RichText::new(tr(k)).color(pal().dim));
                     ui.label(v);
                     ui.end_row();
@@ -2090,12 +2092,12 @@ impl App {
         self.plan_extras(ui);
         if Self::section(ui, "How to") {
             for (icon, t) in [
-                (ic::CURSOR, "Drag devices from the left onto the map, or click one to add it."),
-                (ic::PLUGS_CONNECTED, "Pick Connect, then drag from one device to another."),
-                (ic::WALL, "Walls: click corner after corner; right-click or Esc ends the wall."),
-                (ic::PLAY, "Simulate: click a device to use its browser, command line or Wi-Fi."),
-                (ic::MAP_PIN, "Measure the real air with the NetSketch Survey phone app: Real measurements → Link a phone, and every spot you measure lands here as a pin."),
-                (ic::KEYBOARD, "Keyboard shortcuts: the keyboard button at the top right lists them all."),
+                (ic::CURSOR, tr("Drag devices from the left onto the map, or click one to add it.")),
+                (ic::PLUGS_CONNECTED, tr("Pick Connect, then drag from one device to another.")),
+                (ic::WALL, tr("Walls: click corner after corner; right-click or Esc ends the wall.")),
+                (ic::PLAY, tr("Simulate: click a device to use its browser, command line or Wi-Fi.")),
+                (ic::MAP_PIN, tr("Measure the real air with the NetSketch Survey phone app: Real measurements → Link a phone, and every spot you measure lands here as a pin.")),
+                (ic::KEYBOARD, tr("Keyboard shortcuts: the keyboard button at the top right lists them all.")),
             ] {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(icon).color(pal().accent));
@@ -2123,10 +2125,10 @@ impl App {
         let wifi = k.transmits() || self.net.wifi_link_of(id).is_some();
         let tabs: Vec<(SimTab, &str, &str)> = [
             (SimTab::WiFi, ic::WIFI_HIGH, "Wi-Fi", wifi),
-            (SimTab::Ports, ic::PLUGS_CONNECTED, "Ports", k.has_ports_view()),
-            (SimTab::Browser, ic::GLOBE, "Browser", k.has_browser()),
-            (SimTab::Terminal, ic::TERMINAL_WINDOW, "Command line", k.has_shell()),
-            (SimTab::Traffic, ic::LIST_BULLETS, "Traffic", !k.foreign()),
+            (SimTab::Ports, ic::PLUGS_CONNECTED, tr("Ports"), k.has_ports_view()),
+            (SimTab::Browser, ic::GLOBE, tr("Browser"), k.has_browser()),
+            (SimTab::Terminal, ic::TERMINAL_WINDOW, tr("Command line"), k.has_shell()),
+            (SimTab::Traffic, ic::LIST_BULLETS, tr("Traffic"), !k.foreign()),
         ]
         .into_iter()
         .filter(|t| t.3)
@@ -2192,7 +2194,7 @@ impl App {
         } else if let Some(f) = &b.pending {
             ui.horizontal(|ui| {
                 ui.spinner();
-                let what = if f.fixed.is_some() { format!("Testing this network's speed on {} …", f.shown) } else { format!("Loading {} …", f.shown) };
+                let what = if f.fixed.is_some() { trf("Testing this network's speed on {} …", &[&f.shown]) } else { format!("Loading {} …", f.shown) };
                 ui.label(RichText::new(what).color(pal().dim));
             });
         } else if let Some((addr, _)) = &b.page {
@@ -2290,13 +2292,13 @@ impl App {
                             sim,
                             f.mbps,
                             f.rtt_ms,
-                            if at - f.started > sim + 0.3 { format!(" — your real connection needed {:.1} s", at - f.started) } else { String::new() }
+                            if at - f.started > sim + 0.3 { trf(" — your real connection needed {} s", &[&format!("{:.1}", at - f.started)]) } else { String::new() }
                         ),
                     });
                     b.page = Some((f.shown, html));
                     b.error = None;
                 }
-                Err(e) => b.error = Some(format!("The simulated network reached the internet, but the real website didn't answer: {e}")),
+                Err(e) => b.error = Some(trf("The simulated network reached the internet, but the real website didn't answer: {}", &[&e])),
             }
         }
         if let Some(url) = go {
@@ -2321,7 +2323,7 @@ impl App {
                         for l in res.lines.iter().skip(1) {
                             page += &format!("<p>{}</p>", l.trim().replace('<', "&lt;"));
                         }
-                        page += "<p>The real site needs JavaScript; this page shows what the simulated network delivers.</p></body></html>";
+                        page += tr("<p>The real site needs JavaScript; this page shows what the simulated network delivers.</p></body></html>");
                         let _ = tx.send(Ok(page));
                         fixed = Some(3.0);
                     } else {
@@ -2363,10 +2365,10 @@ impl App {
                     s.push(format!("ping6 {o}"));
                 }
             } else {
-                s.push("ping example.com".into());
+                s.push(tr("ping example.com").into());
                 s.push("speedtest".into());
                 if d.kind.has_browser() {
-                    s.push("open example.com".into());
+                    s.push(tr("open example.com").into());
                 }
                 if let Some(o) = &other {
                     s.push(format!("ping {o}"));
@@ -2390,7 +2392,7 @@ impl App {
                 }
             }
         });
-        let term = self.terms.entry(id).or_insert_with(|| Term { lines: vec![format!("{} — type help for commands", d.name)], input: String::new() });
+        let term = self.terms.entry(id).or_insert_with(|| Term { lines: vec![trf("{} — type help for commands", &[&d.name])], input: String::new() });
         let h = ui.available_height() - 64.0;
         egui::Frame::new().fill(pal().bg).corner_radius(8).inner_margin(Margin::same(8)).show(ui, |ui| {
             ui.set_min_height(h.max(120.0));
@@ -2560,9 +2562,6 @@ impl App {
                     egui::Frame::new().fill(pal().card).corner_radius(10).inner_margin(Margin::same(14)).show(ui, |ui| {
                         ui.label(RichText::new(format!("{}  {}", ic::QUESTION, tr("Check yourself"))).strong().color(pal().accent));
                         ui.label(question);
-                        // Empty answer circles would vanish into the card: draw them in the page colour.
-                        ui.visuals_mut().widgets.inactive.bg_fill = pal().bg;
-                        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, pal().line);
                         let picked = self.quiz_pick.filter(|p| p.0 == self.lesson).map(|p| p.1);
                         for (i, a) in answers.iter().enumerate() {
                             if ui.radio(picked == Some(i), *a).clicked() {
@@ -2621,7 +2620,7 @@ fn stat(ui: &mut egui::Ui, value: &str, label: &str, col: Color32) {
 fn packet_grid(ui: &mut egui::Ui, id: &str, rows: &[&Row]) -> Option<net::Log> {
     let mut picked = None;
     egui::Grid::new(id).striped(true).num_columns(6).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
-        for h in ["Time", "Source", "Destination", "Protocol", "Layer", "What happens"] {
+        for h in [tr("Time"), tr("Source"), tr("Destination"), tr("Protocol"), tr("Layer"), tr("What happens")] {
             ui.label(RichText::new(tr(h)).small().color(pal().dim));
         }
         ui.end_row();
@@ -2724,7 +2723,7 @@ fn shopping(n: &Network) -> (Vec<(String, usize, f32)>, f32) {
         let ls: Vec<_> = n.links.iter().filter(|l| l.medium == m).collect();
         if !ls.is_empty() {
             let len: f32 = ls.iter().map(|l| n.link_len(l) + 1.0).sum();
-            let what = if m.cable() { format!("{} ({len:.0} m incl. slack)", m.label()) } else { m.label().to_string() };
+            let what = if m.cable() { trf("{} ({} m incl. slack)", &[&(m.label()), &format!("{:.0}", len)]) } else { m.label().to_string() };
             let each: f32 = ls.iter().map(|l| catalog::find_kit(&l.kit).map_or(m.per_link_price(), |k| k.price)).sum();
             items.push((what, ls.len(), len * m.price_per_m() + each));
         }
@@ -2840,7 +2839,7 @@ impl eframe::App for App {
         if !typing && self.mode == Mode::Design && self.sel != Sel::None && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             self.snapshot();
             self.connect_from = None;
-            self.say(&ctx, "Deleted — Ctrl+Z brings it back.");
+            self.say(&ctx, tr("Deleted — Ctrl+Z brings it back."));
             match self.sel {
                 Sel::Dev(id) => self.net.remove_device(id),
                 Sel::Link(id) => self.net.remove_link(id),
@@ -2958,7 +2957,7 @@ impl eframe::App for App {
         // Side panels can't squeeze the map away: the inspector stays under ~40% of the window, the log under 40% of its height.
         egui::Panel::right("inspector").default_size((screen.width() * 0.32).clamp(320.0, 420.0)).size_range(320.0..=(screen.width() * 0.4).max(340.0)).frame(side).show(ui, |ui| {
             if self.mode == Mode::Simulate && !matches!(self.sel, Sel::Dev(_)) {
-                Self::header(ui, ic::PLAY, pal().accent, tr("Simulation"), "Click any device to use its apps");
+                Self::header(ui, ic::PLAY, pal().accent, tr("Simulation"), tr("Click any device to use its apps"));
                 ui.add_space(6.0);
                 ui.label(RichText::new(tr("Addresses were handed out by DHCP. Pick a device on the map: see its Wi-Fi, take it for a walk to watch it roam, open a web page in its browser, or run ping, speedtest, wifi and stp on its command line. Packets move along the cables and every step lands in the packet log below.")).color(pal().dim));
                 ui.add_space(6.0);
@@ -2980,7 +2979,7 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     let screenshot = args.iter().position(|a| a == "--screenshot").and_then(|i| args.get(i + 1)).map(PathBuf::from);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_min_inner_size([960.0, 600.0]).with_title("NetSketch — plan, simulate and learn networks"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_min_inner_size([960.0, 600.0]).with_title(tr("NetSketch — plan, simulate and learn networks")),
         ..Default::default()
     };
     eframe::run_native("NetSketch", options, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot)))))

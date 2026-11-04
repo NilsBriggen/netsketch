@@ -17,7 +17,7 @@ impl App {
             let l = self.net.labels.iter().find(|l| l.id == id).unwrap();
             let c = self.to_screen(vec2(l.pos[0], l.pos[1]));
             let selected = self.sel == Sel::Label(id);
-            let g = painter.layout_no_wrap(if l.text.is_empty() { "Room".into() } else { l.text.clone() }, FontId::proportional(size), if selected { pal().accent } else { pal().dim.gamma_multiply(1.3) });
+            let g = painter.layout_no_wrap(if l.text.is_empty() { tr("Room").into() } else { l.text.clone() }, FontId::proportional(size), if selected { pal().accent } else { pal().dim.gamma_multiply(1.3) });
             let r = Rect::from_center_size(c, g.size() + vec2(8.0, 4.0));
             if selected {
                 painter.rect_stroke(r, 4, Stroke::new(1.0, pal().accent), StrokeKind::Outside);
@@ -47,7 +47,7 @@ impl App {
 
     pub(crate) fn label_editor(&mut self, ui: &mut egui::Ui, id: u32) {
         let Some(l) = self.net.labels.iter_mut().find(|l| l.id == id) else { return };
-        Self::header(ui, ic::TEXT_T, pal().accent, "Room label", "Drag it on the map to move it");
+        Self::header(ui, ic::TEXT_T, pal().accent, tr("Room label"), tr("Drag it on the map to move it"));
         ui.add_space(4.0);
         egui::Grid::new(("lbl", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
             ui.label(RichText::new(tr("Text")).color(pal().dim));
@@ -105,7 +105,7 @@ impl App {
         let design = self.mode == Mode::Design;
         if let (Some(w), true) = (wall, design) {
             ui.label(RichText::new(tr("Wall")).strong());
-            ui.menu_button("Material", |ui| {
+            ui.menu_button(tr("Material"), |ui| {
                 for k in WallKind::ALL {
                     if ui.button(k.label()).clicked() {
                         self.snapshot();
@@ -117,7 +117,7 @@ impl App {
                     }
                 }
             });
-            for (label, kind, width) in [("Put in a door", Some(WallKind::Wood), 0.9), ("Put in a window", Some(WallKind::Glass), 1.2), ("Leave an opening", None, 0.9)] {
+            for (label, kind, width) in [(tr("Put in a door"), Some(WallKind::Wood), 0.9), (tr("Put in a window"), Some(WallKind::Glass), 1.2), (tr("Leave an opening"), None, 0.9)] {
                 if ui.button(label).clicked() {
                     self.snapshot();
                     let msg = insert_opening(&mut self.net, w, kind, width);
@@ -136,7 +136,7 @@ impl App {
         } else if let Some(l) = link {
             let unplugged = self.net.links.iter().find(|x| x.id == l).is_some_and(|x| x.unplugged);
             ui.label(RichText::new(tr("Connection")).strong());
-            if ui.button(if unplugged { "Plug it back in" } else { "Unplug — what if it breaks?" }).clicked() {
+            if ui.button(if unplugged { tr("Plug it back in") } else { tr("Unplug — what if it breaks?") }).clicked() {
                 if let Some(x) = self.net.links.iter_mut().find(|x| x.id == l) {
                     x.unplugged = !unplugged;
                 }
@@ -165,7 +165,7 @@ impl App {
             });
             if ui.button(format!("{}  {}", ic::TEXT_T, tr("Add a room label here"))).clicked() {
                 self.snapshot();
-                let id = self.net.add_label(at, self.floor, "Room");
+                let id = self.net.add_label(at, self.floor, tr("Room"));
                 self.sel = Sel::Label(id);
                 ui.close();
             }
@@ -192,7 +192,7 @@ impl App {
         }
         let Some((a, b)) = self.measure else {
             if let Some(p) = pointer {
-                painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, "click where the measurement starts", FontId::proportional(11.5), pal().dim);
+                painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, tr("click where the measurement starts"), FontId::proportional(11.5), pal().dim);
             }
             return;
         };
@@ -221,7 +221,7 @@ impl App {
             self.snapshot();
             self.net.next_id += 1;
             let n = self.net.outdoor.len() + 1;
-            self.net.outdoor.push(crate::plan::Outdoor { id: self.net.next_id, name: format!("Garden {n}"), floor: self.floor, a, b });
+            self.net.outdoor.push(crate::plan::Outdoor { id: self.net.next_id, name: trf("Garden {}", &[&n]), floor: self.floor, a, b });
             self.measure = None;
             return;
         }

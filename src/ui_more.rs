@@ -17,7 +17,7 @@ impl App {
             self.issues = None;
             let name = d.name.clone();
             let ctx = ui.ctx().clone();
-            self.say(&ctx, if off { format!("{name} is back on.") } else { format!("{name} is off — see what stopped working in the problem list and with ping.") });
+            self.say(&ctx, if off { trf("{} is back on.", &[&name]) } else { trf("{} is off — see what stopped working in the problem list and with ping.", &[&name]) });
         }
         if off {
             ui.label(RichText::new(tr("Switched off: it passes no traffic and its Wi-Fi is silent.")).small().color(pal().amber));
@@ -41,7 +41,7 @@ impl App {
                 continue;
             }
             let mut wan = l.end_if(end) == 1;
-            let label = format!("This is {}'s internet (WAN) port — router behind router", r.name);
+            let label = trf("This is {}'s internet (WAN) port — router behind router", &[&r.name]);
             if ui.checkbox(&mut wan, label).on_hover_text(tr("Plug a second router's WAN port into your network: it makes its own network behind the first (double NAT)")).changed() {
                 self.snapshot();
                 self.net.set_wan(end, id, wan);
@@ -224,8 +224,8 @@ impl App {
             }
         }
         let msg = match image::save_buffer(&path, &bytes, w as u32, h as u32, image::ColorType::Rgba8) {
-            Ok(()) => format!("Saved the map as {}", path.display()),
-            Err(e) => format!("Couldn't save the picture: {e}"),
+            Ok(()) => trf("Saved the map as {}", &[&(path.display())]),
+            Err(e) => trf("Couldn't save the picture: {}", &[&e]),
         };
         self.say(ctx, msg);
     }
@@ -240,7 +240,12 @@ impl App {
         if !self.cov_cache.as_ref().is_some_and(|c| c.0 == self.floor && now - c.1 < 1.0) {
             self.cov_cache = Some((self.floor, now, self.net.coverage(self.floor)));
         }
-        let Some(Some(c)) = self.cov_cache.as_ref().map(|c| c.2.as_ref()) else { return };
+        let Some(Some(c)) = self.cov_cache.as_ref().map(|c| c.2.as_ref()) else {
+            // Walls, but no room closed all around yet: nothing to score.
+            ui.label(RichText::new(tr("Close the rooms with walls all around to get a coverage score for this storey.")).small().color(pal().dim));
+            self.outdoor_rows(ui);
+            return;
+        };
         let (good, usable, area) = (c.good, c.usable, c.area_m2);
         let col = if good >= 0.9 { pal().green } else if good >= 0.7 { pal().amber } else { pal().red };
         ui.label(RichText::new(trf("{}% of this storey (≈ {} m²) has good Wi-Fi, {}% at least usable.", &[&format!("{:.0}", good * 100.0), &format!("{:.0}", area), &format!("{:.0}", usable * 100.0)])).color(col))
@@ -285,12 +290,12 @@ fn summary(n: &Network) -> Vec<(&'static str, String)> {
     let issues = n.check();
     let count = |l: Level| issues.iter().filter(|i| i.level == l).count();
     vec![
-        ("Hardware and cable", format!("{}{cost:.0}", n.currency)),
-        ("Cable to lay", format!("{cable:.0} m")),
-        ("Power a year", format!("{:.0} kWh ({}{:.0})", n.yearly_kwh(), n.currency, n.yearly_kwh() * n.kwh_price)),
-        ("Good Wi-Fi (storeys with walls)", good),
-        ("Devices", n.devices.iter().filter(|d| !d.kind.foreign()).count().to_string()),
-        ("Problems (red / amber)", format!("{} / {}", count(Level::Error), count(Level::Warning))),
+        (tr("Hardware and cable"), format!("{}{cost:.0}", n.currency)),
+        (tr("Cable to lay"), format!("{cable:.0} m")),
+        (tr("Power a year"), format!("{:.0} kWh ({}{:.0})", n.yearly_kwh(), n.currency, n.yearly_kwh() * n.kwh_price)),
+        (tr("Good Wi-Fi (storeys with walls)"), good),
+        (tr("Devices"), n.devices.iter().filter(|d| !d.kind.foreign()).count().to_string()),
+        (tr("Problems (red / amber)"), format!("{} / {}", count(Level::Error), count(Level::Warning))),
     ]
 }
 

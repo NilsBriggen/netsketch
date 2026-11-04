@@ -197,13 +197,13 @@ impl Signal {
         self.mbps > 0.0
     }
     pub fn quality(&self) -> &'static str {
-        match self.rssi {
+        crate::i18n::tr(match self.rssi {
             r if r >= -55.0 => "excellent",
             r if r >= -67.0 => "good",
             r if r >= -75.0 => "fair",
             r if r >= -82.0 => "poor",
             _ => "unusable",
-        }
+        })
     }
 }
 

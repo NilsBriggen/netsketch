@@ -45,7 +45,7 @@ impl App {
             painter.circle_filled(c, 6.0, quality_color(s.rssi));
             painter.circle_stroke(c, 8.0, Stroke::new(2.0, ring));
             if pointer.is_some_and(|p| p.distance(c) < 9.0) {
-                tip = Some(format!("Measured {:.0} dBm from {} · model says {:.0} dBm ({:+.1})", s.rssi, self.net.name(s.ap), pred, pred - s.rssi));
+                tip = Some(trf("Measured {} dBm from {} · model says {} dBm ({})", &[&format!("{:.0}", s.rssi), &(self.net.name(s.ap)), &format!("{:.0}", pred), &format!("{:+.1}", pred - s.rssi)]));
             }
         }
         tip
@@ -116,13 +116,13 @@ impl App {
                     let msg = if companion {
                         self.snapshot();
                         match text.and_then(|t| self.net.import_companion(&t)) {
-                            Ok((p, n)) => format!("Imported {p} measuring points ({n} readings). Drag each orange pin to where you stood."),
-                            Err(e) => format!("Couldn't import: {e}"),
+                            Ok((p, n)) => trf("Imported {} measuring points ({} readings). Drag each orange pin to where you stood.", &[&p, &n]),
+                            Err(e) => trf("Couldn't import: {}", &[&e]),
                         }
                     } else {
                         match text.and_then(|t| self.net.import_survey(&t)) {
-                            Ok(n) => format!("Imported {n} readings."),
-                            Err(e) => format!("Couldn't import: {e}"),
+                            Ok(n) => trf("Imported {} readings.", &[&n]),
+                            Err(e) => trf("Couldn't import: {}", &[&e]),
                         }
                     };
                     self.say(&ctx, msg);
@@ -159,7 +159,7 @@ impl App {
                 for u in kind.uses().iter().copied() {
                     let mut on = d.uses.contains(&u);
                     let (down, up) = u.demand();
-                    if ui.checkbox(&mut on, u.label()).on_hover_text(trf("≈ {} Mbit/s down, {} up{}", &[&down, &up, &(if u.sensitive() { " — needs low delay" } else { "" })])).changed() {
+                    if ui.checkbox(&mut on, u.label()).on_hover_text(trf("≈ {} Mbit/s down, {} up{}", &[&down, &up, &(if u.sensitive() { tr(" — needs low delay") } else { "" })])).changed() {
                         if on {
                             d.uses.push(u);
                         } else {
@@ -296,7 +296,7 @@ impl App {
                     d.poe_budget = (POE[d.poe_class as usize].1 * d.port_count().max(1) as f32 * 0.5).round();
                 }
                 if d.poe_class > 0 {
-                    ui.add(egui::DragValue::new(&mut d.poe_budget).range(0.0..=2000.0).suffix(" W total"));
+                    ui.add(egui::DragValue::new(&mut d.poe_budget).range(0.0..=2000.0).suffix(tr(" W total")));
                 }
             });
             }
@@ -341,8 +341,8 @@ impl App {
                 lib.retain(|x| x.name != m.name);
                 lib.push(m.clone());
                 let msg = match save_library(lib) {
-                    Ok(()) => format!("Saved model '{}'.", m.name),
-                    Err(e) => format!("Saved in the plan, but not in your library: {e}"),
+                    Ok(()) => trf("Saved model '{}'.", &[&m.name]),
+                    Err(e) => trf("Saved in the plan, but not in your library: {}", &[&e]),
                 };
                 self.net.dev_mut(id).unwrap().model = m.name;
                 self.model_name.clear();
@@ -370,7 +370,7 @@ impl App {
                 let d = self.net.dev(id).unwrap();
                 self.net.survey.push(Sample { pos: d.pos, floor: d.floor, ap, rssi: self.reading });
                 let ctx = ui.ctx().clone();
-                self.say(&ctx, "Reading recorded. Calibrate from the plan overview once you have a few.");
+                self.say(&ctx, tr("Reading recorded. Calibrate from the plan overview once you have a few."));
             }
         });
     }
@@ -392,8 +392,8 @@ impl App {
         for l in &links {
             let other = self.net.dev(l.other(id).0).unwrap();
             let link = match self.net.link_signal(l) {
-                Some(s) => format!("{} {:.0} dBm · {:.0} Mbit/s", s.band.label(), s.rssi, s.mbps),
-                None if l.medium == Medium::Powerline => format!("powerline ≈ {:.0} Mbit/s", self.net.link_rate(l)),
+                Some(s) => trf("{} {} dBm · {} Mbit/s", &[&(s.band.label()), &format!("{:.0}", s.rssi), &format!("{:.0}", s.mbps)]),
+                None if l.medium == Medium::Powerline => trf("powerline ≈ {} Mbit/s", &[&format!("{:.0}", self.net.link_rate(l))]),
                 None => {
                     let n = self.net.negotiated(l);
                     if n >= 1000 { format!("{} · {} Gbit/s", l.medium.label(), n as f32 / 1000.0) } else { format!("{} · {n} Mbit/s", l.medium.label()) }
@@ -404,7 +404,7 @@ impl App {
             } else if stp.blocked.contains(&l.id) {
                 ("standby", pal().amber)
             } else if stp.root_port.get(&id) == Some(&l.id) {
-                ("towards the root", pal().accent)
+                (tr("towards the root"), pal().accent)
             } else if d.kind.bridges() || d.kind == Kind::HomeRouter {
                 ("forwarding", pal().dim)
             } else {
@@ -414,7 +414,7 @@ impl App {
             let mut state = format!("{role} · {:.0}% busy", u * 100.0);
             if other.poe_draw > 0.0 && d.poe_class > 0 && !l.medium.wireless() {
                 poe_total += other.poe_draw;
-                state += &format!(" · powers it ({:.1} W)", other.poe_draw);
+                state += &trf(" · powers it ({} W)", &[&format!("{:.1}", other.poe_draw)]);
             }
             egui::Frame::new().fill(pal().card).corner_radius(6).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -429,7 +429,7 @@ impl App {
             ui.label(trf("PoE in use: {} W of {} W", &[&format!("{:.1}", poe_total), &format!("{:.0}", d.poe_budget)]));
         }
         // What it learned from the traffic so far: the same tables the mac and arp commands print.
-        let tables = [(d.kind.bridges() || d.kind == Kind::HomeRouter, "MAC address table", self.net.mac_lines(id)), (d.kind.routes(), "ARP table", self.net.arp_lines(id))];
+        let tables = [(d.kind.bridges() || d.kind == Kind::HomeRouter, tr("MAC address table"), self.net.mac_lines(id)), (d.kind.routes(), tr("ARP table"), self.net.arp_lines(id))];
         for (_, title, lines) in tables.into_iter().filter(|t| t.0) {
             ui.add_space(6.0);
             ui.label(RichText::new(tr(title)).strong());
@@ -448,7 +448,7 @@ pub(crate) fn plan_picker(ui: &mut egui::Ui, d: &mut crate::net::Device, query: 
         return;
     }
     if let Some(p) = crate::catalog::plans().iter().find(|p| p.title() == d.model) {
-        let router = if p.router.is_empty() { String::new() } else { format!(" · comes with {}", p.router) };
+        let router = if p.router.is_empty() { String::new() } else { trf(" · comes with {}", &[&p.router]) };
         ui.label(RichText::new(format!("{}{router}", p.summary())).small().color(pal().dim)).on_hover_text(format!("{}\n{}", p.note, p.source));
     }
     ui.add(TextEdit::singleline(query).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, tr("Find your plan (Swisscom, Init7, Sunrise…)"))).desired_width(ui.available_width() - 8.0));
@@ -498,7 +498,7 @@ pub(crate) fn port_editor(ui: &mut egui::Ui, id: u32, ports: &mut Vec<PortGroup>
                 ui.add(egui::DragValue::new(&mut g.n).range(1..=96)).on_hover_text(tr("How many ports of this kind"));
                 ui.label(tr("×"));
                 if g.kind.line() {
-                    ui.add(egui::DragValue::new(&mut g.mbps).range(1..=10000).speed(10.0).suffix(" Mbit/s")).on_hover_text(tr("The fastest line rate the modem supports"));
+                    ui.add(egui::DragValue::new(&mut g.mbps).range(1..=10000).speed(10.0).suffix(tr(" Mbit/s"))).on_hover_text(tr("The fastest line rate the modem supports"));
                 } else {
                     speed_combo(ui, ("pg-speed", id, i), &mut g.mbps);
                 }

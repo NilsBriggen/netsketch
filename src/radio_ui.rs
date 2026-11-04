@@ -94,7 +94,7 @@ pub(crate) fn catalog_picker(ui: &mut egui::Ui, d: &mut Device, query: &mut Stri
         ui.label(RichText::new(format!("{} {}", p.year, p.note)).small().color(pal().dim)).on_hover_text(trf("{}\nSpecs from {}", &[&(p.summary()), &p.source]));
     }
     let total = crate::catalog::search(d.kind, "").len();
-    ui.add(TextEdit::singleline(query).hint_text(format!("{}  Find a real model ({total} in the catalog)", ic::MAGNIFYING_GLASS)).desired_width(ui.available_width() - 8.0))
+    ui.add(TextEdit::singleline(query).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, trf("Find a real model ({} in the catalog)", &[&total]))).desired_width(ui.available_width() - 8.0))
         .on_hover_text(tr("Type a brand or name — Swisscom, Internet-Box, FRITZ!Box, Deco, Orbi, UniFi… — and pick it to copy its radio, ports, power use and price"));
     if query.trim().is_empty() {
         return None;
@@ -206,7 +206,7 @@ impl App {
         painter.rect_filled(r, 8, pal().card.gamma_multiply(0.92));
         let mut x = r.left() + 10.0;
         // Narrow canvas: a short caption so the colours still fit.
-        let caption = if rect.width() < 810.0 { "Signal:" } else { ["Wi-Fi map (best band):", "Wi-Fi map (2.4 GHz):", "Wi-Fi map (5 GHz):", "Wi-Fi map (6 GHz):"][self.heat_band.min(3)] };
+        let caption = if rect.width() < 810.0 { "Signal:" } else { [tr("Wi-Fi map (best band):"), tr("Wi-Fi map (2.4 GHz):"), tr("Wi-Fi map (5 GHz):"), tr("Wi-Fi map (6 GHz):")][self.heat_band.min(3)] };
         let g = painter.layout_no_wrap(caption.into(), FontId::proportional(11.5), pal().dim);
         let w = g.size().x;
         painter.galley(pos2(x, r.center().y - g.size().y / 2.0), g, pal().dim);
@@ -275,7 +275,7 @@ impl App {
             painter.rect_filled(r, 5, pal().card);
             painter.galley(r.min + vec2(5.0, 2.0), g, pal().text);
         } else {
-            painter.text(sp + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, "click to start a wall", FontId::proportional(11.5), pal().dim);
+            painter.text(sp + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, tr("click to start a wall"), FontId::proportional(11.5), pal().dim);
         }
         if ended || resp.double_clicked() {
             self.wall_start = None;
@@ -330,7 +330,7 @@ impl App {
         let mut delete = false;
         let Some(w) = self.net.walls.iter_mut().find(|w| w.id == id) else { return };
         let len = ((w.b[0] - w.a[0]).powi(2) + (w.b[1] - w.a[1]).powi(2)).sqrt() / PX_PER_M;
-        Self::header(ui, ic::WALL, wall_color(w.kind), "Wall", &format!("{} · {len:.1} m", w.kind.label()));
+        Self::header(ui, ic::WALL, wall_color(w.kind), tr("Wall"), &format!("{} · {len:.1} m", w.kind.label()));
         ui.add_space(4.0);
         egui::Grid::new(("wall", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
             ui.label(RichText::new(tr("Material")).color(pal().dim));
@@ -362,7 +362,7 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(tr("Put in")).color(pal().dim));
-            for (label, kind, width) in [("Door", Some(WallKind::Wood), 0.9), ("Window", Some(WallKind::Glass), 1.2), ("Opening", None, 0.9)] {
+            for (label, kind, width) in [(tr("Door"), Some(WallKind::Wood), 0.9), (tr("Window"), Some(WallKind::Glass), 1.2), (tr("Opening"), None, 0.9)] {
                 if ui.small_button(label).on_hover_text(trf("A {} m {} in the middle of this wall", &[&width, &(label.to_lowercase())])).clicked() {
                     self.snapshot();
                     let msg = insert_opening(&mut self.net, id, kind, width);
@@ -444,7 +444,7 @@ impl App {
                 ui.add(egui::DragValue::new(&mut d.ch[0]).range(1..=13));
                 ui.end_row();
                 ui.label(tr("Active"));
-                ui.add(egui::Slider::new(&mut d.busy, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}% of the time", v * 100.0)));
+                ui.add(egui::Slider::new(&mut d.busy, 0.0..=1.0).custom_formatter(|v, _| trf("{}% of the time", &[&format!("{:.0}", v * 100.0)])));
                 ui.end_row();
                 ui.label(tr("Leaks about"));
                 ui.add(egui::DragValue::new(&mut d.tx[0]).range(-30.0..=20.0).speed(0.2).suffix(" dBm"));
@@ -492,14 +492,14 @@ impl App {
                 ui.end_row();
             }
             ui.label(tr("Antennas"));
-            ui.add(egui::Slider::new(&mut d.streams, 1..=4).suffix(" streams")).on_hover_text(tr("Antenna streams (MIMO): each one adds a lane of speed"));
+            ui.add(egui::Slider::new(&mut d.streams, 1..=4).suffix(tr(" streams"))).on_hover_text(tr("Antenna streams (MIMO): each one adds a lane of speed"));
             ui.end_row();
         });
         }
         if Self::section_hint(ui, "Bands", if speaker { "All speakers of one system share the mesh channel. On 2.4 GHz it competes with your Wi-Fi." } else { "Width: wider is faster but collides with more neighbours. Power: the EU limit is shown when you hover the value. Radar (DFS) channels on 5 GHz may have to be left when radar shows up." }) {
         egui::Grid::new(("bands", id)).num_columns(4).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            for h in ["", "Width", "Channel", "Power"] {
-                ui.label(RichText::new(h).small().color(pal().dim));
+            for h in ["", tr("Width"), tr("Channel"), tr("Power")] {
+                ui.label(RichText::new(tr(h)).small().color(pal().dim));
             }
             ui.end_row();
             for b in Band::ALL {
@@ -526,9 +526,9 @@ impl App {
                     });
                     let limit = b.eirp_limit(d.ch[i]);
                     let over = d.tx[i] > limit;
-                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(trf("EU limit on {} channel {}: {} dBm{}", &[&(b.label()), &(d.ch[i]), &format!("{:.0}", limit), &(if over { " — above it!" } else { "" })]));
+                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(trf("EU limit on {} channel {}: {} dBm{}", &[&(b.label()), &(d.ch[i]), &format!("{:.0}", limit), &(if over { tr(" — above it!") } else { "" })]));
                 } else {
-                    ui.label(RichText::new(if allowed == 0 { "not with this standard" } else { "off" }).small().color(pal().dim));
+                    ui.label(RichText::new(if allowed == 0 { tr("not with this standard") } else { "off" }).small().color(pal().dim));
                     ui.label("");
                     ui.label("");
                 }
@@ -543,7 +543,7 @@ impl App {
         ui.label(RichText::new(trf("Top rate {} Mbit/s", &[&(top.join(" · "))])).small().color(pal().dim)).on_hover_text(tr("Link rate on paper; real throughput is about 60% of it, shared by everyone on the channel."));
         }
         if kind == Kind::Neighbor {
-            ui.add(egui::Slider::new(&mut d.busy, 0.0..=1.0).text("of the airtime they use").custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            ui.add(egui::Slider::new(&mut d.busy, 0.0..=1.0).text(tr("of the airtime they use")).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             return;
         }
         if speaker {
@@ -563,8 +563,8 @@ impl App {
         let d = self.net.dev_mut(id).unwrap();
         let mut aim_target = None;
         if d.beam > 0.0 {
-            ui.add(egui::Slider::new(&mut d.beam, 5.0..=120.0).text("beam width").suffix("°"));
-            ui.add(egui::Slider::new(&mut d.aim, 0.0..=359.0).text("points to").suffix("°"));
+            ui.add(egui::Slider::new(&mut d.beam, 5.0..=120.0).text(tr("beam width")).suffix("°"));
+            ui.add(egui::Slider::new(&mut d.aim, 0.0..=359.0).text(tr("points to")).suffix("°"));
             let me = id;
             let others: Vec<(u32, String)> = self_targets.iter().filter(|t| t.0 != me).cloned().collect();
             egui::ComboBox::from_id_salt(("aim", id)).selected_text("Aim at…").width(200.0).show_ui(ui, |ui| {
@@ -710,7 +710,7 @@ impl App {
                 });
             });
             let has_port = !d.ifaces.is_empty();
-            if ui.add_enabled(has_port, egui::Button::new(format!("{}  {}", ic::PLUS, tr("Add VLAN interface")))).on_disabled_hover_text("Connect a cable first: VLAN interfaces ride on a port").clicked() {
+            if ui.add_enabled(has_port, egui::Button::new(format!("{}  {}", ic::PLUS, tr("Add VLAN interface")))).on_disabled_hover_text(tr("Connect a cable first: VLAN interfaces ride on a port")).clicked() {
                 add = true;
             }
         }
@@ -810,21 +810,21 @@ impl App {
         let Some(r) = self.net.roam_step(id) else { return };
         let (name, from, to) = (self.net.name(id), self.net.name(r.from), self.net.name(r.to));
         let how = if r.fast {
-            "802.11r fast transition — a call wouldn't notice".to_string()
+            tr("802.11r fast transition — a call wouldn't notice").to_string()
         } else if r.lost {
-            "after losing the signal completely — everything stalled".to_string()
+            tr("after losing the signal completely — everything stalled").to_string()
         } else {
-            "full re-login — a video call freezes for a moment".to_string()
+            tr("full re-login — a video call freezes for a moment").to_string()
         };
-        let mut info = format!("{name} hands over {from} → {to}: {:.0} → {:.0} dBm in {:.0} ms ({how})", r.before, r.after, r.ms);
+        let mut info = trf("{} hands over {} → {}: {} → {} dBm in {} ms ({})", &[&name, &from, &to, &format!("{:.0}", r.before), &format!("{:.0}", r.after), &format!("{:.0}", r.ms), &how]);
         if r.kicked {
-            info += ", pushed off by the minimum-signal rule";
+            info += tr(", pushed off by the minimum-signal rule");
         }
         let mut logs = vec![
-            net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: "Link", info: info.clone(), dev: id, ..Default::default() },
+            net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: tr("Link"), info: info.clone(), dev: id, ..Default::default() },
         ];
         if !r.same_lan {
-            logs.push(net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: "Link", info: "New network behind this access point: new address, open connections break".into(), dev: id, ..Default::default() });
+            logs.push(net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: tr("Link"), info: tr("New network behind this access point: new address, open connections break").into(), dev: id, ..Default::default() });
             self.net.dhcp_one(id, &mut logs);
         }
         self.push_logs(logs);
@@ -880,13 +880,13 @@ impl App {
                     }
                     ui.end_row();
                 }
-                row(ui, "Band", format!("{} · channel {} · {} MHz", s.band.label(), self.net.channel(&ap, s.band), s.width));
-                row(ui, "Antennas", format!("{}×{} streams ({} on both sides)", s.streams, s.streams, s.streams));
-                row(ui, "Answer back", format!("{:.0} dBm at the access point", s.up));
-                row(ui, "Walls", format!("{} in the way", s.walls));
-                row(ui, "Airtime", if s.contention > 1.05 { format!("shared ×{:.1} with other networks", s.contention) } else { "channel to itself".into() });
+                row(ui, tr("Band"), trf("{} · channel {} · {} MHz", &[&(s.band.label()), &(self.net.channel(&ap, s.band)), &s.width]));
+                row(ui, tr("Antennas"), trf("{}×{} streams ({} on both sides)", &[&s.streams, &s.streams, &s.streams]));
+                row(ui, tr("Answer back"), trf("{} dBm at the access point", &[&format!("{:.0}", s.up)]));
+                row(ui, tr("Walls"), trf("{} in the way", &[&s.walls]));
+                row(ui, tr("Airtime"), if s.contention > 1.05 { trf("shared ×{} with other networks", &[&format!("{:.1}", s.contention)]) } else { tr("channel to itself").into() });
                 let th = crate::wifi::roam_threshold(&ap, &d);
-                row(ui, "Roaming", if ap.fast_roam { format!("fast (802.11k/v/r) — looks around below {th:.0} dBm") } else { format!("basic — this device hangs on until {th:.0} dBm") });
+                row(ui, tr("Roaming"), if ap.fast_roam { trf("fast (802.11k/v/r) — looks around below {} dBm", &[&format!("{:.0}", th)]) } else { trf("basic — this device hangs on until {} dBm", &[&format!("{:.0}", th)]) });
             });
         } else if d.kind.transmits() {
             let clients: Vec<(String, f32, f32)> = self
@@ -915,11 +915,11 @@ impl App {
                 let (c, who) = self.net.contention(&d, b);
                 let names: Vec<String> = who.iter().map(|w| self.net.name(*w)).collect();
                 let with = if who.is_empty() {
-                    if d.kind.foreign() { "nothing of yours nearby".to_string() } else { "all yours".into() }
+                    if d.kind.foreign() { tr("nothing of yours nearby").to_string() } else { tr("all yours").into() }
                 } else if d.kind.foreign() {
                     names.join(", ")
                 } else {
-                    format!("shared ×{c:.1} with {}", names.join(", "))
+                    trf("shared ×{} with {}", &[&format!("{:.1}", c), &(names.join(", "))])
                 };
                 ui.label(trf("{} ch {} ({} MHz): {}", &[&(b.label()), &(self.net.channel(&d, b)), &(d.width[b.i()]), &with]));
             }
@@ -960,8 +960,8 @@ impl App {
                 ui.label(RichText::new(format!("{r:>4.0}")).monospace().color(quality_color(r)));
                 let (label, tag) = match t.kind {
                     Kind::Neighbor => (t.ssid.clone(), " (neighbour)"),
-                    Kind::Interference => (t.name.clone(), " (not Wi-Fi)"),
-                    Kind::Speaker => (t.name.clone(), " (speaker mesh)"),
+                    Kind::Interference => (t.name.clone(), tr(" (not Wi-Fi)")),
+                    Kind::Speaker => (t.name.clone(), tr(" (speaker mesh)")),
                     _ => (t.ssid.clone(), ""),
                 };
                 ui.label(format!("{label}{tag}"));
@@ -985,7 +985,7 @@ impl App {
         let y = |r: f32| rect.bottom() - (r.clamp(-95.0, -30.0) + 95.0) / 65.0 * rect.height();
         let x = |t: f64| rect.right() - ((now - t) as f32 / 45.0) * rect.width();
         let th = self.net.wifi_link_of(id).and_then(|l| self.net.wifi_ends(l)).map(|(ap, cl)| crate::wifi::roam_threshold(ap, cl)).unwrap_or(-75.0);
-        for (lvl, txt) in [(-67.0, "good"), (th, "starts looking for another access point")] {
+        for (lvl, txt) in [(-67.0, "good"), (th, tr("starts looking for another access point"))] {
             p.extend(Shape::dashed_line(&[pos2(rect.left(), y(lvl)), pos2(rect.right(), y(lvl))], Stroke::new(1.0, pal().dim.gamma_multiply(0.6)), 4.0, 4.0));
             p.text(pos2(rect.left() + 4.0, y(lvl) - 2.0), Align2::LEFT_BOTTOM, format!("{lvl:.0} {txt}"), FontId::proportional(10.0), pal().dim);
         }
@@ -995,7 +995,7 @@ impl App {
             p.line_segment([pos2(x(s.0), rect.top()), pos2(x(s.0), rect.bottom())], Stroke::new(1.5, pal().amber));
             p.text(pos2(x(s.0) + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, "hand-over", FontId::proportional(10.0), pal().amber);
         }
-        p.text(rect.right_top() + vec2(-6.0, 4.0), Align2::RIGHT_TOP, "signal, last 45 s", FontId::proportional(10.0), pal().dim);
+        p.text(rect.right_top() + vec2(-6.0, 4.0), Align2::RIGHT_TOP, tr("signal, last 45 s"), FontId::proportional(10.0), pal().dim);
     }
 }
 
@@ -1019,7 +1019,7 @@ impl App {
             }
         }
         if d.kind.transmits() {
-            let bands: Vec<String> = Band::ALL.iter().filter(|b| d.bands[b.i()]).map(|b| format!("{} ch {} {} MHz {:.0} dBm", b.label(), self.net.channel(d, *b), d.width[b.i()], d.tx[b.i()])).collect();
+            let bands: Vec<String> = Band::ALL.iter().filter(|b| d.bands[b.i()]).map(|b| trf("{} ch {} {} MHz {} dBm", &[&(b.label()), &(self.net.channel(d, *b)), &(d.width[b.i()]), &format!("{:.0}", d.tx[b.i()])])).collect();
             for b in bands {
                 ui.label(RichText::new(b).small());
             }
@@ -1071,10 +1071,10 @@ pub fn joined_walls(walls: &[crate::wifi::Wall], start: u32) -> Vec<u32> {
 
 /// Splits a wall around its middle and puts a door, window (or a plain gap) of `width` metres there.
 pub fn insert_opening(n: &mut crate::net::Network, id: u32, kind: Option<WallKind>, width: f32) -> String {
-    let Some(w) = n.walls.iter().find(|w| w.id == id).cloned() else { return "No such wall.".into() };
+    let Some(w) = n.walls.iter().find(|w| w.id == id).cloned() else { return tr("No such wall.").into() };
     let len = ((w.b[0] - w.a[0]).powi(2) + (w.b[1] - w.a[1]).powi(2)).sqrt() / PX_PER_M;
     if len < width + 0.2 {
-        return format!("The wall is only {len:.1} m long — too short for a {width} m opening.");
+        return trf("The wall is only {} m long — too short for a {} m opening.", &[&format!("{:.1}", len), &width]);
     }
     let at = |t: f32| [w.a[0] + (w.b[0] - w.a[0]) * t, w.a[1] + (w.b[1] - w.a[1]) * t];
     let (t0, t1) = (0.5 - width / len / 2.0, 0.5 + width / len / 2.0);
@@ -1086,8 +1086,8 @@ pub fn insert_opening(n: &mut crate::net::Network, id: u32, kind: Option<WallKin
         }
     }
     match kind {
-        Some(k) => format!("Put a {width} m {} into the wall — drag its ends to move it.", k.label().to_lowercase()),
-        None => format!("Left a {width} m opening in the wall."),
+        Some(k) => trf("Put a {} m {} into the wall — drag its ends to move it.", &[&width, &(k.label().to_lowercase())]),
+        None => trf("Left a {} m opening in the wall.", &[&width]),
     }
 }
 

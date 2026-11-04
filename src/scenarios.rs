@@ -633,24 +633,33 @@ pub const EXERCISES: &[(&str, &str)] = &[
     ("rip", "Let PC A reach PC C without typing a single route: turn on RIP on the routers."),
 ];
 
-/// Ok with praise when the exercise for this scenario is solved, Err with what's still wrong.
+/// Ok with praise when the exercise for this scenario is solved, Err with what's still wrong. Every check looks
+/// at the plan itself (levels, fixes on offer, airtime, routes), never at message wording, which is translated.
 pub fn check_exercise(n: &Network) -> Result<String, String> {
+    use crate::issues::Fix;
     use crate::net::Level;
     let issues = n.check();
     let left = |what: &dyn Fn(&crate::net::Issue) -> bool| issues.iter().filter(|i| what(i)).map(|i| i.text.clone()).next();
     let still = match n.scenario.as_str() {
         "nightmare" => left(&|i| i.level == Level::Error),
-        "extender" => left(&|i| i.level != Level::Tip && (i.text.contains("crosses the air twice") || i.text.contains("its own name")))
-            .or_else(|| left(&|i| i.text.contains("uses its own name"))),
+        // Its own name (offered: use the same name) or a device going through it needlessly (offered: reconnect).
+        "extender" => left(&|i| matches!(i.fix, Some(Fix::SameSsid(..)) | Some(Fix::Reconnect(..)))),
         "speakers" => {
             // Chosen on purpose: a switch with a priority below the default 32768.
             match n.stp().root.and_then(|r| n.dev(r)) {
                 Some(d) if d.kind == Kind::Switch && d.priority < 32768 => None,
-                Some(d) => Some(format!("{} is the root only by chance (priority {}).", d.name, d.priority)),
-                None => Some("Nothing runs spanning tree.".into()),
+                Some(d) => Some(crate::i18n::trf("{} is the root only by chance (priority {}).", &[&d.name, &d.priority])),
+                None => Some(crate::i18n::tr("Nothing runs spanning tree.").into()),
             }
         }
-        "apartment" => left(&|i| i.level != Level::Tip && (i.text.contains("of the airtime") || i.text.contains("overlap"))),
+        // The same rule as the airtime warning: none of your radios may have to share more than about a quarter.
+        "apartment" => n
+            .devices
+            .iter()
+            .filter(|r| matches!(r.kind, Kind::HomeRouter | Kind::AccessPoint) && !r.off)
+            .flat_map(|r| crate::wifi::Band::ALL.into_iter().filter(|b| r.bands[b.i()]).map(move |b| (r, b)))
+            .find(|(r, b)| n.contention(r, *b).0 > 1.35)
+            .map(|(r, b)| crate::i18n::trf("{} still shares {} channel {} with the neighbours.", &[&r.name, &b.label(), &n.channel(r, b)])),
         "office" => {
             let pc = n.devices.iter().find(|d| d.name == "Mislabelled PC").map(|d| d.id);
             left(&|i| i.level == Level::Error && i.dev.is_some() && i.dev == pc)
@@ -660,9 +669,9 @@ pub fn check_exercise(n: &Network) -> Result<String, String> {
             match (ip("PC A"), ip("PC C")) {
                 (Some((a, ia)), Some((c, ic))) => {
                     let (there, back) = (n.send(a, ia, ic, "ICMP", 0, None), n.send(c, ic, ia, "ICMP", 0, None));
-                    (!there.ok || !back.ok).then(|| format!("PC A can't reach PC C: {}", if there.ok { back.error } else { there.error }))
+                    (!there.ok || !back.ok).then(|| crate::i18n::trf("PC A can't reach PC C: {}", &[&(if there.ok { back.error } else { there.error })]))
                 }
-                _ => Some("PC A or PC C has no address.".into()),
+                _ => Some(crate::i18n::tr("PC A or PC C has no address.").into()),
             }
         }
         _ => return Err("This plan has no exercise.".into()),

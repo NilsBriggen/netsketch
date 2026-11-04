@@ -136,7 +136,7 @@ impl Network {
         for l in self.links.iter().filter(|l| l.medium == Medium::WiFi) {
             let Some((ap, cl)) = self.wifi_ends(l) else { continue };
             let Some(s) = self.link_signal(l) else { continue };
-            let walls = if s.walls > 0 { format!(" through {} wall(s)", s.walls) } else { String::new() };
+            let walls = if s.walls > 0 { crate::i18n::trf(" through {} wall(s)", &[&s.walls]) } else { String::new() };
             if !s.alive() {
                 let text = if s.rssi >= crate::wifi::floor(s.band) {
                     crate::i18n::trf("{} hears {} ({} dBm) but its answer doesn't make it back ({} dBm): the router shouts, the device whispers. More router power won't help — move closer or add an access point.", &[&cl.name, &ap.name, &format!("{:.0}", s.rssi), &format!("{:.0}", s.up)])

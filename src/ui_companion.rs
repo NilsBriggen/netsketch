@@ -18,7 +18,7 @@ impl App {
             painter.text(c, Align2::CENTER_CENTER, ic::MAP_PIN, FontId::proportional(15.0), col);
             // Placed pins keep quiet (their name shows on hover); unplaced ones ask to be moved.
             if !p.placed || selected {
-                let label = if p.placed { p.name.clone() } else { format!("{} — drag me to where you measured", p.name) };
+                let label = if p.placed { p.name.clone() } else { trf("{} — drag me to where you measured", &[&p.name]) };
                 painter.text(c + vec2(0.0, 16.0), Align2::CENTER_TOP, label, FontId::proportional(11.0), col);
             }
             let resp = ui.interact(r, Id::new(("pin", id)), Sense::click_and_drag());
@@ -72,7 +72,7 @@ impl App {
             let last = self.net.points.last().map(|p| (p.name.clone(), p.placed, p.floor));
             if let Some((name, placed, floor)) = last {
                 self.floor = floor;
-                self.say(ctx, if placed { format!("New measurement from the phone: '{name}' — pinned where you tapped.") } else { format!("New measurement from the phone: '{name}' — drag its pin to where you stood.") });
+                self.say(ctx, if placed { trf("New measurement from the phone: '{}' — pinned where you tapped.", &[&name]) } else { trf("New measurement from the phone: '{}' — drag its pin to where you stood.", &[&name]) });
             }
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -110,9 +110,9 @@ impl App {
                         .on_hover_text(tr("Linux with ufw: sudo ufw allow 47878/tcp && sudo ufw allow 47879/udp\nWindows asks the first time — allow access on private networks.\nmacOS: allow incoming connections when asked."));
                     ui.horizontal(|ui| {
                         let (txt, col) = match heard {
-                            Some(s) if s < 30 => ("Phone connected".to_string(), pal().green),
-                            Some(s) => (format!("Phone last seen {} min ago", s / 60 + 1), pal().amber),
-                            None => ("Waiting for the phone…".to_string(), pal().dim),
+                            Some(s) if s < 30 => (tr("Phone connected").to_string(), pal().green),
+                            Some(s) => (trf("Phone last seen {} min ago", &[&(s / 60 + 1)]), pal().amber),
+                            None => (tr("Waiting for the phone…").to_string(), pal().dim),
                         };
                         ui.label(RichText::new(txt).color(col));
                         if ui.small_button(tr("Stop")).on_hover_text(tr("Close the link")).clicked() {
@@ -137,7 +137,7 @@ impl App {
         if pts > 0 {
             ui.label(trf("{} measuring points from the companion app", &[&pts]));
             if unplaced > 0 {
-                let what = if unplaced == 1 { "1 pin still needs its place: drag the orange pin".to_string() } else { format!("{unplaced} pins still need their place: drag the orange pins") };
+                let what = if unplaced == 1 { tr("1 pin still needs its place: drag the orange pin").to_string() } else { trf("{} pins still need their place: drag the orange pins", &[&unplaced]) };
                 ui.label(RichText::new(trf("{} {} to where you stood.", &[&(ic::MAP_PIN), &what])).color(pal().amber));
             }
         }
@@ -163,7 +163,7 @@ impl App {
                     });
                     let current = m.dev.and_then(|d| targets.iter().find(|t| t.0 == d)).map(|t| t.1.clone()).unwrap_or_else(|| "Not in the plan".into());
                     egui::ComboBox::from_id_salt(("belongs", &m.key)).selected_text(current).width(150.0).show_ui(ui, |ui| {
-                        if ui.selectable_label(m.dev.is_none(), "Not in the plan").clicked() {
+                        if ui.selectable_label(m.dev.is_none(), tr("Not in the plan")).clicked() {
                             link = Some((m.key.clone(), None));
                         }
                         if ui.selectable_label(false, format!("{} {}", ic::PLUS, tr("Add as a neighbour"))).clicked() {
@@ -212,8 +212,8 @@ impl App {
         let mut delete = false;
         let models: Vec<(String, u32)> = self.net.measured.clone();
         let Some(p) = self.net.points.iter_mut().find(|p| p.id == id) else { return };
-        let sub = if p.phone.is_empty() { "Measuring point".to_string() } else { format!("Measured with {}", p.phone) };
-        Self::header(ui, ic::MAP_PIN, if p.placed { pal().accent } else { pal().amber }, "Measuring point", &sub);
+        let sub = if p.phone.is_empty() { tr("Measuring point").to_string() } else { trf("Measured with {}", &[&p.phone]) };
+        Self::header(ui, ic::MAP_PIN, if p.placed { pal().accent } else { pal().amber }, tr("Measuring point"), &sub);
         ui.add_space(4.0);
         egui::Grid::new(("pt", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
             ui.label(RichText::new(tr("Name")).color(pal().dim));
@@ -252,7 +252,7 @@ impl App {
                     match model {
                         Some(v) => {
                             let off = v - s.rssi;
-                            ui.label(RichText::new(if off.abs() < 0.5 { format!("model {v:.0} (same)") } else { format!("model {v:.0} ({off:+.0})") }).small().color(if off.abs() < 4.0 { pal().green } else if off.abs() < 8.0 { pal().amber } else { pal().red }));
+                            ui.label(RichText::new(if off.abs() < 0.5 { trf("model {} (same)", &[&format!("{:.0}", v)]) } else { format!("model {v:.0} ({off:+.0})") }).small().color(if off.abs() < 4.0 { pal().green } else if off.abs() < 8.0 { pal().amber } else { pal().red }));
                         }
                         None => {}
                     }
