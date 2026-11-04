@@ -1,5 +1,5 @@
 //! Window parts for the planning extras: floor plan pictures, measurements, model library,
-//! busy-hour apps, firewall / guest Wi-Fi / IPv6, Power over Ethernet and Ethernet ports.
+//! busy-hour apps, firewall / guest Wi-Fi / IPv6, Power over Ethernet and Ethernet ports (with the learned MAC and ARP tables).
 use super::*;
 use crate::extras::{load_library, save_library, FloorPlan, Model, Sample, GUEST_VLAN, POE};
 use crate::ports::{PortGroup, PortKind, SPEEDS};
@@ -343,6 +343,15 @@ impl App {
         }
         if d.poe_class > 0 {
             ui.label(trf("PoE in use: {} W of {} W", &[&format!("{:.1}", poe_total), &format!("{:.0}", d.poe_budget)]));
+        }
+        // What it learned from the traffic so far: the same tables the mac and arp commands print.
+        let tables = [(d.kind.bridges() || d.kind == Kind::HomeRouter, "MAC address table", self.net.mac_lines(id)), (d.kind.routes(), "ARP table", self.net.arp_lines(id))];
+        for (_, title, lines) in tables.into_iter().filter(|t| t.0) {
+            ui.add_space(6.0);
+            ui.label(RichText::new(tr(title)).strong());
+            for l in lines {
+                ui.label(RichText::new(l).monospace().small());
+            }
         }
     }
 }

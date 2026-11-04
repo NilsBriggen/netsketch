@@ -784,10 +784,10 @@ impl App {
             info += ", pushed off by the minimum-signal rule";
         }
         let mut logs = vec![
-            net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: "Link", info: info.clone(), dev: id },
+            net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: "Link", info: info.clone(), dev: id, ..Default::default() },
         ];
         if !r.same_lan {
-            logs.push(net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: "Link", info: "New network behind this access point: new address, open connections break".into(), dev: id });
+            logs.push(net::Log { src: name.clone(), dst: to.clone(), proto: "802.11", layer: "Link", info: "New network behind this access point: new address, open connections break".into(), dev: id, ..Default::default() });
             self.net.dhcp_one(id, &mut logs);
         }
         self.push_logs(logs);

@@ -269,6 +269,19 @@ struct Anim {
     path: Vec<u32>,
     t0: f64,
     ok: bool,
+    /// The packet's lines in the log, one per router hop (for the step-through view).
+    hops: Vec<net::Log>,
+}
+
+/// Step `k` of the queued packets, counting every device each one passes: the packet and where it is.
+fn step_at(anims: &[Anim], mut k: usize) -> Option<(&Anim, usize)> {
+    for a in anims {
+        if k < a.path.len() {
+            return Some((a, k));
+        }
+        k -= a.path.len();
+    }
+    None
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -352,6 +365,10 @@ struct App {
     sim_tab: SimTab,
     rows: Vec<Row>,
     anims: Vec<Anim>,
+    /// A packet log line opened in the layer view.
+    pkt_view: Option<net::Log>,
+    /// Step-through mode: packets wait at each device until "Next step"; the number is the step shown.
+    step: Option<usize>,
     lesson: usize,
     heat: bool,
     /// Storey shown on the map.
@@ -448,6 +465,8 @@ impl App {
             sim_tab: SimTab::Browser,
             rows: vec![],
             anims: vec![],
+            pkt_view: None,
+            step: None,
             lesson: 0,
             heat: false,
             floor: 0,
@@ -618,7 +637,8 @@ impl App {
         let mut t0 = now;
         for t in out.traces {
             let len = t.path.len();
-            self.anims.push(Anim { path: t.path, t0, ok: t.ok });
+            let hops = t.log.into_iter().filter(|l| l.hdr.ip.is_some()).collect();
+            self.anims.push(Anim { path: t.path, t0, ok: t.ok, hops });
             t0 += len as f64 * 0.28;
         }
         self.push_logs(out.log);
@@ -1284,9 +1304,17 @@ impl App {
 
         self.draw_points(ui, &painter);
 
-        // Moving packets.
-        self.anims.retain(|a| now < a.t0 + a.path.len() as f64 * 0.28 + 0.6);
-        for a in &self.anims {
+        // Moving packets; in step-through mode the one packet waits at its device.
+        if let Some((a, i)) = self.step.and_then(|k| step_at(&self.anims, k)) {
+            let p = self.dev_pos(a.path[i]);
+            let col = if a.ok || i + 1 < a.path.len() { pal().accent } else { pal().red };
+            painter.circle_filled(p - vec2(0.0, size * 0.5 + 10.0 * z), 11.0 * z, col.gamma_multiply(0.3));
+            painter.circle_filled(p - vec2(0.0, size * 0.5 + 10.0 * z), 6.0 * z, col);
+        }
+        if self.step.is_none() {
+            self.anims.retain(|a| now < a.t0 + a.path.len() as f64 * 0.28 + 0.6);
+        }
+        for a in self.anims.iter().filter(|_| self.step.is_none()) {
             let t = ((now - a.t0) / 0.28).max(0.0);
             let i = t.floor() as usize;
             if now < a.t0 {
@@ -1304,7 +1332,7 @@ impl App {
                 painter.text(p - vec2(0.0, size * 0.5 + 12.0 * z), Align2::CENTER_CENTER, icon, FontId::proportional(18.0 * z), col);
             }
         }
-        if !self.anims.is_empty() {
+        if !self.anims.is_empty() && self.step.is_none() {
             ui.ctx().request_repaint();
         }
 
@@ -1722,8 +1750,12 @@ impl App {
                 if kind.offers("print") {
                     ui.checkbox(&mut d.services.print, tr("Printing (IPP)"));
                 }
+                if kind.offers("mail") {
+                    ui.checkbox(&mut d.services.mail, tr("Mail server (SMTP + IMAP)")).on_hover_text(tr("Takes in email for the domain whose name record points here; read it with the inbox command"));
+                }
             }
             if kind.routes() && kind != Kind::Internet && Self::section(ui, "Routes") {
+                ui.checkbox(&mut d.services.rip, tr("RIP: share routes with neighbour routers")).on_hover_text(tr("Routers with RIP on tell each other which networks they reach and fill their routing tables themselves, up to 15 routers away"));
                 ui.add(TextEdit::multiline(&mut d.routes).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("10.0.2.0/24 via 10.0.1.2"))).on_hover_text(tr("Extra routes, one per line: network/prefix via gateway"));
             }
             // The internet cloud is the outside world: no ports or storey to plan.
@@ -2306,6 +2338,12 @@ impl App {
             }
             tab(ui, &mut self.bottom, Bottom::Shopping, t(ic::SHOPPING_CART, tr("Shopping list").into(), String::new()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if self.mode == Mode::Simulate {
+                    let mut stepping = self.step.is_some();
+                    if ui.checkbox(&mut stepping, tr("Step through")).on_hover_text(tr("Packets stop at every device; Next step moves them on and shows what the packet carries there")).changed() {
+                        self.step = stepping.then_some(0);
+                    }
+                }
                 if self.bottom == Bottom::Packets {
                     if ui.small_button(format!("{} {}", ic::BROOM, tr("Clear"))).clicked() {
                         self.rows.clear();
@@ -2350,7 +2388,9 @@ impl App {
                     ui.label(RichText::new(tr("No traffic yet. Switch to Simulate and run a command.")).color(pal().dim));
                 }
                 let rows: Vec<&Row> = self.rows.iter().filter(|r| !self.only_selected || sel.is_none() || Some(r.log.dev) == sel).collect();
-                packet_grid(ui, "pk", &rows);
+                if let Some(l) = packet_grid(ui, "pk", &rows) {
+                    self.pkt_view = Some(l);
+                }
             }
             Bottom::Shopping => {
                 let (items, total) = shopping(&self.net);
@@ -2476,7 +2516,9 @@ fn stat(ui: &mut egui::Ui, value: &str, label: &str, col: Color32) {
     });
 }
 
-fn packet_grid(ui: &mut egui::Ui, id: &str, rows: &[&Row]) {
+/// The packet log as a table. Returns the line clicked, for the layer view.
+fn packet_grid(ui: &mut egui::Ui, id: &str, rows: &[&Row]) -> Option<net::Log> {
+    let mut picked = None;
     egui::Grid::new(id).striped(true).num_columns(6).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
         for h in ["Time", "Source", "Destination", "Protocol", "Layer", "What happens"] {
             ui.label(RichText::new(tr(h)).small().color(pal().dim));
@@ -2488,10 +2530,71 @@ fn packet_grid(ui: &mut egui::Ui, id: &str, rows: &[&Row]) {
             ui.label(RichText::new(&r.log.dst).monospace());
             ui.label(RichText::new(r.log.proto).strong().color(proto_color(r.log.proto)));
             ui.label(RichText::new(r.log.layer).color(pal().dim));
-            ui.label(&r.log.info);
+            let info = ui.add(egui::Label::new(&r.log.info).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr("Click: this packet layer by layer"));
+            if info.clicked() {
+                picked = Some(r.log.clone());
+            }
             ui.end_row();
         }
     });
+    picked
+}
+
+/// A packet's headers, layer by layer (Ethernet, IP, transport, application), outermost first.
+fn layer_list(ui: &mut egui::Ui, log: &net::Log) {
+    let layers = log.layers();
+    if layers.is_empty() {
+        ui.label(RichText::new(tr("This line is a note from a device, not a packet with headers.")).color(pal().dim));
+    }
+    // Stacked, not a grid: a wrapping grid sizes itself far too tall on its first frame.
+    for (name, text) in layers {
+        ui.label(RichText::new(tr(name)).strong().color(pal().accent));
+        ui.label(RichText::new(text).monospace());
+    }
+}
+
+impl App {
+    /// The layer view of a clicked log line, and the step-through controls.
+    fn packet_windows(&mut self, ctx: &egui::Context) {
+        if let Some(log) = self.pkt_view.clone() {
+            let mut open = true;
+            egui::Window::new(format!("{}  {}", ic::STACK, tr("Packet layers"))).id(Id::new("pkt_view")).default_pos(self.canvas_rect.right_top() + vec2(-480.0, 12.0)).open(&mut open).resizable(false).default_width(460.0).show(ctx, |ui| {
+                ui.label(RichText::new(format!("{}  {} → {}", log.proto, log.src, log.dst)).strong().monospace());
+                ui.label(RichText::new(&log.info).color(pal().dim));
+                ui.add_space(4.0);
+                layer_list(ui, &log);
+            });
+            if !open {
+                self.pkt_view = None;
+            }
+        }
+        let Some(k) = self.step.filter(|_| self.mode == Mode::Simulate) else { return };
+        let total: usize = self.anims.iter().map(|a| a.path.len()).sum();
+        let mut next = false;
+        egui::Window::new(format!("{}  {}", ic::FOOTPRINTS, tr("Step through"))).id(Id::new("step")).default_pos(self.canvas_rect.left_top() + vec2(12.0, 56.0)).resizable(false).default_width(460.0).show(ctx, |ui| {
+            let Some((a, i)) = step_at(&self.anims, k) else {
+                ui.label(RichText::new(tr("No packet on its way. Run a command (ping, open…) and step through it here.")).color(pal().dim));
+                return;
+            };
+            let at = self.net.name(a.path[i]);
+            let state = if i + 1 < a.path.len() { tr("on its way") } else if a.ok { tr("arrived") } else { tr("stopped here") };
+            ui.label(RichText::new(trf("Step {} of {}: the packet is at {} ({})", &[&(k + 1), &total, &at, &state])).strong());
+            // The newest hop line sent from a device the packet has already passed.
+            if let Some(h) = a.hops.iter().rev().find(|h| a.path[..=i].contains(&h.dev)) {
+                ui.label(RichText::new(&h.info).color(pal().dim));
+                layer_list(ui, h);
+            }
+            ui.add_space(4.0);
+            next = ui.button(format!("{}  {}", ic::ARROW_RIGHT, tr("Next step"))).clicked();
+        });
+        if next {
+            self.step = Some(k + 1);
+        } else if k >= total && !self.anims.is_empty() {
+            // Everything has arrived: start the next command's packets from their first step.
+            self.anims.clear();
+            self.step = Some(0);
+        }
+    }
 }
 
 fn proto_color(p: &str) -> Color32 {
@@ -2761,6 +2864,7 @@ impl eframe::App for App {
         });
         egui::Panel::bottom("bottom").default_size(190.0).size_range(90.0..=(screen.height() * 0.4).max(120.0)).resizable(true).frame(side).show(ui, |ui| self.bottom_panel(ui, &issues));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().bg)).show(ui, |ui| self.canvas(ui, &issues));
+        self.packet_windows(&ctx);
     }
 }
 

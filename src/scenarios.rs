@@ -1,4 +1,4 @@
-//! Ready-made plans that each show a real-world problem.
+//! Ready-made plans that each show a real-world problem or lesson, and the find-the-fault exercises.
 use crate::net::{Iface, Kind, Medium, Network, Security};
 use crate::ports::{PortGroup, PortKind};
 use crate::wifi::{Wall, WallKind};
@@ -15,6 +15,7 @@ pub const SCENARIOS: &[(&str, &str, &str)] = &[
     ("campus", "University campus", "Four buildings on fibre, a data centre, 16 access points, VLANs, a packed lecture hall."),
     ("office", "Office with 100 VLANs", "Core router with 100 VLAN interfaces, four floors, redundant links."),
     ("classroom", "Two networks and a router (lesson)", "The classic first lesson: routing between two networks."),
+    ("rip", "Three routers in a row (lesson)", "Routers that don't know the way yet: let them tell each other by RIP."),
     ("blank", "Empty plan", "Start from scratch."),
 ];
 
@@ -197,7 +198,24 @@ pub fn build(name: &str, n: &mut Network) {
         "office" => office(n),
         "nightmare" => nightmare(n),
         "campus" => campus(n),
+        "rip" => rip(n),
         _ => {}
+    }
+}
+
+/// Three routers in a row with empty routing tables: PC A can't reach PC C until RIP shares the routes.
+fn rip(n: &mut Network) {
+    n.title = "Three routers in a row".into();
+    n.story = "PC A and PC C sit three routers apart. Each router only knows the networks plugged into it, so packets get stuck halfway. Turn on RIP on every router (Routes section): they tell their neighbours what they know, one hop at a time, and the routing tables fill themselves. Type route on a router to see the learned R lines.".into();
+    let a = named(n, Kind::Desktop, [100.0, 260.0], "PC A");
+    let rs: Vec<u32> = (1..=3).map(|i| named(n, Kind::Router, [100.0 + 180.0 * i as f32, 260.0], &format!("Router {i}"))).collect();
+    let c = named(n, Kind::Desktop, [820.0, 260.0], "PC C");
+    for w in [a, rs[0], rs[1], rs[2], c].windows(2) {
+        n.connect(w[0], w[1], Medium::Cat6).unwrap();
+    }
+    n.auto_address();
+    for r in rs {
+        n.dev_mut(r).unwrap().routes.clear();
     }
 }
 
@@ -612,6 +630,7 @@ pub const EXERCISES: &[(&str, &str)] = &[
     ("speakers", "Give a switch a lower spanning-tree priority so it's the root in every house, whatever hardware the speakers have."),
     ("apartment", "Get your access points off the channels your neighbours crowd."),
     ("office", "Get the mislabelled PC working: it must not have any red problem."),
+    ("rip", "Let PC A reach PC C without typing a single route: turn on RIP on the routers."),
 ];
 
 /// Ok with praise when the exercise for this scenario is solved, Err with what's still wrong.
@@ -635,6 +654,16 @@ pub fn check_exercise(n: &Network) -> Result<String, String> {
         "office" => {
             let pc = n.devices.iter().find(|d| d.name == "Mislabelled PC").map(|d| d.id);
             left(&|i| i.level == Level::Error && i.dev.is_some() && i.dev == pc)
+        }
+        "rip" => {
+            let ip = |name: &str| n.devices.iter().find(|d| d.name == name).and_then(|d| Some((d.id, d.first_ip()?)));
+            match (ip("PC A"), ip("PC C")) {
+                (Some((a, ia)), Some((c, ic))) => {
+                    let (there, back) = (n.send(a, ia, ic, "ICMP", 0, None), n.send(c, ic, ia, "ICMP", 0, None));
+                    (!there.ok || !back.ok).then(|| format!("PC A can't reach PC C: {}", if there.ok { back.error } else { there.error }))
+                }
+                _ => Some("PC A or PC C has no address.".into()),
+            }
         }
         _ => return Err("This plan has no exercise.".into()),
     };
@@ -742,6 +771,22 @@ mod tests {
         n.dev_mut(b).unwrap().aim += 90.0;
         let off = n.link_signal(&bridge).unwrap();
         assert!(off.rssi < aimed.rssi - 20.0, "{aimed:?} vs {off:?}");
+    }
+
+    #[test]
+    fn three_routers_work_once_rip_is_on() {
+        let mut n = template("rip");
+        assert!(super::check_exercise(&n).is_err());
+        let routers: Vec<u32> = n.devices.iter().filter(|d| d.kind == Kind::Router).map(|d| d.id).collect();
+        for r in &routers {
+            n.dev_mut(*r).unwrap().services.rip = true;
+        }
+        assert!(super::check_exercise(&n).is_ok(), "{:?}", super::check_exercise(&n));
+        let c = n.dev(id(&n, "PC C")).unwrap().ifaces[0].ip.clone();
+        let out = n.exec(id(&n, "PC A"), &format!("traceroute {c}")).lines.join("\n");
+        assert!(out.contains("Router 3") && out.contains("reached"), "{out}");
+        let out = n.exec(routers[0], "route").lines.join("\n");
+        assert!(out.contains("R  metric 2"), "{out}");
     }
 
     #[test]
