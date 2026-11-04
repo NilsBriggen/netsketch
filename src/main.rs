@@ -2293,6 +2293,13 @@ fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
 }
 
 impl eframe::App for App {
+    /// Screenshots ignore the real mouse, so a pointer resting on the window adds no hover or tooltip.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.screenshot.is_some() {
+            raw.events.retain(|e| !matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
