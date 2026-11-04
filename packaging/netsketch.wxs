@@ -15,7 +15,7 @@
             <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="NetSketch" Description="Plan, simulate and learn networks" Icon="netsketch.ico" Advertise="yes" />
           </File>
           <File Id="License" Source="LICENSE" Name="LICENSE.txt" />
-          <ProgId Id="NetSketch.Plan" Description="NetSketch network plan" Icon="netsketch.ico">
+          <ProgId Id="NetSketch.Plan" Description="NetSketch network plan">
             <Extension Id="netplan" ContentType="application/x-netsketch-plan">
               <Verb Id="open" Command="Open" TargetFile="NetSketchExe" Argument="&quot;%1&quot;" />
             </Extension>
