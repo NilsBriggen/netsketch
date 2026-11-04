@@ -18,6 +18,9 @@ pub enum WallKind {
 impl WallKind {
     pub const ALL: [WallKind; 7] = [WallKind::Drywall, WallKind::Wood, WallKind::Glass, WallKind::LowE, WallKind::Brick, WallKind::Concrete, WallKind::Metal];
     pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(self) -> &'static str {
         match self {
             WallKind::Drywall => "Drywall / plasterboard",
             WallKind::Wood => "Wood / door",

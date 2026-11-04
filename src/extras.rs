@@ -26,6 +26,9 @@ pub enum Use {
 
 impl Use {
     pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(self) -> &'static str {
         match self {
             Use::Browsing => "Web & apps",
             Use::VideoCall => "Video calls",

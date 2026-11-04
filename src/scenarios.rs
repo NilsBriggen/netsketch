@@ -639,8 +639,8 @@ pub fn check_exercise(n: &Network) -> Result<String, String> {
         _ => return Err("This plan has no exercise.".into()),
     };
     match still {
-        None => Ok("Solved — well done!".into()),
-        Some(t) => Err(format!("Not yet: {t}")),
+        None => Ok(crate::i18n::tr("Solved — well done!").into()),
+        Some(t) => Err(crate::i18n::trf("Not yet: {}", &[&t])),
     }
 }
 

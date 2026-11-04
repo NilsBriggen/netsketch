@@ -52,6 +52,9 @@ impl Kind {
         Kind::Interference,
     ];
     pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(self) -> &'static str {
         use Kind::*;
         match self {
             Internet => "Internet",
@@ -76,6 +79,9 @@ impl Kind {
         }
     }
     pub fn blurb(self) -> &'static str {
+        crate::i18n::tr(self.blurb_en())
+    }
+    fn blurb_en(self) -> &'static str {
         use Kind::*;
         match self {
             Internet => "Your internet provider (fibre, cable, DSL or 5G). Hands your router a public address and resolves names.",
@@ -239,6 +245,9 @@ pub enum Medium {
 impl Medium {
     pub const ALL: [Medium; 9] = [Medium::Cat6, Medium::Cat6a, Medium::Cat5e, Medium::Cat5, Medium::Fiber, Medium::Powerline, Medium::WiFi, Medium::Mesh, Medium::Cellular];
     pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(self) -> &'static str {
         match self {
             Medium::Cat5e => "Cat 5e cable",
             Medium::Cat6 => "Cat 6 cable",
@@ -252,6 +261,9 @@ impl Medium {
         }
     }
     pub fn speed(self) -> &'static str {
+        crate::i18n::tr(self.speed_en())
+    }
+    fn speed_en(self) -> &'static str {
         match self {
             Medium::Cat5e => "1–2.5 Gbit/s",
             Medium::Cat6 => "up to 10 Gbit/s (≤ 55 m)",
@@ -311,6 +323,9 @@ pub enum WifiStd {
 impl WifiStd {
     pub const ALL: [WifiStd; 4] = [WifiStd::Wifi7, WifiStd::Wifi6E, WifiStd::Wifi6, WifiStd::Wifi5];
     pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(self) -> &'static str {
         match self {
             WifiStd::Wifi5 => "Wi-Fi 5 (802.11ac, 5 GHz)",
             WifiStd::Wifi6 => "Wi-Fi 6 (802.11ax, 2.4/5 GHz)",
@@ -351,6 +366,9 @@ pub enum Security {
 impl Security {
     pub const ALL: [Security; 5] = [Security::Wpa3, Security::Wpa3Ent, Security::Wpa2, Security::Wep, Security::Open];
     pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(self) -> &'static str {
         match self {
             Security::Open => "Open (no password)",
             Security::Wep => "WEP (broken)",

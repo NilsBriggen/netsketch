@@ -20,6 +20,9 @@ pub enum PortKind {
 impl PortKind {
     pub const ALL: [PortKind; 4] = [PortKind::Rj45, PortKind::Fiber, PortKind::Dsl, PortKind::Coax];
     pub fn label(self) -> &'static str {
+        crate::i18n::tr(self.label_en())
+    }
+    fn label_en(self) -> &'static str {
         match self {
             PortKind::Rj45 => "RJ45",
             PortKind::Fiber => "SFP / fibre",
