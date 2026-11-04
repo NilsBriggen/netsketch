@@ -187,8 +187,8 @@ impl Network {
         for r in self.devices.iter().filter(|d| d.kind.radio()).filter(on) {
             for b in Band::ALL.into_iter().filter(|b| r.bands[b.i()]) {
                 let (ch, w) = (r.ch[b.i()], r.width[b.i()]);
-                if r.tx[b.i()] > b.eu_limit() + 0.01 {
-                    v.push(issue(Level::Tip, Some(r.id), None, format!("{}: {:.0} dBm on {} is above the EU limit of {:.0} dBm. It also doesn't help phones answer back.", r.name, r.tx[b.i()], b.label(), b.eu_limit()), None));
+                if r.tx[b.i()] > b.eirp_limit(ch) + 0.01 {
+                    v.push(issue(Level::Tip, Some(r.id), None, format!("{}: {:.0} dBm on {} is above the EU limit of {:.0} dBm. It also doesn't help phones answer back.", r.name, r.tx[b.i()], b.label(), b.eirp_limit(ch)), None));
                 }
                 if w > r.wifi.max_width(b.i()) {
                     v.push(issue(Level::Warning, Some(r.id), None, format!("{}: {} can't use {w} MHz on {} (max {} MHz).", r.name, r.wifi.label(), b.label(), r.wifi.max_width(b.i())), None));
@@ -196,7 +196,7 @@ impl Network {
                 if b != Band::B24 && !b.channels(w).contains(&ch) {
                     v.push(issue(Level::Warning, Some(r.id), None, format!("{}: channel {ch} doesn't fit a {w} MHz block on {} — pick one from the list.", r.name, b.label()), Some(Fix::AutoChannels)));
                 }
-                if b == Band::B5 && (52..=144).contains(&ch) && r.kind != Kind::Neighbor {
+                if crate::wifi::dfs(b, ch, w) && r.kind != Kind::Neighbor {
                     v.push(issue(Level::Tip, Some(r.id), None, format!("{} uses radar (DFS) channel {ch}: it must listen for a minute before sending and may jump away if radar shows up.", r.name), None));
                 }
                 if b == Band::B24 && w >= 40 {
@@ -209,7 +209,7 @@ impl Network {
         }
         for r in &radios {
             if r.bands[0] && !CH24.contains(&r.ch[0]) {
-                v.push(issue(Level::Tip, Some(r.id), None, format!("{} uses 2.4 GHz channel {}. Only 1, 6 and 11 don't overlap; in-between channels collide with two neighbours at once.", r.name, r.ch[0]), Some(Fix::AutoChannels)));
+                v.push(issue(Level::Tip, Some(r.id), None, format!("{} uses 2.4 GHz channel {}. Only 1, 6 and 11 (or 1, 5, 9 and 13 in Europe) don't overlap; in-between channels collide with two neighbours at once.", r.name, r.ch[0]), Some(Fix::AutoChannels)));
             }
             for band in Band::ALL.into_iter().filter(|b| r.bands[*b as usize]) {
                 let (c, who) = self.contention(r, band);

@@ -1,6 +1,6 @@
 //! Resilience ("what if this breaks?"), power use, traffic by time of day, router-behind-router (WAN port),
 //! extra Wi-Fi names per access point, a simple content filter and duplicating devices.
-use crate::extras::{default_uses, Use, GUEST_VLAN};
+use crate::extras::{Use, GUEST_VLAN};
 use crate::net::{Device, Kind, Link, Network};
 use std::collections::{HashSet, VecDeque};
 
@@ -40,13 +40,17 @@ fn standby_w(k: Kind) -> Option<f32> {
     }
 }
 
-/// Share of the day a device is in use: its busiest app's time-of-day curve, averaged over 24 hours.
+/// Share of the day a device is switched on and used, as in a typical household survey: the traffic
+/// curves below say when apps are busy, not how long the screen is on.
 pub fn duty(d: &Device) -> f32 {
-    let uses = if d.uses.is_empty() { default_uses(d.kind) } else { d.uses.clone() };
-    if uses.is_empty() {
-        return 1.0;
-    }
-    (0..96).map(|q| uses.iter().map(|u| activity(*u, q as f32 / 4.0)).fold(0.0, f32::max)).sum::<f32>() / 96.0
+    let hours = match d.kind {
+        Kind::Tv => 4.0,
+        Kind::Desktop => 6.0,
+        Kind::Laptop => 5.0,
+        Kind::Console => 2.0,
+        _ => 24.0,
+    };
+    hours / 24.0
 }
 
 /// How active an app is at a given hour, relative to its busy-hour demand (0..1).

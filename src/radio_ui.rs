@@ -494,13 +494,14 @@ impl App {
                     egui::ComboBox::from_id_salt(("c", id, i)).selected_text(d.ch[i].to_string()).width(64.0).show_ui(ui, |ui| {
                         egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                             for c in chans {
-                                let dfs = b == Band::B5 && (52..=144).contains(&c);
+                                let dfs = crate::wifi::dfs(b, c, d.width[i]);
                                 ui.selectable_value(&mut d.ch[i], c, if dfs { format!("{c} (radar/DFS)") } else { c.to_string() });
                             }
                         });
                     });
-                    let over = d.tx[i] > b.eu_limit();
-                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(format!("EU limit on {}: {:.0} dBm{}", b.label(), b.eu_limit(), if over { " — above it!" } else { "" }));
+                    let limit = b.eirp_limit(d.ch[i]);
+                    let over = d.tx[i] > limit;
+                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(format!("EU limit on {} channel {}: {:.0} dBm{}", b.label(), d.ch[i], limit, if over { " — above it!" } else { "" }));
                 } else {
                     ui.label(RichText::new(if allowed == 0 { "not with this standard" } else { "off" }).small().color(pal().dim));
                     ui.label("");
