@@ -41,7 +41,7 @@ Each entry links to the page its specs come from. Values that had to be estimate
 - A built-in browser opens pages hosted on your simulated servers, or real websites.
 - Watch packets travel along the cables in the packet log, try "what if this cable breaks?", and see traffic at the evening busy hour.
 - Click any packet to see its layers (Ethernet, IP with TTL, TCP/UDP with sequence numbers, the application), or step through a packet's journey hop by hop.
-- Mail between servers (`mail`, `inbox`), ARP and switch MAC tables, and RIP dynamic routing for the classic routing lessons.
+- Mail that follows MX records and is relayed between servers (`mail`, `inbox`), ARP and switch MAC tables, and RIP dynamic routing that spreads one 30-second update at a time.
 
 ### Plan the practical side
 - A shopping list with prices, the cable you'll need to lay, and yearly power use and running cost (TVs and PCs count their typical hours, not 24/7).

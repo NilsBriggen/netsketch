@@ -606,6 +606,10 @@ impl App {
     /// A client's Wi-Fi adapter: what the device itself can do.
     pub(crate) fn adapter_editor(&mut self, ui: &mut egui::Ui, id: u32) {
         let d = self.net.dev_mut(id).unwrap();
+        // A Thread or Zigbee gadget has no Wi-Fi to set up.
+        if d.on_802154() {
+            return;
+        }
         crate::wifi::normalize_radio(d);
         if Self::section_hint(ui, "Wi-Fi adapter", "Phones send weaker than routers (≈ 15 dBm vs 20–23): the router may be heard where its answer from the phone isn't.") {
             egui::ComboBox::from_id_salt(("cpreset", id)).selected_text(if d.model.is_empty() { "Choose a typical device…".to_string() } else { d.model.clone() }).width(ui.available_width() - 8.0).show_ui(ui, |ui| {

@@ -1690,7 +1690,8 @@ impl App {
         {
             let d = self.net.dev_mut(id).unwrap();
             let kind = d.kind;
-            if !d.ifaces.is_empty() && !kind.bridges() && Self::section(ui, "Addresses") {
+            // Thread and Zigbee gadgets get no address from DHCP (their hub speaks for them; see Smart-home radio).
+            if !d.ifaces.is_empty() && !kind.bridges() && !d.on_802154() && Self::section(ui, "Addresses") {
                 if kind.is_host() || kind == Kind::HomeRouter {
                     let label = tr(if kind == Kind::HomeRouter { "Get internet address automatically (DHCP)" } else { "Get address automatically (DHCP)" });
                     if ui.checkbox(&mut d.dhcp_client, label).changed() && d.dhcp_client {
@@ -2423,6 +2424,8 @@ impl App {
                     let mut stepping = self.step.is_some();
                     if ui.checkbox(&mut stepping, tr("Step through")).on_hover_text(tr("Packets stop at every device; Next step moves them on and shows what the packet carries there")).changed() {
                         self.step = stepping.then_some(0);
+                        // The step window shows the layers itself; two such windows would cover the map.
+                        self.pkt_view = None;
                     }
                 }
                 if self.bottom == Bottom::Packets {
@@ -2543,6 +2546,9 @@ impl App {
                     egui::Frame::new().fill(pal().card).corner_radius(10).inner_margin(Margin::same(14)).show(ui, |ui| {
                         ui.label(RichText::new(format!("{}  {}", ic::QUESTION, tr("Check yourself"))).strong().color(pal().accent));
                         ui.label(question);
+                        // Empty answer circles would vanish into the card: draw them in the page colour.
+                        ui.visuals_mut().widgets.inactive.bg_fill = pal().bg;
+                        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, pal().line);
                         let picked = self.quiz_pick.filter(|p| p.0 == self.lesson).map(|p| p.1);
                         for (i, a) in answers.iter().enumerate() {
                             if ui.radio(picked == Some(i), *a).clicked() {
@@ -2639,7 +2645,7 @@ impl App {
     fn packet_windows(&mut self, ctx: &egui::Context) {
         if let Some(log) = self.pkt_view.clone() {
             let mut open = true;
-            egui::Window::new(format!("{}  {}", ic::STACK, tr("Packet layers"))).id(Id::new("pkt_view")).default_pos(self.canvas_rect.right_top() + vec2(-480.0, 12.0)).open(&mut open).resizable(false).default_width(460.0).show(ctx, |ui| {
+            egui::Window::new(format!("{}  {}", ic::STACK, tr("Packet layers"))).id(Id::new("pkt_view")).pivot(Align2::RIGHT_TOP).default_pos(self.canvas_rect.right_top() + vec2(-12.0, 56.0)).open(&mut open).resizable(false).default_width(460.0).show(ctx, |ui| {
                 ui.label(RichText::new(format!("{}  {} → {}", log.proto, log.src, log.dst)).strong().monospace());
                 ui.label(RichText::new(&log.info).color(pal().dim));
                 ui.add_space(4.0);
@@ -2652,7 +2658,7 @@ impl App {
         let Some(k) = self.step.filter(|_| self.mode == Mode::Simulate) else { return };
         let total: usize = self.anims.iter().map(|a| a.path.len()).sum();
         let mut next = false;
-        egui::Window::new(format!("{}  {}", ic::FOOTPRINTS, tr("Step through"))).id(Id::new("step")).default_pos(self.canvas_rect.left_top() + vec2(12.0, 56.0)).resizable(false).default_width(460.0).show(ctx, |ui| {
+        egui::Window::new(format!("{}  {}", ic::FOOTPRINTS, tr("Step through"))).id(Id::new("step")).pivot(Align2::LEFT_BOTTOM).default_pos(self.canvas_rect.left_bottom() + vec2(12.0, -12.0)).resizable(false).default_width(460.0).show(ctx, |ui| {
             let Some((a, i)) = step_at(&self.anims, k) else {
                 ui.label(RichText::new(tr("No packet on its way. Run a command (ping, open…) and step through it here.")).color(pal().dim));
                 return;
