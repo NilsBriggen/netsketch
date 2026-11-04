@@ -1,10 +1,10 @@
 NetSketch Survey — the companion app for Android phones (Android 10 or newer)
 
 Install
-  1. Build NetSketch-Survey.apk with ./build.sh (or, once a version is released, download it from the
-     project's GitHub releases) and copy it to your phone (USB cable, cloud drive, or e-mail it to yourself).
-     Each build is signed with its own key: to switch between a self-built and a downloaded copy,
-     uninstall the old one first.
+  1. Download NetSketch-Survey-<version>.apk from the project's GitHub releases (or build it with
+     ./build.sh) and copy it to your phone (USB cable, cloud drive, or e-mail it to yourself).
+     New releases install over the old one and keep your points. A copy you build yourself is signed
+     with your own key: to switch between that and a downloaded one, uninstall the old one first.
   2. Open it on the phone. Android asks to allow installing apps from this source — allow it once.
   3. Open "NetSketch Survey". The first measurement asks for permission to see nearby Wi-Fi networks
      (Android files this under location), and Location has to be switched on while you measure.
@@ -22,6 +22,17 @@ Link it to NetSketch (recommended)
 Without a computer nearby
   Measure anyway (it asks for the storey instead), then "Save & share file" and import the file in
   NetSketch under Real measurements → Import measurements…, and drag each pin to where you stood.
+
+On the phone
+  - The floor plan: pinch to zoom, drag to move once zoomed, double-tap to fit. Your points show as
+    coloured dots (green = strong, red = weak); tap one to see what was measured there.
+  - Each point lists what it shows in plain words (weak signal, a phone sticking to a far access point,
+    the slow band, a crowded 2.4 GHz channel and which one to try), a channel chart per band, and every
+    network heard. Long-press a point (or tap ⋮) to rename it, measure again at the same spot, or delete it.
+  - The speed test measures download, upload, delay and its variation (about 35 MB).
+  - Android lets an app scan for networks 4 times every 2 minutes. When that runs out the app waits and
+    counts down; turning off "Wi-Fi scan throttling" in Developer options makes surveys faster.
+  - The app follows the phone's language (English or German) and its dark or light setting.
 
 In NetSketch afterwards
   In the list of measured networks, networks named like yours are linked to your devices. For the

@@ -1,7 +1,12 @@
 import org.netsketch.survey.Survey;
+import org.netsketch.survey.T;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Checks the plain-Java parts of the companion app on a computer, and writes sample.netsurvey —
@@ -24,6 +29,13 @@ public class SurveyJsonTest {
         s.security = sec;
         s.standard = std;
         return s;
+    }
+
+    static java.util.List<String> placeholders(Pattern p, String s) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        Matcher m = p.matcher(s);
+        while (m.find()) out.add(m.group());
+        return out;
     }
 
     public static void main(String[] args) throws Exception {
@@ -68,6 +80,8 @@ public class SurveyJsonTest {
                 Survey.Speed sp = new Survey.Speed();
                 sp.downMbps = 312.5;
                 sp.latencyMs = 14.2;
+                sp.upMbps = 48.5;
+                sp.jitterMs = 2.1;
                 p.speed = sp;
             }
             s.points.add(p);
@@ -75,6 +89,37 @@ public class SurveyJsonTest {
         String json = s.toJson();
         check(json.contains("\"format\": \"netsketch-survey\"") && json.contains("\"utilization\": 0.42") && json.contains("Cafe \\\"Corner\\\""), "json");
         check(new Survey().toJson().contains("\"points\": []"), "empty survey");
+        check(json.contains("\"up_mbps\": 48.50, \"jitter_ms\": 2.10"), "upload and jitter written");
+
+        // Every German text keeps the English one's placeholders, in the same order.
+        Pattern ph = Pattern.compile("%[-0-9.]*[sdf%]");
+        for (Map.Entry<String, String> e : T.DE.entrySet()) {
+            check(placeholders(ph, e.getKey()).equals(placeholders(ph, e.getValue())), "placeholders: " + e.getKey());
+        }
+        T.german = true;
+        check(T.f("Spot %d", 3).equals("Punkt 3") && T.t("not in the table").equals("not in the table"), "german lookup");
+        T.german = false;
+
+        // What a point shows. The sofa: the phone on the 5 GHz radio, nothing wrong.
+        Set<String> mine = Set.of("HomeNet");
+        check(s.points.get(1).networks.stream().filter(x -> Survey.isOwn(s.points.get(1), x, mine)).count() == 2, "own networks by name");
+        check(Survey.advice(s.points.get(1), mine).size() == 1 && Survey.advice(s.points.get(1), mine).get(0).startsWith("Good spot"), "good spot");
+        // A far corner: weak, stuck on a far access point, on 2.4 GHz channel 3 among three neighbours.
+        Survey.Point far = new Survey.Point();
+        far.networks.add(seen("HomeNet", "d4:5d:64:aa:bb:c0", 2422, 20, -78, "WPA2/WPA3", ""));
+        far.networks.add(seen("HomeNet", "a0:00:00:00:00:04", 5180, 80, -60, "WPA2/WPA3", ""));
+        for (int i = 0; i < 3; i++) far.networks.add(seen("N" + i, "0" + i + ":11:22:33:44:55", 2412 + 5 * i, 20, -60, "WPA2", ""));
+        far.networks.add(seen("Old", "09:11:22:33:44:55", 2462, 20, -80, "WEP", ""));
+        Survey.Connected fc = new Survey.Connected();
+        fc.ssid = "HomeNet";
+        fc.bssid = "d4:5d:64:aa:bb:c0";
+        fc.rssi = -78;
+        fc.freq = 2422;
+        far.connected = fc;
+        String all = String.join("\n", Survey.advice(far, mine));
+        check(all.contains("Weak signal") && all.contains("sticky client") && all.contains("uses 2.4 GHz") && all.contains("Try channel 11") && all.contains("Channel 3 sits between"), "far corner advice:\n" + all);
+        check(!all.contains("WEP"), "a neighbour's WEP isn't the person's problem");
+        check(Survey.sameRadio("d4:5d:64:aa:bb:c0", "D4:5D:64:AA:BB:C4") && !Survey.sameRadio("d4:5d:64:aa:bb:c0", "a0:00:00:00:00:04"), "radios of one access point");
         // A point placed on the plan and already sent keeps both in the file.
         Survey.Point placed = new Survey.Point();
         placed.name = "Desk";

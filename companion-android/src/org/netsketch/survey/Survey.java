@@ -1,8 +1,10 @@
 package org.netsketch.survey;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * The measurements, and the file NetSketch imports (".netsurvey", JSON). Plain Java on purpose:
@@ -32,6 +34,8 @@ public final class Survey {
 
     public static final class Speed {
         public double downMbps, latencyMs;
+        /** 0 = not measured (files from app 1.0). */
+        public double upMbps, jitterMs;
     }
 
     public static final class Point {
@@ -73,7 +77,9 @@ public final class Survey {
                         .append(", \"rssi\": ").append(num(c.rssi)).append(", \"link_mbps\": ").append(num(c.linkMbps)).append(", \"freq\": ").append(c.freq).append("}");
             }
             if (p.speed != null) {
-                b.append(",\n     \"speed\": {\"down_mbps\": ").append(num(p.speed.downMbps)).append(", \"latency_ms\": ").append(num(p.speed.latencyMs)).append("}");
+                b.append(",\n     \"speed\": {\"down_mbps\": ").append(num(p.speed.downMbps)).append(", \"latency_ms\": ").append(num(p.speed.latencyMs));
+                if (p.speed.upMbps > 0) b.append(", \"up_mbps\": ").append(num(p.speed.upMbps)).append(", \"jitter_ms\": ").append(num(p.speed.jitterMs));
+                b.append("}");
             }
             b.append(",\n     \"networks\": [");
             for (int j = 0; j < p.networks.size(); j++) {
@@ -170,5 +176,78 @@ public final class Survey {
         if (ie == null || ie.length < 3) return null;
         int stations = (ie[0] & 0xff) | ((ie[1] & 0xff) << 8);
         return new double[] {stations, (ie[2] & 0xff) / 255.0};
+    }
+
+    // ---------- what a point shows ----------
+
+    /** Whether a network heard at a point is one of the person's own (same name as the plan's or the phone's). */
+    public static boolean isOwn(Point p, Seen s, Set<String> mine) {
+        if (p.connected != null && s.bssid.equalsIgnoreCase(p.connected.bssid)) return true;
+        if (s.ssid.isEmpty()) return false;
+        return mine.contains(s.ssid) || (p.connected != null && s.ssid.equals(p.connected.ssid));
+    }
+
+    /** Overlapping 2.4 GHz channels: 20 MHz wide, 5 MHz apart, so closer than 5 numbers collide. */
+    static boolean overlaps24(int a, int b) {
+        return Math.abs(a - b) < 5;
+    }
+
+    /**
+     * Plain-language findings for one point, worst first: weak signal, a phone sticking to a far access
+     * point, the slow band, crowded or in-between 2.4 GHz channels, a busy channel, open or WEP networks.
+     */
+    public static List<String> advice(Point p, Set<String> mine) {
+        Set<String> out = new LinkedHashSet<>();
+        Connected c = p.connected;
+        double best = -200, best5 = -200;
+        for (Seen s : p.networks) {
+            if (!isOwn(p, s, mine)) continue;
+            best = Math.max(best, s.rssi);
+            if (s.freq >= 5000) best5 = Math.max(best5, s.rssi);
+        }
+        double here = c != null ? c.rssi : best;
+        if (here > -200 && here < -70) out.add(T.f("Weak signal here (%.0f dBm): expect slow speeds and dropouts. An access point closer to this spot, or a cable, helps.", here));
+        if (c != null) {
+            double other = -200;
+            for (Seen s : p.networks) {
+                if (isOwn(p, s, mine) && !s.bssid.equalsIgnoreCase(c.bssid) && !sameRadio(s.bssid, c.bssid)) other = Math.max(other, s.rssi);
+            }
+            if (c.rssi < -65 && other - c.rssi >= 10) out.add(T.f("The phone stays on an access point at %.0f dBm although another one of yours offers %.0f dBm here (a 'sticky client'). Fast roaming (802.11k/v/r) helps devices switch in time.", c.rssi, other));
+            if (c.freq < 3000 && best5 >= -67) out.add(T.f("The phone uses 2.4 GHz although your 5 GHz network is good here (%.0f dBm). Band steering, or one name for both bands, moves devices to the faster band.", best5));
+        }
+        for (Seen s : p.networks) {
+            if (!isOwn(p, s, mine) || s.freq >= 3000 || s.channel < 1 || s.channel > 13) continue;
+            int crowd = 0;
+            for (Seen o : p.networks) if (!isOwn(p, o, mine) && o.freq < 3000 && o.rssi >= -75 && overlaps24(o.channel, s.channel)) crowd++;
+            if (crowd >= 3) {
+                int pick = s.channel, least = Integer.MAX_VALUE;
+                for (int ch : new int[] {1, 6, 11}) {
+                    int n = 0;
+                    for (Seen o : p.networks) if (!isOwn(p, o, mine) && o.freq < 3000 && o.rssi >= -75 && overlaps24(o.channel, ch)) n++;
+                    if (n < least) {
+                        least = n;
+                        pick = ch;
+                    }
+                }
+                if (pick != s.channel && least < crowd) out.add(T.f("Your 2.4 GHz channel %d is shared with %d other networks heard clearly here. Try channel %d.", s.channel, crowd, pick));
+            }
+            if (s.channel != 1 && s.channel != 5 && s.channel != 6 && s.channel != 9 && s.channel != 11 && s.channel != 13) {
+                out.add(T.f("Channel %d sits between the non-overlapping ones (1, 6, 11 — or 1, 5, 9, 13 in Europe) and collides with neighbours on both sides.", s.channel));
+            }
+        }
+        for (Seen s : p.networks) {
+            if (c != null && s.bssid.equalsIgnoreCase(c.bssid) && s.utilization != null && s.utilization > 0.5) {
+                out.add(T.f("Your access point reports its channel %.0f%% busy: others take turns on it too.", s.utilization * 100));
+            }
+            if (isOwn(p, s, mine) && s.security.equals("Open")) out.add(T.f("'%s' is open (no password): anyone nearby can join it.", s.ssid));
+            if (isOwn(p, s, mine) && s.security.equals("WEP")) out.add(T.f("'%s' still uses WEP, which is cracked in minutes. Switch it to WPA3.", s.ssid));
+        }
+        if (out.isEmpty() && here >= -65) out.add(T.t("Good spot: strong signal and no crowded channel."));
+        return new ArrayList<>(out);
+    }
+
+    /** Two radios of one access point usually differ only in the last digits of their address. */
+    public static boolean sameRadio(String a, String b) {
+        return a.length() == 17 && b.length() == 17 && a.regionMatches(true, 0, b, 0, 15);
     }
 }

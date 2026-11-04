@@ -13,7 +13,7 @@
      ]},
     {"name": "Sofa", "floor": 0, "time": "2026-11-04T10:01:00Z", "scans": 3,
      "connected": {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "rssi": -41.00, "link_mbps": 864.00, "freq": 5180},
-     "speed": {"down_mbps": 312.50, "latency_ms": 14.20},
+     "speed": {"down_mbps": 312.50, "latency_ms": 14.20, "up_mbps": 48.50, "jitter_ms": 2.10},
      "networks": [
       {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c0", "freq": 2412, "channel": 1, "width": 20, "rssi": -35.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
       {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -41.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},

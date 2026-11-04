@@ -232,7 +232,12 @@ impl App {
             }
             if let Some(s) = &p.speed {
                 ui.label(RichText::new(tr("Speed test")).color(pal().dim));
-                ui.label(RichText::new(trf("{} Mbit/s · {} ms", &[&format!("{:.0}", s.down_mbps), &format!("{:.0}", s.latency_ms)])).strong());
+                let text = if s.up_mbps > 0.0 {
+                    trf("{} down, {} up Mbit/s · {} ms (±{} ms)", &[&format!("{:.0}", s.down_mbps), &format!("{:.0}", s.up_mbps), &format!("{:.0}", s.latency_ms), &format!("{:.0}", s.jitter_ms)])
+                } else {
+                    trf("{} Mbit/s · {} ms", &[&format!("{:.0}", s.down_mbps), &format!("{:.0}", s.latency_ms)])
+                };
+                ui.label(RichText::new(text).strong());
                 ui.end_row();
             }
         });

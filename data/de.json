@@ -888,5 +888,6 @@
  "≈ {} Mbit/s down, {} up{}": "≈ {} Mbit/s runter, {} hoch{}",
  "≈ {} Mbit/s real throughput": "≈ {} Mbit/s echter Durchsatz",
  "≈ {} W around the clock · {} kWh a year": "≈ {} W rund um die Uhr · {} kWh pro Jahr",
- "≈ {}{} a year": "≈ {}{} pro Jahr"
+ "≈ {}{} a year": "≈ {}{} pro Jahr",
+ "{} down, {} up Mbit/s · {} ms (±{} ms)": "{} runter, {} hoch Mbit/s · {} ms (±{} ms)"
 }

@@ -67,6 +67,9 @@ pub struct Connected {
 pub struct Speed {
     pub down_mbps: f32,
     pub latency_ms: f32,
+    /// Upload and delay variation; 0 in files from phone app 1.0, which didn't measure them.
+    pub up_mbps: f32,
+    pub jitter_ms: f32,
 }
 
 /// A measuring point in the plan.
@@ -369,6 +372,8 @@ mod tests {
         let (pts, nets) = n.import_companion(SAMPLE).unwrap();
         assert!(pts >= 3 && nets >= 6, "{pts} {nets}");
         assert!(n.points.iter().all(|p| !p.placed), "positions come from the person, not the phone");
+        let sp = n.points.iter().find_map(|p| p.speed.as_ref()).unwrap();
+        assert!((sp.up_mbps - 48.5).abs() < 0.01 && (sp.jitter_ms - 2.1).abs() < 0.01, "upload and jitter from the phone");
         let found = n.measured_networks();
         // The flat's own router is recognised by its name; a neighbour is not.
         let own = found.iter().find(|m| m.ssid == "HomeNet").unwrap();

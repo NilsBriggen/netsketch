@@ -219,6 +219,7 @@ impl Network {
             "walls": self.walls.iter().map(|w| serde_json::json!({"floor": w.floor, "a": m(w.a), "b": m(w.b), "kind": format!("{:?}", w.kind)})).collect::<Vec<_>>(),
             "labels": self.labels.iter().map(|l| serde_json::json!({"floor": l.floor, "at": m(l.pos), "text": l.text})).collect::<Vec<_>>(),
             "devices": self.devices.iter().filter(|d| !d.kind.foreign()).map(|d| serde_json::json!({"floor": d.floor, "at": m(d.pos), "name": d.name, "kind": format!("{:?}", d.kind), "radio": d.kind.radio()})).collect::<Vec<_>>(),
+            "networks": self.devices.iter().filter(|d| d.kind.radio() && !d.kind.foreign()).flat_map(Network::names_of).map(|(n, _)| n).filter(|n| !n.is_empty()).collect::<std::collections::BTreeSet<_>>(),
             "points": self.points.iter().filter(|p| p.placed).map(|p| serde_json::json!({"floor": p.floor, "at": m(p.pos), "name": p.name})).collect::<Vec<_>>(),
         })
         .to_string()
@@ -246,6 +247,8 @@ mod tests {
         assert!(http(port, "GET /plan?code=0000 HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 403"));
         let plan = http(port, "GET /plan?code=4831 HTTP/1.1\r\n\r\n");
         assert!(plan.starts_with("HTTP/1.1 200") && plan.contains("netsketch-plan") && plan.contains("Bedroom"), "{plan}");
+        let ssid = &n.devices.iter().find(|d| d.kind == crate::net::Kind::HomeRouter).unwrap().ssid;
+        assert!(plan.contains(&format!("\"networks\":[\"{ssid}\"")), "the phone learns which networks are yours: {plan}");
         let body = r#"{"format":"netsketch-survey","points":[{"name":"Sofa","x":6.5,"y":3,"networks":[]}]}"#;
         let r = http(port, &format!("POST /points?code=4831 HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len()));
         assert!(r.starts_with("HTTP/1.1 200"), "{r}");
