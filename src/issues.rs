@@ -566,7 +566,7 @@ impl Network {
                     .path
                     .windows(2)
                     .filter_map(|w| self.link_between(w[0], w[1]))
-                    .map(|l| self.link_rate(l) * (1.0 - self.utilisation_for(&load, l.id, d.qos)).max(0.05))
+                    .map(|l| self.flow_rate(l) * (1.0 - self.utilisation_for(&load, l.id, d.qos)).max(0.05))
                     .fold(f32::MAX, f32::min);
                 let mut mbps = raw.min(free);
                 // One TCP connection can't beat its round trip and loss: Mathis et al. (MSS/RTT · 1.22/√p),

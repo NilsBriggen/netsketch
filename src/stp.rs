@@ -213,6 +213,9 @@ mod tests {
         assert!(n.stp().blocked.is_empty() && n.stp().storm.is_empty());
         let both = n.link_rate(n.links.iter().find(|l| l.id == l2).unwrap());
         assert!((both - 2.0 * one).abs() < 1.0, "{one} {both}");
+        // One connection still rides a single cable of the bundle.
+        let single = n.flow_rate(n.links.iter().find(|l| l.id == l2).unwrap());
+        assert!((single - one).abs() < 1.0, "{one} {single}");
         assert!(!n.check().iter().any(|i| i.text.contains("LACP")));
     }
 

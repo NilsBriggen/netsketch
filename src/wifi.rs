@@ -729,7 +729,15 @@ impl Network {
         self.cable_mbps(l).min(self.end_mbps(l, l.a)).min(self.end_mbps(l, l.b))
     }
 
-    /// Real-world throughput of a link in Mbit/s.
+    /// What one connection gets over a link: LACP hashes each connection onto a single cable of a bundle,
+    /// so one download can't go faster than one cable even when the bundle carries more in total.
+    pub fn flow_rate(&self, l: &Link) -> f32 {
+        let b = self.bundle(l);
+        let all: u32 = b.iter().map(|o| self.negotiated(o)).sum();
+        if b.len() > 1 && all > 0 { self.link_rate(l) * self.negotiated(l) as f32 / all as f32 } else { self.link_rate(l) }
+    }
+
+    /// Real-world throughput of a link in Mbit/s (all connections together).
     pub fn link_rate(&self, l: &Link) -> f32 {
         let base = match l.medium {
             Medium::WiFi | Medium::Mesh => self.link_signal(l).map(|s| s.mbps).unwrap_or(0.0),
@@ -742,8 +750,8 @@ impl Network {
                 let close = crate::catalog::find_kit(&l.kit).map_or(300.0, |k| k.real_mbps);
                 (close * (-self.wiring_m(l) / 70.0).exp() * wiring * now * self.phase_factor(l)).min(self.negotiated(l) as f32 * 0.94)
             }
-            // Ethernet carries about 94% of the line rate as data; a bundle (LACP) adds its cables up.
-            // shortcut: real LACP keeps each connection on one cable, so one single download still gets one cable's speed.
+            // Ethernet carries about 94% of the line rate as data; a bundle (LACP) adds its cables up for all
+            // connections together (one connection alone gets one cable: see flow_rate).
             _ => self.bundle(l).iter().map(|o| self.negotiated(o)).sum::<u32>() as f32 * 0.94,
         };
         let isp = [l.a, l.b].iter().filter_map(|x| self.dev(*x)).find(|d| d.kind == Kind::Internet);
@@ -894,7 +902,7 @@ impl Network {
         let mut shared: Vec<((Band, u16), f32, Vec<u32>)> = vec![];
         for w in path.windows(2) {
             let Some(l) = self.link_between(w[0], w[1]) else { continue };
-            let r = self.link_rate(l);
+            let r = self.flow_rate(l);
             if let (Some(s), Some((ap, _))) = (self.link_signal(l), self.wifi_ends(l).or_else(|| (l.medium == Medium::Mesh).then(|| (self.dev(l.a), self.dev(l.b))).and_then(|(a, b)| Some((a?, b?))))) {
                 let key = (s.band, self.chan(ap, s.band).0);
                 match shared.iter_mut().find(|g| g.0 == key) {
@@ -1110,19 +1118,40 @@ fn zb_range(ch: u8) -> (f32, f32) {
 }
 
 impl Network {
-    /// The hub a Thread or Zigbee gadget joins: the strongest smart-home hub in reach (Thread border router and
-    /// Zigbee coordinator in one), with its signal (dBm).
-    // shortcut: gadgets reach the hub directly; real mains-powered Thread/Zigbee devices also repeat for others (mesh).
+    /// The hub a Thread or Zigbee gadget belongs to (Thread border router and Zigbee coordinator in one), with
+    /// the signal (dBm) of its own link into the mesh.
     pub fn smart_hub(&self, d: &Device) -> Option<(u32, f32)> {
+        self.smart_route(d).map(|(hub, _, dbm, _)| (hub, dbm))
+    }
+
+    /// How a Thread or Zigbee gadget joins: (hub, the device it talks to, that link's signal, hops to the hub).
+    /// Mains-powered gadgets (plugs, bulbs: they draw at least 0.5 W) repeat for others like real Thread routers and
+    /// Zigbee routers, so a gadget out of the hub's reach still joins through its neighbours, up to 8 hops;
+    /// battery sensors only talk to one parent. Fewer hops win, then the stronger link.
+    pub fn smart_route(&self, d: &Device) -> Option<(u32, u32, f32, u8)> {
         if !d.on_802154() {
             return None;
         }
-        self.devices
-            .iter()
-            .filter(|h| h.id != d.id && h.hub && !h.off && matches!(h.kind, Kind::HomeRouter | Kind::Speaker | Kind::SmartHome))
-            .map(|h| (h.id, ZB_TX - self.path_loss(h.pos, h.floor, d.pos, d.floor, d.mount - h.mount, Band::B24)))
+        let sig = |a: &Device, b: &Device| ZB_TX - self.path_loss(a.pos, a.floor, b.pos, b.floor, b.mount - a.mount, Band::B24);
+        // Everything already in the mesh: (device, its hub, hops from the hub).
+        let mut mesh: Vec<(&Device, u32, u8)> = self.devices.iter().filter(|h| h.id != d.id && h.hub && !h.off && matches!(h.kind, Kind::HomeRouter | Kind::Speaker | Kind::SmartHome)).map(|h| (h, h.id, 0)).collect();
+        let relays: Vec<&Device> = self.devices.iter().filter(|r| r.id != d.id && r.on_802154() && !r.off && !r.hub && r.watts >= 0.5).collect();
+        for hop in 1..=8 {
+            let grown: Vec<(&Device, u32, u8)> = relays
+                .iter()
+                .filter(|r| !mesh.iter().any(|m| m.0.id == r.id))
+                .filter_map(|r| mesh.iter().filter(|m| sig(m.0, r) >= ZB_FLOOR).max_by(|a, b| sig(a.0, r).total_cmp(&sig(b.0, r))).map(|m| (*r, m.1, hop)))
+                .collect();
+            if grown.is_empty() {
+                break;
+            }
+            mesh.extend(grown);
+        }
+        mesh.iter()
+            .map(|m| (m, sig(m.0, d)))
             .filter(|x| x.1 >= ZB_FLOOR)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .min_by(|a, b| a.0 .2.cmp(&b.0 .2).then(b.1.total_cmp(&a.1)))
+            .map(|(m, dbm)| (m.1, m.0.id, dbm, m.2 + 1))
     }
 
     /// Wi-Fi transmitters a hub hears (above −82 dBm, its own radio too) whose 2.4 GHz channel covers its 802.15.4 channel `ch`.
@@ -1215,6 +1244,26 @@ mod tests {
         n.apply_fix(&fix);
         let hub = n.dev(r.id).unwrap().clone();
         assert!(n.zb_clash(&hub, hub.zb_ch).is_empty(), "{}", hub.zb_ch);
+    }
+
+    #[test]
+    fn a_far_sensor_joins_the_hub_through_a_plug_that_relays() {
+        let mut n = Network::default();
+        let hub = n.add_device(Kind::SmartHome, [0.0, 0.0]);
+        n.dev_mut(hub).unwrap().hub = true;
+        // 250 m apart each, in the open: a sensor at 500 m is out of the hub's reach (about 300 m).
+        let plug = n.add_device(Kind::SmartHome, [250.0 * PX_PER_M, 0.0]);
+        let sensor = n.add_device(Kind::SmartHome, [500.0 * PX_PER_M, 0.0]);
+        for (id, w) in [(plug, 1.0), (sensor, 0.0)] {
+            let d = n.dev_mut(id).unwrap();
+            d.smart = crate::net::SmartLink::Zigbee;
+            d.watts = w;
+        }
+        let s = n.dev(sensor).unwrap().clone();
+        assert_eq!(n.smart_route(&s).map(|r| (r.0, r.1, r.3)), Some((hub, plug, 2)), "through the mains-powered plug");
+        // A battery sensor doesn't relay: with the plug on batteries, the far one is cut off.
+        n.dev_mut(plug).unwrap().watts = 0.0;
+        assert!(n.smart_route(&s).is_none());
     }
 
     #[test]

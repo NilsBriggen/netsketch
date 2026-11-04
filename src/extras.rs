@@ -278,9 +278,23 @@ fn in_window(spec: &str, hour: f32) -> Option<bool> {
     Some(if a <= b { (a..b).contains(&hour) } else { hour >= a || hour < b })
 }
 
-/// Ports games and consoles ask a router to open over UPnP (Xbox, PlayStation, Steam).
-// shortcut: the usual game ports go to the first gaming device; real games ask for exactly the ports they need.
-const UPNP_PORTS: [(u16, u16); 3] = [(3074, 3074), (3478, 3480), (27015, 27030)];
+/// The ports a device's games ask the router to open over UPnP: Xbox Live 3074, PlayStation Network
+/// 3478–3480, and Steam (PCs) 27015–27030. Devices that don't play games online ask for nothing.
+pub fn upnp_ports(d: &Device) -> &'static [(u16, u16)] {
+    let says = |w: &str| d.model.to_lowercase().contains(w) || d.name.to_lowercase().contains(w);
+    if d.off || !(d.kind == Kind::Console || d.uses.contains(&Use::Gaming)) {
+        &[]
+    } else if says("xbox") {
+        &[(3074, 3074)]
+    } else if says("playstation") || says("ps5") || says("ps4") {
+        &[(3478, 3480)]
+    } else if d.kind == Kind::Console {
+        // A console of unknown make asks for both networks' ports.
+        &[(3074, 3074), (3478, 3480)]
+    } else {
+        &[(27015, 27030)]
+    }
+}
 
 impl Network {
     /// Does `what` ("any", "lan", "guest", "internet", an address, a network/prefix or a device's name) cover `ip`?
@@ -331,8 +345,9 @@ impl Network {
             let proto_ok = w.get(3).is_none_or(|p| *p == l4(proto));
             (w.first() == Some(&"forward") && w.get(1).is_some_and(|p| port_in(p, port)) && proto_ok).then(|| w.get(2).and_then(|i| parse_ip(i))).flatten()
         });
-        let gamer = || self.devices.iter().find(|g| (g.kind == Kind::Console || g.uses.contains(&Use::Gaming)) && !g.off).and_then(|g| g.first_ip());
-        rule.or_else(|| (d.upnp && UPNP_PORTS.iter().any(|r| (r.0..=r.1).contains(&port))).then(gamer).flatten())
+        // UPnP: each device maps the ports its own games ask for; a port someone already holds goes to the first.
+        let mapped = || self.devices.iter().find(|g| upnp_ports(g).iter().any(|r| (r.0..=r.1).contains(&port))).and_then(|g| g.first_ip());
+        rule.or_else(|| d.upnp.then(mapped).flatten())
     }
 }
 
@@ -771,9 +786,11 @@ mod tests {
         // UPnP: the game opens its own port.
         n.dev_mut(r).unwrap().rules.clear();
         n.dev_mut(pc).unwrap().uses.push(Use::Gaming);
-        assert_eq!(reach(&n, 3074, "UDP"), None);
+        assert_eq!(reach(&n, 27015, "UDP"), None);
         n.dev_mut(r).unwrap().upnp = true;
-        assert_eq!(reach(&n, 3074, "UDP"), Some(pc));
+        // A PC plays through Steam, so it asks for Steam's ports and not the Xbox one.
+        assert_eq!(reach(&n, 27015, "UDP"), Some(pc));
+        assert_eq!(reach(&n, 3074, "UDP"), None);
         assert!(n.check().iter().any(|i| i.text.contains("UPnP")));
         // Bedtime for the office PC: no internet from 22:00 to 06:30.
         n.dev_mut(r).unwrap().rules = "deny office-pc internet 22:00-06:30".into();
@@ -820,5 +837,23 @@ mod tests {
         n.calibrate();
         assert!(n.survey_error().unwrap() < 0.5);
         assert!(n.import_survey("1,2,0,Nobody,-50").is_err());
+    }
+
+    #[test]
+    fn upnp_opens_the_ports_each_game_asks_for() {
+        let mut n = crate::net::template("home");
+        let r = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().id;
+        n.dev_mut(r).unwrap().upnp = true;
+        let xbox = n.add_device(Kind::Console, [300.0, 300.0]);
+        n.dev_mut(xbox).unwrap().name = "Xbox".into();
+        let pc = n.add_device(Kind::Desktop, [320.0, 300.0]);
+        n.dev_mut(pc).unwrap().uses = vec![Use::Gaming];
+        n.run_dhcp();
+        let ip = |n: &Network, id| n.dev(id).unwrap().first_ip();
+        let rd = n.dev(r).unwrap().clone();
+        assert_eq!(n.forward_of(&rd, 3074, "UDP"), ip(&n, xbox));
+        assert_eq!(n.forward_of(&rd, 27020, "UDP"), ip(&n, pc));
+        assert_eq!(n.forward_of(&rd, 3479, "UDP"), None, "nobody here plays on PlayStation");
+        assert_eq!(n.forward_of(&rd, 445, "TCP"), None);
     }
 }

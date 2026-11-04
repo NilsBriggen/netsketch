@@ -1150,9 +1150,9 @@ impl App {
             }
         }
 
-        // Thread/Zigbee gadgets: a dotted line to the hub they joined.
+        // Thread/Zigbee gadgets: a dotted line to the hub or the gadget that relays for them.
         for d in self.net.devices.iter().filter(|d| d.on_802154() && d.floor == self.floor) {
-            if let Some((h, _)) = self.net.smart_hub(d) {
+            if let Some((_, h, _, _)) = self.net.smart_route(d) {
                 painter.extend(Shape::dotted_line(&[self.dev_pos(d.id), self.dev_pos(h)], kind_color(Kind::SmartHome).gamma_multiply(0.7), 7.0 * z.max(0.6), 1.3));
             }
         }
@@ -1759,7 +1759,7 @@ impl App {
                     ui.checkbox(&mut d.services.dns, tr("DNS server")).on_hover_text(tr("Answers name lookups"));
                 }
                 if d.services.dns && kind.offers("dns") && kind != Kind::Internet {
-                    ui.add(TextEdit::multiline(&mut d.dns_records).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("www.home.test 192.168.1.10"))).on_hover_text(tr("Name records, one per line: name address"));
+                    ui.add(TextEdit::multiline(&mut d.dns_records).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("www.home.test 192.168.1.10"))).on_hover_text(tr("Name records, one per line: name address. A mail server for a domain: school.test MX mail.school.test"));
                 }
                 if kind.offers("web") {
                     ui.checkbox(&mut d.services.web, tr("Web server (HTTPS)"));
@@ -1778,7 +1778,12 @@ impl App {
                 }
             }
             if kind.routes() && kind != Kind::Internet && Self::section(ui, "Routes") {
+                let was = d.services.rip;
                 ui.checkbox(&mut d.services.rip, tr("RIP: share routes with neighbour routers")).on_hover_text(tr("Routers with RIP on tell each other which networks they reach and fill their routing tables themselves, up to 15 routers away"));
+                if d.services.rip && !was {
+                    // Its routes spread one update (30 s) at a time from now on.
+                    d.services.rip_since = Some(Self::now(ui.ctx()));
+                }
                 ui.add(TextEdit::multiline(&mut d.routes).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("10.0.2.0/24 via 10.0.1.2"))).on_hover_text(tr("Extra routes, one per line: network/prefix via gateway"));
             }
             // The internet cloud is the outside world: no ports or storey to plan.

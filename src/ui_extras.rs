@@ -202,8 +202,9 @@ impl App {
             }
             let d = self.net.dev(id).unwrap();
             if d.on_802154() {
-                let (text, col) = match self.net.smart_hub(d) {
-                    Some((h, dbm)) => (trf("Joined to {} ({} dBm) on channel {}", &[&self.net.name(h), &format!("{dbm:.0}"), &self.net.dev(h).map_or(0, |h| h.zb_ch)]), pal().green),
+                let (text, col) = match self.net.smart_route(d) {
+                    Some((h, via, dbm, 1)) if via == h => (trf("Joined to {} ({} dBm) on channel {}", &[&self.net.name(h), &format!("{dbm:.0}"), &self.net.dev(h).map_or(0, |h| h.zb_ch)]), pal().green),
+                    Some((h, via, dbm, hops)) => (trf("Joined to {} through {} ({} dBm, {} hops) on channel {}", &[&self.net.name(h), &self.net.name(via), &format!("{dbm:.0}"), &hops, &self.net.dev(h).map_or(0, |h| h.zb_ch)]), pal().green),
                     None => (tr("No smart-home hub in reach").to_string(), pal().amber),
                 };
                 ui.label(RichText::new(text).color(col));

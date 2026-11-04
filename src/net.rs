@@ -434,6 +434,9 @@ pub struct Services {
     pub mail: bool,
     /// Routers: share routes with neighbour routers by RIP.
     pub rip: bool,
+    /// When RIP was switched on (simulation clock, s); None = it has been running long enough to settle.
+    #[serde(skip)]
+    pub rip_since: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1865,7 +1868,8 @@ impl Network {
             for line in s.dns_records.lines() {
                 let mut w = line.split_whitespace();
                 if let (Some(n), Some(ip)) = (w.next(), w.next()) {
-                    if n.eq_ignore_ascii_case(name) {
+                    // "school.test MX mail.school.test" names a mail server, not an address.
+                    if n.eq_ignore_ascii_case(name) && !ip.eq_ignore_ascii_case("MX") {
                         return parse_ip(ip);
                     }
                 }
@@ -2160,14 +2164,18 @@ impl Network {
     }
 
     /// RIP: routers with it on tell their neighbour routers (on a shared network) every network they know,
-    /// one hop further each time, until nothing changes. Per router (network, prefix, next hop, metric in hops),
-    /// and the number of update rounds it took. 16 hops counts as unreachable.
-    // shortcut: works out the settled tables at once; real RIP gets there one 30-second update at a time.
-    pub fn rip_routes(&self) -> (HashMap<u32, Vec<(Ipv4Addr, u8, Ipv4Addr, u8)>>, usize) {
+    /// one hop further each time. Each update round takes 30 s, counted from when RIP was last switched on
+    /// somewhere, so a new route spreads one router further per update. Per router (network, prefix, next hop,
+    /// metric in hops), the update rounds done, and the seconds until the next one while it hasn't settled.
+    /// 16 hops counts as unreachable.
+    pub fn rip_state(&self) -> (HashMap<u32, Vec<(Ipv4Addr, u8, Ipv4Addr, u8)>>, usize, Option<f64>) {
         let on: Vec<&Device> = self.devices.iter().filter(|d| d.services.rip && d.kind.routes() && !d.off).collect();
         if on.is_empty() {
-            return (HashMap::new(), 0);
+            return (HashMap::new(), 0, None);
         }
+        // Updates so far: one when RIP starts, then one every 30 s.
+        let since = on.iter().filter_map(|d| d.services.rip_since).fold(None, |a: Option<f64>, t| Some(a.map_or(t, |a| a.max(t))));
+        let allowed = since.map_or(usize::MAX, |t| ((self.clock - t).max(0.0) / 30.0) as usize + 1);
         let segs = self.segments();
         let own = |d: &Device| -> Vec<(usize, Ipv4Addr, u8)> { d.ifaces.iter().enumerate().filter_map(|(i, f)| Some((*segs.get(&(d.id, i))?, f.addr()?.0, f.addr()?.1))).collect() };
         // Router -> (network, prefix) -> (hops, next hop); its own networks at 0 hops.
@@ -2185,7 +2193,15 @@ impl Network {
             }
         }
         let mut rounds = 0;
+        let mut waiting = None;
         while rounds < 32 {
+            if rounds >= allowed {
+                // There's more to learn, but the next update hasn't been sent yet.
+                let next = since.unwrap_or(0.0) + 30.0 * allowed as f64 - self.clock;
+                let pending = nbrs.iter().any(|(r, n, _)| table[n].iter().any(|(k, (m, _))| m + 1 <= 15 && table[r].get(k).is_none_or(|x| m + 1 < x.0)));
+                waiting = pending.then_some(next.max(0.0));
+                break;
+            }
             let heard = table.clone();
             let mut changed = false;
             for (r, n, via) in &nbrs {
@@ -2211,7 +2227,13 @@ impl Network {
                 (r, v)
             })
             .collect();
-        (out, rounds)
+        (out, rounds, waiting)
+    }
+
+    /// The RIP routes each router has learned by now, and the update rounds it took.
+    pub fn rip_routes(&self) -> (HashMap<u32, Vec<(Ipv4Addr, u8, Ipv4Addr, u8)>>, usize) {
+        let (r, n, _) = self.rip_state();
+        (r, n)
     }
 
     /// Finds everything that will stop the network from working, or is outdated.
@@ -2454,29 +2476,73 @@ impl Network {
         Some(text)
     }
 
-    /// Sends an email: SMTP to the mail server the address's domain name points at.
+    /// The mail server a domain names in an MX record ("school.test MX mail.school.test"); without one,
+    /// mail goes to the domain's own address (the implicit MX of RFC 5321).
+    fn mx_of(&self, domain: &str) -> String {
+        self.devices.iter().filter(|s| s.services.dns).flat_map(|s| s.dns_records.lines()).find_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            (w.len() == 3 && w[0].eq_ignore_ascii_case(domain) && w[1].eq_ignore_ascii_case("MX")).then(|| w[2].to_string())
+        })
+        .unwrap_or_else(|| domain.to_string())
+    }
+
+    /// Sends an email the way real mail travels: the device hands it to the mail server on its own network
+    /// (submission, port 587); that server looks up the recipient domain's MX record and relays it there
+    /// over SMTP (port 25). Without a mail server nearby the device submits straight to the recipient's.
     fn send_mail(&mut self, id: u32, to: &str, text: &str, o: &mut Outcome) {
         let Some((_, domain)) = to.split_once('@').filter(|(u, d)| !u.is_empty() && !d.is_empty() && !text.is_empty()) else {
             o.lines.push("usage: mail <name@domain> <text>   e.g. mail anna@school.test Hello!".into());
             return;
         };
-        // shortcut: no MX records and no relay: the domain's own name record points at its mail server, and mail goes straight there.
-        let Some(mut k) = self.tcp_open(id, domain, 587, o) else { return };
+        let mx = self.mx_of(domain);
+        let segs = self.segments();
+        let home = segs.get(&(id, 0));
+        let outgoing = self.devices.iter().find(|s| s.services.mail && s.id != id && home.is_some() && (0..s.ifaces.len()).any(|i| segs.get(&(s.id, i)) == home)).map(|s| (s.id, s.first_ip()));
+        let me = self.dev(id).unwrap().hostname();
+        let from = format!("{me}@{domain}");
+        let smtp = |k: &mut Tcp, o: &mut Outcome, last: &str| {
+            k.seg(o, true, "PSH, ACK", 30, "SMTP", format!("EHLO {me}, STARTTLS — from here on it's encrypted"));
+            k.seg(o, true, "PSH, ACK", (from.len() + to.len()) as u32 + 24, "SMTP", format!("MAIL FROM:<{from}>  RCPT TO:<{to}>"));
+            k.seg(o, true, "PSH, ACK", text.len() as u32, "SMTP", format!("DATA: \"{text}\""));
+            k.seg(o, false, "PSH, ACK", 30, "SMTP", last.to_string());
+            k.close(o);
+        };
+        // 1. Submission: to the own network's mail server, or straight to the recipient's.
+        let first = match outgoing {
+            Some((_, Some(ip))) => ip.to_string(),
+            _ => mx.clone(),
+        };
+        let Some(mut k) = self.tcp_open(id, &first, 587, o) else { return };
         let server = k.server.2;
         if !self.dev(server).is_some_and(|s| s.services.mail) || k.site.is_some() || k.real {
             self.refuse(&mut k, o, "email");
             return;
         }
         self.accept(&mut k, o);
-        let me = self.dev(id).unwrap().hostname();
-        let from = format!("{me}@{domain}");
-        k.seg(o, true, "PSH, ACK", 30, "SMTP", format!("EHLO {me}, STARTTLS — from here on it's encrypted"));
-        k.seg(o, true, "PSH, ACK", (from.len() + to.len()) as u32 + 24, "SMTP", format!("MAIL FROM:<{from}>  RCPT TO:<{to}>"));
-        k.seg(o, true, "PSH, ACK", text.len() as u32, "SMTP", format!("DATA: \"{text}\""));
-        k.seg(o, false, "PSH, ACK", 30, "SMTP", format!("250 OK — delivered to {to}'s inbox"));
-        k.close(o);
-        o.lines.push(format!("Mail sent to {to} via {} (SMTP, port 587).", self.name(server)));
-        self.mail.entry(server).or_default().push((from, to.to_lowercase(), text.into()));
+        let relay = outgoing.is_some_and(|(s, _)| s == server);
+        smtp(&mut k, o, if relay { "250 OK — queued for delivery" } else { "250 OK — delivered" });
+        let mut inbox = server;
+        // 2. Relay: the outgoing server asks DNS for the domain's MX and passes the mail on over port 25.
+        if relay {
+            o.log.push(Log { src: self.name(server), dst: domain.into(), proto: "DNS", layer: "Application", info: format!("MX lookup for {domain}: mail goes to {mx}"), dev: server, ..Default::default() });
+            let Some(mut k2) = self.tcp_open(server, &mx, 25, o) else {
+                o.lines.push(format!("{} accepted the mail but can't reach {mx}, {domain}'s mail server: it will retry for a few days.", self.name(server)));
+                return;
+            };
+            let dest = k2.server.2;
+            if dest != server {
+                if !self.dev(dest).is_some_and(|s| s.services.mail) || k2.site.is_some() || k2.real {
+                    self.refuse(&mut k2, o, "email");
+                    o.lines.push(format!("{mx} doesn't take mail: {} would bounce it back to you.", self.name(server)));
+                    return;
+                }
+                self.accept(&mut k2, o);
+                smtp(&mut k2, o, "250 OK — delivered");
+                inbox = dest;
+            }
+        }
+        o.lines.push(if inbox == server { format!("Mail sent to {to} via {} (SMTP, port 587).", self.name(server)) } else { format!("Mail sent to {to}: {} took it (port 587) and relayed it to {} (port 25, MX of {domain}).", self.name(server), self.name(inbox)) });
+        self.mail.entry(inbox).or_default().push((from, to.to_lowercase(), text.into()));
     }
 
     /// Reads an inbox: on the mail server itself directly, from anywhere else over IMAP.
@@ -2500,7 +2566,8 @@ impl Network {
             o.lines.push("usage: inbox <name@domain>   (on the mail server itself: inbox)".into());
             return;
         };
-        let Some(mut k) = self.tcp_open(id, domain, 993, o) else { return };
+        // IMAP goes to the server the domain's MX record names, where the mail was delivered.
+        let Some(mut k) = self.tcp_open(id, &self.mx_of(domain), 993, o) else { return };
         if !self.dev(k.server.2).is_some_and(|s| s.services.mail) || k.site.is_some() || k.real {
             self.refuse(&mut k, o, "email");
             return;
@@ -2695,7 +2762,7 @@ impl Network {
                 for (n, p, gw) in Self::parse_routes(&d) {
                     o.lines.push(format!("{:<18} {:<16}", format!("{n}/{p}"), gw));
                 }
-                let (rip, rounds) = self.rip_routes();
+                let (rip, rounds, waiting) = self.rip_state();
                 let learned = rip.get(&id).map_or(&[][..], |v| v);
                 for (n, p, gw, m) in learned {
                     o.lines.push(format!("{:<18} {:<16} R  metric {m}", format!("{n}/{p}"), gw));
@@ -2703,7 +2770,9 @@ impl Network {
                 if !d.gateway.is_empty() {
                     o.lines.push(format!("{:<18} {:<16}", "default (0.0.0.0/0)", d.gateway));
                 }
-                if !learned.is_empty() {
+                if let Some(s) = waiting {
+                    o.lines.push(format!("R = learned by RIP so far ({rounds} update round(s)). Still spreading: the next update goes out in {s:.0} s, one router further each time."));
+                } else if !learned.is_empty() {
                     o.lines.push(format!("R = learned by RIP (metric = routers on the way, 16 = unreachable). Settled after {rounds} update round(s); RIP sends one every 30 s."));
                 } else if d.services.rip {
                     o.lines.push("RIP is on, but no neighbour router runs it yet.".into());
@@ -2949,6 +3018,26 @@ mod tests {
         let out = run(&mut n, "pc-4", "inbox anna@school.test");
         assert!(out.contains("Hello there") && !out.contains("Not for Anna"), "{out}");
         assert!(run(&mut n, "pc-1", "mail nobody").contains("usage"));
+    }
+
+    #[test]
+    fn mail_is_relayed_to_the_server_the_mx_record_names() {
+        let mut n = template("classroom");
+        let srv = n.lookup_dev("web-server").unwrap().id;
+        let ip = n.dev(srv).unwrap().first_ip().unwrap();
+        // The school's mail lives on the web server; pc-2 runs the mail server of its own network.
+        n.dev_mut(srv).unwrap().dns_records += &format!("\nschool.test MX mail.school.test\nmail.school.test {ip}");
+        n.dev_mut(srv).unwrap().services.mail = true;
+        let pc2 = n.lookup_dev("pc-2").unwrap().id;
+        n.dev_mut(pc2).unwrap().services.mail = true;
+        let pc1 = n.lookup_dev("pc-1").unwrap().id;
+        let o = n.exec(pc1, "mail anna@school.test Via the relay");
+        let text = o.lines.join(" ");
+        assert!(text.contains("relayed"), "{text}");
+        assert!(o.log.iter().any(|l| l.proto == "SMTP" && l.hdr.ports.1 == 25), "relay on port 25");
+        assert!(o.log.iter().any(|l| l.proto == "DNS" && l.info.contains("MX lookup")));
+        assert!(run(&mut n, "pc-4", "inbox anna@school.test").contains("Via the relay"));
+        assert!(!run(&mut n, "pc-2", "inbox").contains("Via the relay"), "the relay keeps no copy");
     }
 
     #[test]

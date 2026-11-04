@@ -790,6 +790,22 @@ mod tests {
     }
 
     #[test]
+    fn rip_spreads_one_router_further_every_30_seconds() {
+        let mut n = template("rip");
+        n.clock = 100.0;
+        for d in n.devices.iter_mut().filter(|d| d.kind == Kind::Router) {
+            d.services.rip = true;
+            d.services.rip_since = Some(100.0);
+        }
+        // The first update only tells direct neighbours: PC C's network is two routers away from Router 1.
+        assert!(super::check_exercise(&n).is_err());
+        let r1 = id(&n, "Router 1");
+        assert!(n.exec(r1, "route").lines.join("\n").contains("Still spreading"));
+        n.clock = 131.0;
+        assert!(super::check_exercise(&n).is_ok(), "{:?}", super::check_exercise(&n));
+    }
+
+    #[test]
     fn small_flat_is_small_and_works() {
         let mut n = template("flat");
         assert!(n.check().iter().all(|i| i.level != crate::net::Level::Error), "{:?}", n.check());
