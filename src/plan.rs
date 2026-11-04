@@ -26,7 +26,7 @@ pub struct Coverage {
 impl Network {
     /// Sample spots (cell centres) inside the walls of a storey, about 1 m apart (coarser for big buildings).
     /// A spot counts as indoors when walls surround it in all four directions.
-    // shortcut: a courtyard closed on all sides counts as indoors; fine for a score.
+    /// A courtyard closed on all sides looks indoors to that test: marking it as an outdoor area takes it out.
     fn spots(&self, floor: i8) -> (Vec<[f32; 2]>, f32) {
         let walls: Vec<_> = self.walls.iter().filter(|w| w.floor == floor).collect();
         if walls.len() < 3 {
@@ -42,7 +42,8 @@ impl Network {
         while y < y1 {
             let mut x = x0 + cell / 2.0;
             while x < x1 {
-                if [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]].iter().all(|d| walls.iter().any(|w| ray_hits([x, y], *d, w.a, w.b))) {
+                let outside = self.outdoor.iter().any(|o| o.floor == floor && (o.a[0].min(o.b[0])..o.a[0].max(o.b[0])).contains(&x) && (o.a[1].min(o.b[1])..o.a[1].max(o.b[1])).contains(&y));
+                if !outside && [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]].iter().all(|d| walls.iter().any(|w| ray_hits([x, y], *d, w.a, w.b))) {
                     v.push([x, y]);
                 }
                 x += cell;
@@ -241,5 +242,17 @@ mod tests {
         let far = super::Outdoor { a: [r.pos[0] + 2000.0, r.pos[1]], b: [r.pos[0] + 2200.0, r.pos[1] + 140.0], ..Default::default() };
         let (cn, cf) = (n.outdoor_coverage(&near), n.outdoor_coverage(&far));
         assert!(cn.usable > cf.usable && cf.good == 0.0 && (cn.area_m2 - 70.0).abs() < 1.0, "{} {}", cn.usable, cf.usable);
+    }
+
+    #[test]
+    fn a_courtyard_marked_as_outdoor_leaves_the_indoor_score() {
+        let mut n = template("home");
+        let before = n.coverage(0).unwrap().area_m2;
+        let ys: Vec<f32> = n.walls.iter().filter(|w| w.floor == 0).flat_map(|w| [w.a[1], w.b[1]]).collect();
+        let xs: Vec<f32> = n.walls.iter().filter(|w| w.floor == 0).flat_map(|w| [w.a[0], w.b[0]]).collect();
+        let (x0, y0) = (xs.iter().cloned().fold(f32::MAX, f32::min), ys.iter().cloned().fold(f32::MAX, f32::min));
+        n.outdoor.push(super::Outdoor { id: 1, name: "Courtyard".into(), floor: 0, a: [x0, y0], b: [x0 + 5.0 * crate::net::PX_PER_M, y0 + 4.0 * crate::net::PX_PER_M] });
+        let after = n.coverage(0).unwrap().area_m2;
+        assert!((before - after - 20.0).abs() < 6.0, "{before} → {after}");
     }
 }
