@@ -535,7 +535,7 @@ impl Network {
                 }
                 // TCP never quite fills the pipe; live runs vary a little from test to test.
                 let mbps = mbps * if self.live { 0.86 + 0.1 * crate::sim::unit(self.seed, (self.clock * 1000.0) as u64, 7) } else { 0.93 };
-                o.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "TCP", layer: "Transport", info: format!("Bulk transfer: ≈ {mbps:.0} Mbit/s"), dev: id });
+                o.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "TCP", layer: "Transport", info: format!("Bulk transfer: ≈ {mbps:.0} Mbit/s"), dev: id, ..Default::default() });
                 o.lines.push(format!("Speed test to {target}"));
                 o.lines.push(format!("  Download ≈ {mbps:.0} Mbit/s   latency {:.1} ms", t.ms * 2.0));
                 o.lines.push(format!("  Bottleneck: {why}"));

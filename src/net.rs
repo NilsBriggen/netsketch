@@ -1,4 +1,4 @@
-//! Network model, address planning, problem checks and the packet simulation.
+//! Network model, address planning, problem checks, the packet simulation (layer headers, TCP, RIP, MAC learning) and the terminal commands.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::Ipv4Addr;
@@ -136,7 +136,7 @@ impl Kind {
     pub fn has_ports_view(self) -> bool {
         (self.bridges() || self.routes()) && self != Kind::Internet
     }
-    /// Which network services this kind of device can realistically run: "dhcp", "dns", "web", "files", "print".
+    /// Which network services this kind of device can realistically run: "dhcp", "dns", "web", "files", "print", "mail".
     pub fn offers(self, svc: &str) -> bool {
         use Kind::*;
         match svc {
@@ -145,11 +145,12 @@ impl Kind {
             "web" => matches!(self, Desktop | Laptop | Server | Nas | Printer),
             "files" => matches!(self, Desktop | Laptop | Server | Nas),
             "print" => self == Printer,
+            "mail" => matches!(self, Server | Desktop | Nas),
             _ => false,
         }
     }
     pub fn serves(self) -> bool {
-        ["dhcp", "dns", "web", "files", "print"].iter().any(|s| self.offers(s))
+        ["dhcp", "dns", "web", "files", "print", "mail"].iter().any(|s| self.offers(s))
     }
     /// Usually powered over its Ethernet cable.
     pub fn poe_powered(self) -> bool {
@@ -369,6 +370,10 @@ pub struct Services {
     pub dhcp: bool,
     pub files: bool,
     pub print: bool,
+    /// Email: SMTP (port 587) to send in, IMAP (993) to read the inbox.
+    pub mail: bool,
+    /// Routers: share routes with neighbour routers by RIP.
+    pub rip: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -623,7 +628,7 @@ pub struct Issue {
     pub fix: Option<crate::issues::Fix>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Log {
     pub src: String,
     pub dst: String,
@@ -631,6 +636,127 @@ pub struct Log {
     pub layer: &'static str,
     pub info: String,
     pub dev: u32,
+    /// The packet's headers, layer by layer, where this line knows them (for the layer view).
+    pub hdr: Hdr,
+}
+
+/// What a frame carries on each layer. Empty / zero = not known for this line.
+#[derive(Clone, Debug, Default)]
+pub struct Hdr {
+    /// Ethernet: sender and receiver MAC on this hop, and the VLAN tag (0 = untagged).
+    pub mac: Option<(String, String)>,
+    pub vlan: u16,
+    /// IPv4: sender, receiver, time to live.
+    pub ip: Option<(Ipv4Addr, Ipv4Addr, u8)>,
+    /// "TCP", "UDP" or "ICMP", with ports, TCP flags, sequence and acknowledgement numbers, payload bytes.
+    pub l4: &'static str,
+    pub ports: (u16, u16),
+    pub flags: &'static str,
+    pub seq: u32,
+    pub ack: u32,
+    pub len: u32,
+    /// The application's message in a few words.
+    pub app: String,
+}
+
+impl Hdr {
+    /// Takes every field this header doesn't know yet from `o`.
+    fn fill(&mut self, o: &Hdr) {
+        if self.mac.is_none() {
+            (self.mac, self.vlan) = (o.mac.clone(), o.vlan);
+        }
+        self.ip = self.ip.or(o.ip);
+        if self.l4.is_empty() {
+            self.l4 = o.l4;
+        }
+        if self.ports == (0, 0) {
+            (self.ports, self.flags, self.seq, self.ack, self.len) = (o.ports, o.flags, o.seq, o.ack, o.len);
+        }
+        if self.app.is_empty() {
+            self.app = o.app.clone();
+        }
+    }
+}
+
+impl Log {
+    /// The frame layer by layer, outermost first: (layer, what it says).
+    pub fn layers(&self) -> Vec<(&'static str, String)> {
+        let h = &self.hdr;
+        let mut v = vec![];
+        if let Some((s, d)) = &h.mac {
+            let kind = if self.proto == "ARP" { "0x0806 ARP" } else { "0x0800 IPv4" };
+            let tag = if h.vlan > 1 { format!(" · 802.1Q tag VLAN {}", h.vlan) } else { String::new() };
+            v.push(("Ethernet", format!("{s} → {d} · EtherType {kind}{tag}")));
+        }
+        if let Some((s, d, ttl)) = h.ip {
+            v.push(("IP", format!("{s} → {d} · TTL {ttl} · protocol {}", if h.l4.is_empty() { "?" } else { h.l4 })));
+        }
+        if h.ports != (0, 0) {
+            let tcp = if h.l4 == "TCP" { format!(" · flags {} · seq {} · ack {}", h.flags, h.seq, h.ack) } else { String::new() };
+            v.push(("Transport", format!("{} port {} → {}{tcp} · {} bytes of data", h.l4, h.ports.0, h.ports.1, h.len)));
+        }
+        if !h.app.is_empty() {
+            v.push(("Application", h.app.clone()));
+        }
+        v
+    }
+}
+
+/// Copies a packet's own fields (transport, application) into the hop lines of its trace,
+/// and the first hop's frame (Ethernet, IP) into the packet's headline.
+fn carry(head: &mut Log, hops: &mut [Log]) {
+    if let Some(first) = hops.iter().find(|l| l.hdr.ip.is_some()) {
+        head.hdr.fill(&first.hdr.clone());
+    }
+    for l in hops.iter_mut().filter(|l| l.hdr.ip.is_some()) {
+        l.hdr.fill(&head.hdr);
+    }
+}
+
+/// One TCP connection: both ends and their next sequence numbers. Each segment moves its sender's
+/// number on by the bytes it carries (SYN and FIN count as one).
+pub struct Tcp {
+    pub client: (Ipv4Addr, u16, u32),
+    pub server: (Ipv4Addr, u16, u32),
+    /// Next sequence number of the client and of the server.
+    pub cs: u32,
+    pub ss: u32,
+    /// Ethernet/IP of the first hop each way, for the lines without a trace of their own.
+    fwd: Hdr,
+    back: Hdr,
+    /// Where it arrived (an internet site, a real website), and the time there and back so far (ms).
+    pub site: Option<usize>,
+    pub real: bool,
+    pub ms: f32,
+    /// The client's address as the server sees it, and the NAT the reply must undo.
+    seen: Ipv4Addr,
+    nat: Option<(u32, Ipv4Addr)>,
+}
+
+impl Tcp {
+    fn seg(&mut self, o: &mut Outcome, from_client: bool, flags: &'static str, len: u32, proto: &'static str, info: String) {
+        let ((sip, sp, sdev), (dip, dp, _)) = if from_client { (self.client, self.server) } else { (self.server, self.client) };
+        let (seq, ack) = if from_client { (self.cs, self.ss) } else { (self.ss, self.cs) };
+        let step = len + flags.contains("SYN") as u32 + flags.contains("FIN") as u32;
+        if from_client {
+            self.cs = self.cs.wrapping_add(step);
+        } else {
+            self.ss = self.ss.wrapping_add(step);
+        }
+        let ack = if flags.contains("ACK") { ack } else { 0 };
+        let app = if proto == "TCP" { String::new() } else { info.clone() };
+        let mut hdr = Hdr { l4: "TCP", ports: (sp, dp), flags, seq, ack, len, app, ..Default::default() };
+        hdr.fill(if from_client { &self.fwd } else { &self.back });
+        let layer = if proto == "TCP" { "Transport" } else { "Application" };
+        o.log.push(Log { src: format!("{sip}:{sp}"), dst: format!("{dip}:{dp}"), proto, layer, info, dev: sdev, hdr });
+    }
+
+    /// FIN, ACK both ways and the last ACK: the connection closes politely.
+    fn close(&mut self, o: &mut Outcome) {
+        self.seg(o, true, "FIN, ACK", 0, "TCP", "FIN — I'm done sending".into());
+        self.seg(o, false, "FIN, ACK", 0, "TCP", "FIN — me too".into());
+        self.seg(o, true, "ACK", 0, "TCP", "ACK — connection closed".into());
+    }
 }
 
 /// One packet's journey, for the animation.
@@ -651,6 +777,8 @@ pub struct Trace {
     pub nat: Option<(u32, Ipv4Addr)>,
     /// (device, address it now knows the MAC of) from the ARP questions on the way.
     pub arp: Vec<(u32, Ipv4Addr)>,
+    /// (switch, MAC address, cable it arrived on) for every frame a switch passed on.
+    pub macs: Vec<(u32, String, u32)>,
 }
 
 #[derive(Default)]
@@ -759,6 +887,12 @@ pub struct Network {
     /// Addresses each device learned a MAC address for from traffic (its ARP cache); not saved.
     #[serde(skip)]
     pub arp_seen: HashMap<u32, Vec<Ipv4Addr>>,
+    /// MAC addresses each switch learned from traffic, with the cable each came in on; not saved.
+    #[serde(skip)]
+    pub mac_seen: HashMap<u32, Vec<(String, u32)>>,
+    /// Emails delivered to each mail server: (from, to, text); not saved.
+    #[serde(skip)]
+    pub mail: HashMap<u32, Vec<(String, String, String)>>,
 }
 
 impl Default for Network {
@@ -788,6 +922,8 @@ impl Default for Network {
             clock: 0.0,
             live: false,
             arp_seen: HashMap::new(),
+            mac_seen: HashMap::new(),
+            mail: HashMap::new(),
         }
     }
 }
@@ -1295,7 +1431,7 @@ impl Network {
     }
 
     /// Routing decision: (outgoing interface, next-hop address).
-    fn route(d: &Device, dst: Ipv4Addr) -> Option<(usize, Ipv4Addr)> {
+    fn route(d: &Device, dst: Ipv4Addr, rip: &[(Ipv4Addr, u8, Ipv4Addr, u8)]) -> Option<(usize, Ipv4Addr)> {
         let direct = |ip: Ipv4Addr| {
             d.ifaces.iter().enumerate().find_map(|(i, f)| {
                 let (a, p) = f.addr()?;
@@ -1312,6 +1448,14 @@ impl Network {
                     best = Some((p, gw));
                 }
             }
+            // Typed routes win over learned ones (as a real router trusts static routes more than RIP).
+            if best.is_none() {
+                for (net, p, gw, _) in rip {
+                    if same_net(*net, dst, *p) && best.is_none_or(|b| *p > b.0) {
+                        best = Some((*p, *gw));
+                    }
+                }
+            }
             if let Some((_, gw)) = best {
                 return direct(gw).map(|i| (i, gw));
             }
@@ -1325,6 +1469,12 @@ impl Network {
         let segs = self.segments();
         let phys = self.phys();
         let stp = self.stp();
+        let rip = self.rip_routes().0;
+        let l4 = match proto {
+            "ICMP" => "ICMP",
+            "DNS" | "DHCP" | "UDP" => "UDP",
+            _ => "TCP",
+        };
         let mut t = Trace { path: vec![from], ..Default::default() };
         // Replies from a far-away site travel the same distance back.
         if let Some(i) = (0..SITES.len()).find(|i| site_ip(*i) == src) {
@@ -1340,7 +1490,7 @@ impl Network {
         // A reply to something sent from inside: NAT lets it in.
         let reply = nat_back.is_some();
         let mut nat_back = nat_back;
-        for ttl in (1..=32u8).rev() {
+        for ttl in (1..=64u8).rev() {
             let d = self.dev(cur).unwrap();
             if d.off {
                 t.error = format!("{} is switched off.", d.name);
@@ -1348,7 +1498,7 @@ impl Network {
             }
             if let Some((r, inner)) = nat_back {
                 if r == cur && d.has_ip(dst) {
-                    t.log.push(Log { src: src.to_string(), dst: inner.to_string(), proto: "NAT", layer: "Network", info: format!("{} translates the reply back to {inner}", d.name), dev: cur });
+                    t.log.push(Log { src: src.to_string(), dst: inner.to_string(), proto: "NAT", layer: "Network", info: format!("{} translates the reply back to {inner}", d.name), dev: cur, ..Default::default() });
                     dst = inner;
                     nat_back = None;
                 }
@@ -1359,16 +1509,16 @@ impl Network {
                 match (self.forward_of(d, port), shared) {
                     (_, Some(cg)) => {
                         t.error = format!("{} is on the mobile line, behind the provider's carrier-grade NAT: it only has the shared address {cg}, so nothing from the internet reaches it and port forwarding can't work. IPv6 or a VPN/tunnel service gets around it.", d.name);
-                        t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Dropped at the provider's carrier-grade NAT: {} only has the shared address {cg}", d.name), dev: cur });
+                        t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Dropped at the provider's carrier-grade NAT: {} only has the shared address {cg}", d.name), dev: cur, ..Default::default() });
                         return t;
                     }
                     (Some(inner), None) => {
-                        t.log.push(Log { src: src.to_string(), dst: inner.to_string(), proto: "NAT", layer: "Network", info: format!("{} forwards port {port} to {inner}", d.name), dev: cur });
+                        t.log.push(Log { src: src.to_string(), dst: inner.to_string(), proto: "NAT", layer: "Network", info: format!("{} forwards port {port} to {inner}", d.name), dev: cur, ..Default::default() });
                         dst = inner;
                     }
                     (None, None) => {
                         t.error = format!("{} drops it: nobody inside started this conversation and no port forwarding rule passes port {port} on.", d.name);
-                        t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("{} drops unsolicited traffic from the internet (no forwarding rule for port {port})", d.name), dev: cur });
+                        t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("{} drops unsolicited traffic from the internet (no forwarding rule for port {port})", d.name), dev: cur, ..Default::default() });
                         return t;
                     }
                 }
@@ -1407,7 +1557,7 @@ impl Network {
                 t.error = format!("{} received a packet for {dst} but doesn't forward packets.", d.name);
                 return t;
             }
-            let Some((out, hop)) = Self::route(d, dst) else {
+            let Some((out, hop)) = Self::route(d, dst, rip.get(&cur).map_or(&[][..], |v| v)) else {
                 t.error = if d.kind == Kind::Internet && dst.is_private() {
                     format!("The internet drops packets to {dst}: private addresses (10.x, 172.16–31.x, 192.168.x) only exist inside a home or office.")
                 } else if cur == from && d.kind.is_host() {
@@ -1421,7 +1571,9 @@ impl Network {
                 t.error = format!("{} isn't plugged in.", d.name);
                 return t;
             };
-            t.log.push(Log { src: d.name.clone(), dst: "broadcast".into(), proto: "ARP", layer: "Link", info: format!("Who has {hop}? Tell {}", d.ifaces[out].ip), dev: cur });
+            let my_mac = mac_of(d, out);
+            let arp_hdr = Hdr { mac: Some((my_mac.clone(), "ff:ff:ff:ff:ff:ff".into())), vlan: d.ifaces[out].vlan, app: format!("ARP request: who has {hop}?"), ..Default::default() };
+            t.log.push(Log { src: d.name.clone(), dst: "broadcast".into(), proto: "ARP", layer: "Link", info: format!("Who has {hop}? Tell {}", d.ifaces[out].ip), dev: cur, hdr: arp_hdr });
             let Some((next, next_if)) = self.owner_in(&segs, seg, hop) else {
                 t.error = format!("Nobody answers ARP for {hop}: no device with that address is in {}'s network.", d.name);
                 return t;
@@ -1438,7 +1590,7 @@ impl Network {
                     return t;
                 }
                 if let Some((false, rule)) = self.rule_verdict(d, src, dst, port) {
-                    t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("Dropped by {}'s firewall rule '{rule}'", d.name), dev: cur });
+                    t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("Dropped by {}'s firewall rule '{rule}'", d.name), dev: cur, ..Default::default() });
                     t.error = format!("Blocked by {}'s firewall rule '{rule}'.", d.name);
                     return t;
                 }
@@ -1456,15 +1608,26 @@ impl Network {
                 return t;
             };
             if d.ifaces[out].vlan != 1 {
-                t.log.push(Log { src: d.name.clone(), dst: self.name(next), proto: "802.1Q", layer: "Link", info: format!("Frame tagged with VLAN {} on the trunk", d.ifaces[out].vlan), dev: cur });
+                t.log.push(Log { src: d.name.clone(), dst: self.name(next), proto: "802.1Q", layer: "Link", info: format!("Frame tagged with VLAN {} on the trunk", d.ifaces[out].vlan), dev: cur, ..Default::default() });
             }
             t.ms += ms;
+            // Every switch on the way learns where both ends are (the frame one way, the ARP reply the other).
+            let next_mac = self.dev(next).map(|x| mac_of(x, next_if)).unwrap_or_default();
+            for w in path.windows(3) {
+                if self.dev(w[1]).is_some_and(|x| x.kind.bridges() || x.kind == Kind::HomeRouter) {
+                    for (m, nb) in [(&my_mac, w[0]), (&next_mac, w[2])] {
+                        if let Some(l) = self.link_between(w[1], nb) {
+                            t.macs.push((w[1], m.clone(), l.id));
+                        }
+                    }
+                }
+            }
             t.path.extend(path.into_iter().skip(1));
             if d.kind == Kind::HomeRouter && out == 1 && came_in.is_some_and(|i| i != 1) {
                 let wan = parse_ip(&d.ifaces[1].ip).unwrap_or(src);
-                t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("{} replaces sender {src} with its public address {wan}", d.name), dev: cur });
+                t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("{} replaces sender {src} with its public address {wan}", d.name), dev: cur, ..Default::default() });
                 if let Some(cg) = self.cgnat(d) {
-                    t.log.push(Log { src: cg.clone(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Mobile line: the provider translates {cg} once more to an address shared by many customers (carrier-grade NAT)"), dev: cur });
+                    t.log.push(Log { src: cg.clone(), dst: dst.to_string(), proto: "NAT", layer: "Network", info: format!("Mobile line: the provider translates {cg} once more to an address shared by many customers (carrier-grade NAT)"), dev: cur, ..Default::default() });
                 }
                 t.nat = Some((cur, src));
                 src = wan;
@@ -1472,7 +1635,8 @@ impl Network {
             if cur != from {
                 t.l3.push((cur, d.ifaces[came_in.unwrap_or(out)].addr().map(|a| a.0).unwrap_or(hop)));
             }
-            t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("{} sends to {} (next hop {hop}, TTL {ttl})", d.name, self.name(next)), dev: cur });
+            let hdr = Hdr { mac: Some((my_mac, next_mac)), vlan: d.ifaces[out].vlan, ip: Some((src, dst, ttl)), l4, ..Default::default() };
+            t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("{} sends to {} (next hop {hop}, TTL {ttl})", d.name, self.name(next)), dev: cur, hdr });
             cur = next;
             came_in = Some(next_if);
         }
@@ -1514,8 +1678,13 @@ impl Network {
             out.lines.push("No IP address yet.".into());
             return None;
         };
-        let t = self.send(from, src, dns, "DNS", 53, None);
-        out.log.push(Log { src: src.to_string(), dst: dns.to_string(), proto: "DNS", layer: "Application", info: format!("Query: A record for {name}?"), dev: from });
+        let mut t = self.send(from, src, dns, "DNS", 53, None);
+        // UDP: no connection set up first, just one question and one answer.
+        let sport = 49152 + (crate::sim::hash(self.seed, from as u64, (self.clock * 1000.0) as u64) % 16384) as u16;
+        let q = format!("Query: A record for {name}?");
+        let mut head = Log { src: format!("{src}:{sport}"), dst: format!("{dns}:53"), proto: "DNS", layer: "Application", info: format!("UDP, no handshake — {q}"), dev: from, hdr: Hdr { l4: "UDP", ports: (sport, 53), len: name.len() as u32 + 17, app: q, ..Default::default() } };
+        carry(&mut head, &mut t.log);
+        out.log.push(head);
         out.log.extend(t.log.clone());
         let ok = t.ok;
         let err = t.error.clone();
@@ -1530,11 +1699,12 @@ impl Network {
             let s = self.dev(server)?;
             if let Some(site) = self.blocked_by(s, &name) {
                 out.lines.push(format!("Blocked: {name} is on {}'s filter list ({site}).", s.name));
-                out.log.push(Log { src: s.name.clone(), dst: src.to_string(), proto: "DNS", layer: "Application", info: format!("{name} blocked by the content filter"), dev: server });
+                out.log.push(Log { src: s.name.clone(), dst: src.to_string(), proto: "DNS", layer: "Application", info: format!("{name} blocked by the content filter"), dev: server, ..Default::default() });
                 return None;
             }
             if let Some(ip) = self.answer(s, &name) {
-                out.log.push(Log { src: dns.to_string(), dst: src.to_string(), proto: "DNS", layer: "Application", info: format!("Answer from {}: {name} is {ip}", s.name), dev: from });
+                let a = format!("Answer from {}: {name} is {ip}", s.name);
+                out.log.push(Log { src: format!("{dns}:53"), dst: format!("{src}:{sport}"), proto: "DNS", layer: "Application", info: format!("UDP — {a}"), dev: from, hdr: Hdr { l4: "UDP", ports: (53, sport), len: name.len() as u32 + 33, app: a, ..Default::default() } });
                 return Some(ip);
             }
             // Forward to the upstream resolver.
@@ -1543,7 +1713,7 @@ impl Network {
             if next.id == server {
                 break;
             }
-            out.log.push(Log { src: s.name.clone(), dst: up.to_string(), proto: "DNS", layer: "Application", info: format!("{} doesn't know {name}, asks {}", s.name, next.name), dev: server });
+            out.log.push(Log { src: s.name.clone(), dst: up.to_string(), proto: "DNS", layer: "Application", info: format!("{} doesn't know {name}, asks {}", s.name, next.name), dev: server, ..Default::default() });
             server = next.id;
         }
         out.lines.push(format!("** server can't find {name}: NXDOMAIN (no such name)"));
@@ -1605,7 +1775,7 @@ impl Network {
             d.ifaces[ifi].ip.clear();
             return;
         };
-        log.push(Log { src: "0.0.0.0".into(), dst: "255.255.255.255".into(), proto: "DHCP", layer: "Application", info: format!("DISCOVER from {name}: is there a DHCP server?"), dev: id });
+        log.push(Log { src: "0.0.0.0".into(), dst: "255.255.255.255".into(), proto: "DHCP", layer: "Application", info: format!("DISCOVER from {name}: is there a DHCP server?"), dev: id, ..Default::default() });
         // Find a server with an address in this segment (a router may serve many VLANs), reachable over the air/cables.
         let phys = self.phys();
         let blocked = self.stp().blocked;
@@ -1622,7 +1792,7 @@ impl Network {
         let server = (!servers.is_empty()).then(|| servers[(crate::sim::hash(self.seed, id as u64, 0xD7) % servers.len() as u64) as usize]);
         let Some((s, j)) = server else {
             let ip = link_local;
-            log.push(Log { src: name.clone(), dst: "-".into(), proto: "DHCP", layer: "Application", info: format!("No answer — {name} gives itself the link-local address {ip}"), dev: id });
+            log.push(Log { src: name.clone(), dst: "-".into(), proto: "DHCP", layer: "Application", info: format!("No answer — {name} gives itself the link-local address {ip}"), dev: id, ..Default::default() });
             let d = self.dev_mut(id).unwrap();
             d.ifaces[ifi].ip = ip;
             d.ifaces[ifi].prefix = 16;
@@ -1654,7 +1824,7 @@ impl Network {
         let pick = pick.map(Ipv4Addr::from);
         let Some(ip) = pick else {
             // A full (or broken) pool means no answer: the device falls back to a link-local address.
-            log.push(Log { src: sip.to_string(), dst: name.clone(), proto: "DHCP", layer: "Application", info: format!("{sname} has no free address in its pool (or the pool doesn't match its network)"), dev: sid });
+            log.push(Log { src: sip.to_string(), dst: name.clone(), proto: "DHCP", layer: "Application", info: format!("{sname} has no free address in its pool (or the pool doesn't match its network)"), dev: sid, ..Default::default() });
             let d = self.dev_mut(id).unwrap();
             d.ifaces[ifi].ip = link_local;
             d.ifaces[ifi].prefix = 16;
@@ -1669,9 +1839,9 @@ impl Network {
             _ => parse_ip(&s.dns).unwrap_or(sip),
         };
         let gw = if s.kind.routes() { gw } else { parse_ip(&s.gateway).unwrap_or(gw) };
-        log.push(Log { src: sip.to_string(), dst: "255.255.255.255".into(), proto: "DHCP", layer: "Application", info: format!("OFFER from {sname}: use {ip}/{spfx}, gateway {gw}, DNS {dns}"), dev: sid });
-        log.push(Log { src: "0.0.0.0".into(), dst: "255.255.255.255".into(), proto: "DHCP", layer: "Application", info: format!("REQUEST from {name}: I'll take {ip}"), dev: id });
-        log.push(Log { src: sip.to_string(), dst: ip.to_string(), proto: "DHCP", layer: "Application", info: "ACK: the address is yours for 24 h".into(), dev: sid });
+        log.push(Log { src: sip.to_string(), dst: "255.255.255.255".into(), proto: "DHCP", layer: "Application", info: format!("OFFER from {sname}: use {ip}/{spfx}, gateway {gw}, DNS {dns}"), dev: sid, ..Default::default() });
+        log.push(Log { src: "0.0.0.0".into(), dst: "255.255.255.255".into(), proto: "DHCP", layer: "Application", info: format!("REQUEST from {name}: I'll take {ip}"), dev: id, ..Default::default() });
+        log.push(Log { src: sip.to_string(), dst: ip.to_string(), proto: "DHCP", layer: "Application", info: "ACK: the address is yours for 24 h".into(), dev: sid, ..Default::default() });
         let d = self.dev_mut(id).unwrap();
         d.ifaces[ifi].ip = ip.to_string();
         d.ifaces[ifi].prefix = spfx;
@@ -1849,6 +2019,61 @@ impl Network {
         }
     }
 
+    /// RIP: routers with it on tell their neighbour routers (on a shared network) every network they know,
+    /// one hop further each time, until nothing changes. Per router (network, prefix, next hop, metric in hops),
+    /// and the number of update rounds it took. 16 hops counts as unreachable.
+    // shortcut: works out the settled tables at once; real RIP gets there one 30-second update at a time.
+    pub fn rip_routes(&self) -> (HashMap<u32, Vec<(Ipv4Addr, u8, Ipv4Addr, u8)>>, usize) {
+        let on: Vec<&Device> = self.devices.iter().filter(|d| d.services.rip && d.kind.routes() && !d.off).collect();
+        if on.is_empty() {
+            return (HashMap::new(), 0);
+        }
+        let segs = self.segments();
+        let own = |d: &Device| -> Vec<(usize, Ipv4Addr, u8)> { d.ifaces.iter().enumerate().filter_map(|(i, f)| Some((*segs.get(&(d.id, i))?, f.addr()?.0, f.addr()?.1))).collect() };
+        // Router -> (network, prefix) -> (hops, next hop); its own networks at 0 hops.
+        type Table = HashMap<(Ipv4Addr, u8), (u8, Option<Ipv4Addr>)>;
+        let mut table: HashMap<u32, Table> = on.iter().map(|d| (d.id, own(d).into_iter().map(|(_, ip, p)| ((net_of(ip, p), p), (0, None))).collect())).collect();
+        // (router, neighbour, the neighbour's address on the network they share)
+        let mut nbrs = vec![];
+        for a in &on {
+            for b in on.iter().filter(|b| b.id != a.id) {
+                for (sa, _, _) in own(a) {
+                    if let Some((_, ip, _)) = own(b).into_iter().find(|x| x.0 == sa) {
+                        nbrs.push((a.id, b.id, ip));
+                    }
+                }
+            }
+        }
+        let mut rounds = 0;
+        while rounds < 32 {
+            let heard = table.clone();
+            let mut changed = false;
+            for (r, n, via) in &nbrs {
+                for (k, (m, _)) in &heard[n] {
+                    let m = m + 1;
+                    let mine = table.get_mut(r).unwrap();
+                    if m <= 15 && mine.get(k).is_none_or(|x| m < x.0) {
+                        mine.insert(*k, (m, Some(*via)));
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+            rounds += 1;
+        }
+        let out = table
+            .into_iter()
+            .map(|(r, t)| {
+                let mut v: Vec<_> = t.into_iter().filter_map(|((net, p), (m, via))| Some((net, p, via?, m))).collect();
+                v.sort();
+                (r, v)
+            })
+            .collect();
+        (out, rounds)
+    }
+
     /// Finds everything that will stop the network from working, or is outdated.
     pub fn check(&self) -> Vec<Issue> {
         let segs = self.segments();
@@ -1977,6 +2202,56 @@ impl Network {
         self.devices.iter().find(|d| d.hostname() == w || d.name.to_lowercase() == w)
     }
 
+    /// Opens a TCP connection to `target` on `port`: name lookup, then the SYN on its way there.
+    /// The caller then `accept`s (SYN-ACK, ACK) or `refuse`s (RST). None, with the reason in `o`, when it doesn't arrive.
+    fn tcp_open(&self, id: u32, target: &str, port: u16, o: &mut Outcome) -> Option<Tcp> {
+        let dst = self.resolve(id, target, o)?;
+        let Some(src) = self.src_ip(id) else {
+            o.lines.push("No IP address — is DHCP working?".into());
+            return None;
+        };
+        // Each side starts counting at a random number (its ISN); the client also picks a free port of its own.
+        let tick = (self.clock * 1000.0) as u64;
+        let isn = |who: u64| crate::sim::hash(self.seed ^ tick, who, (u32::from(dst) as u64) << 16 | port as u64) as u32;
+        let mut t = self.send(id, src, dst, "TCP", port, None);
+        let mut k = Tcp { client: (src, 49152 + (isn(0xE9) % 16384) as u16, id), server: (dst, port, t.dst_dev.unwrap_or(id)), cs: isn(id as u64), ss: 0, fwd: Hdr::default(), back: Hdr::default(), site: t.site, real: t.real, ms: t.ms, seen: t.seen_src.unwrap_or(src), nat: t.nat };
+        k.ss = isn(k.server.2 as u64 | 1 << 40);
+        k.seg(o, true, "SYN", 0, "TCP", "SYN — may I open a connection?".into());
+        let mut head = o.log.pop().unwrap();
+        carry(&mut head, &mut t.log);
+        k.fwd = head.hdr.clone();
+        o.log.push(head);
+        o.log.extend(t.log.clone());
+        let (ok, err) = (t.ok, t.error.clone());
+        o.traces.push(t);
+        if !ok {
+            o.lines.push(format!("Can't connect to {target}: {err}"));
+            return None;
+        }
+        Some(k)
+    }
+
+    /// The server answers the SYN: SYN-ACK back, the client's ACK, and the connection is open.
+    fn accept(&self, k: &mut Tcp, o: &mut Outcome) {
+        let (dst, port, dev) = k.server;
+        let mut back = self.send(dev, dst, k.seen, "TCP", port, k.nat);
+        k.seg(o, false, "SYN, ACK", 0, "TCP", "SYN-ACK — yes, let's talk".into());
+        let mut head = o.log.pop().unwrap();
+        carry(&mut head, &mut back.log);
+        k.back = head.hdr.clone();
+        o.log.push(head);
+        o.log.extend(back.log.clone());
+        k.ms += back.ms;
+        o.traces.push(back);
+        k.seg(o, true, "ACK", 0, "TCP", "ACK — connection open".into());
+    }
+
+    /// Nothing listens on the port: the server answers with a reset.
+    fn refuse(&self, k: &mut Tcp, o: &mut Outcome, what: &str) {
+        o.lines.push(format!("Connection refused: {} doesn't offer {what} (port {}).", self.name(k.server.2), k.server.1));
+        k.seg(o, false, "RST, ACK", 0, "TCP", "RST — nothing listens on this port".into());
+    }
+
     /// Connects to a service (web, files, print, dns) and returns what it serves.
     /// For the web, `url` may carry a page path: "192.168.1.10/about.html".
     pub fn service(&self, id: u32, url: &str, svc: &str, o: &mut Outcome) -> Option<String> {
@@ -1988,26 +2263,12 @@ impl Network {
             "dns" => (53, "DNS", "DNS"),
             _ => (443, "HTTPS", "web"),
         };
-        let dst = self.resolve(id, target, o)?;
-        let Some(src) = self.src_ip(id) else {
-            o.lines.push("No IP address — is DHCP working?".into());
-            return None;
-        };
-        let t = self.send(id, src, dst, "TCP", port, None);
-        o.log.push(Log { src: format!("{src}:51514"), dst: format!("{dst}:{port}"), proto: "TCP", layer: "Transport", info: "SYN — open a connection".into(), dev: id });
-        o.log.extend(t.log.clone());
-        if !t.ok {
-            o.lines.push(format!("Can't connect to {target}: {}", t.error));
-            o.traces.push(t);
-            return None;
-        }
-        let (dev_id, site, seen, nat, real, there) = (t.dst_dev.unwrap(), t.site, t.seen_src.unwrap(), t.nat, t.real, t.ms);
-        o.traces.push(t);
-        let target_dev = self.dev(dev_id).unwrap();
+        let mut k = self.tcp_open(id, target, port, o)?;
+        let target_dev = self.dev(k.server.2).unwrap();
         let mut status = "200 OK";
-        let content = if let Some(s) = site {
+        let content = if let Some(s) = k.site {
             (svc_name == "web").then(|| SITES[s].2.to_string())
-        } else if real {
+        } else if k.real {
             (svc_name == "web").then(|| format!("<p>{target} is a real website. The browser fetches it from the real internet, at this network's speed.</p>"))
         } else {
             let s = &target_dev.services;
@@ -2030,26 +2291,85 @@ impl Network {
             }
         };
         let Some(text) = content else {
-            o.lines.push(format!("Connection refused: {} doesn't offer {svc_name} (port {port}).", target_dev.name));
-            o.log.push(Log { src: format!("{dst}:{port}"), dst: src.to_string(), proto: "TCP", layer: "Transport", info: "RST — nothing listens on this port".into(), dev: dev_id });
+            self.refuse(&mut k, o, svc_name);
             return None;
         };
-        let back = self.send(dev_id, dst, seen, "TCP", port, nat);
-        o.log.extend(back.log.clone());
-        if real {
-            o.fetch = Some((format!("https://{target}/{path}"), there + back.ms));
+        self.accept(&mut k, o);
+        if k.real {
+            o.fetch = Some((format!("https://{target}/{path}"), k.ms));
         }
-        o.traces.push(back);
-        o.log.push(Log { src: format!("{dst}:{port}"), dst: format!("{src}:51514"), proto: "TCP", layer: "Transport", info: "SYN-ACK, then ACK — connection open".into(), dev: id });
         if proto == "HTTPS" {
-            o.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "TLS", layer: "Application", info: "TLS 1.3 handshake — traffic is now encrypted".into(), dev: id });
-            o.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "HTTP", layer: "Application", info: format!("GET /{path} HTTP/2  Host: {target}"), dev: id });
-            o.log.push(Log { src: dst.to_string(), dst: src.to_string(), proto: "HTTP", layer: "Application", info: format!("HTTP/2 {status} — {} bytes", text.len()), dev: dev_id });
+            k.seg(o, true, "PSH, ACK", 517, "TLS", "TLS 1.3 ClientHello — let's agree on a secret key".into());
+            k.seg(o, false, "PSH, ACK", 2800, "TLS", "TLS 1.3 ServerHello and certificate — traffic is now encrypted".into());
+            let get = format!("GET /{path} HTTP/2  Host: {target}");
+            k.seg(o, true, "PSH, ACK", get.len() as u32 + 60, "HTTP", get);
+            k.seg(o, false, "PSH, ACK", text.len() as u32, "HTTP", format!("HTTP/2 {status} — {} bytes", text.len()));
+            k.seg(o, true, "ACK", 0, "TCP", "ACK — got it all".into());
             o.lines.push(format!("HTTP/2 {status}  ({target}, secured with TLS 1.3)"));
         } else {
             o.lines.push(format!("{proto} port {port} open on {target}"));
         }
+        k.close(o);
         Some(text)
+    }
+
+    /// Sends an email: SMTP to the mail server the address's domain name points at.
+    fn send_mail(&mut self, id: u32, to: &str, text: &str, o: &mut Outcome) {
+        let Some((_, domain)) = to.split_once('@').filter(|(u, d)| !u.is_empty() && !d.is_empty() && !text.is_empty()) else {
+            o.lines.push("usage: mail <name@domain> <text>   e.g. mail anna@school.test Hello!".into());
+            return;
+        };
+        // shortcut: no MX records and no relay: the domain's own name record points at its mail server, and mail goes straight there.
+        let Some(mut k) = self.tcp_open(id, domain, 587, o) else { return };
+        let server = k.server.2;
+        if !self.dev(server).is_some_and(|s| s.services.mail) || k.site.is_some() || k.real {
+            self.refuse(&mut k, o, "email");
+            return;
+        }
+        self.accept(&mut k, o);
+        let me = self.dev(id).unwrap().hostname();
+        let from = format!("{me}@{domain}");
+        k.seg(o, true, "PSH, ACK", 30, "SMTP", format!("EHLO {me}, STARTTLS — from here on it's encrypted"));
+        k.seg(o, true, "PSH, ACK", (from.len() + to.len()) as u32 + 24, "SMTP", format!("MAIL FROM:<{from}>  RCPT TO:<{to}>"));
+        k.seg(o, true, "PSH, ACK", text.len() as u32, "SMTP", format!("DATA: \"{text}\""));
+        k.seg(o, false, "PSH, ACK", 30, "SMTP", format!("250 OK — delivered to {to}'s inbox"));
+        k.close(o);
+        o.lines.push(format!("Mail sent to {to} via {} (SMTP, port 587).", self.name(server)));
+        self.mail.entry(server).or_default().push((from, to.to_lowercase(), text.into()));
+    }
+
+    /// Reads an inbox: on the mail server itself directly, from anywhere else over IMAP.
+    fn read_inbox(&self, id: u32, who: &str, o: &mut Outcome) {
+        let me = self.dev(id).unwrap();
+        let show = |o: &mut Outcome, server: u32| {
+            let mails: Vec<_> = self.mail.get(&server).into_iter().flatten().filter(|m| who.is_empty() || m.1 == who.to_lowercase()).collect();
+            if mails.is_empty() {
+                o.lines.push("No mail yet.".into());
+            }
+            for (n, (f, t, x)) in mails.iter().enumerate() {
+                o.lines.push(format!("{:>2}  from {f}  to {t}:  {x}", n + 1));
+            }
+            mails.len()
+        };
+        if who.is_empty() && me.services.mail {
+            show(o, id);
+            return;
+        }
+        let Some((user, domain)) = who.split_once('@') else {
+            o.lines.push("usage: inbox <name@domain>   (on the mail server itself: inbox)".into());
+            return;
+        };
+        let Some(mut k) = self.tcp_open(id, domain, 993, o) else { return };
+        if !self.dev(k.server.2).is_some_and(|s| s.services.mail) || k.site.is_some() || k.real {
+            self.refuse(&mut k, o, "email");
+            return;
+        }
+        self.accept(&mut k, o);
+        k.seg(o, true, "PSH, ACK", 40, "IMAP", format!("TLS, then LOGIN {user} (the password travels encrypted)"));
+        k.seg(o, true, "PSH, ACK", 20, "IMAP", "SELECT INBOX".into());
+        let n = show(o, k.server.2);
+        k.seg(o, false, "PSH, ACK", 200 * n as u32 + 20, "IMAP", format!("* {n} EXISTS — {n} message(s)"));
+        k.close(o);
     }
 
     /// Runs one command typed into a device's terminal.
@@ -2059,6 +2379,14 @@ impl Network {
             let known = self.arp_seen.entry(d).or_default();
             if !known.contains(&ip) {
                 known.push(ip);
+            }
+        }
+        for (sw, mac, link) in o.traces.iter().flat_map(|t| t.macs.iter()) {
+            let table = self.mac_seen.entry(*sw).or_default();
+            // A MAC address seen on another port has moved: the newest port wins.
+            match table.iter_mut().find(|e| e.0 == *mac) {
+                Some(e) => e.1 = *link,
+                None => table.push((mac.clone(), *link)),
             }
         }
         match line.split_whitespace().next().unwrap_or("").to_lowercase().as_str() {
@@ -2091,8 +2419,11 @@ impl Network {
                         "nslookup <name>     ask DNS for an address",
                         "open <name>         load a web page over HTTPS (also: curl)",
                         "test <name> <svc>   check a service: web, files, print, dns",
+                        "mail <to> <text>    send an email (SMTP), e.g. mail anna@school.test Hi",
+                        "inbox <address>     read an inbox (IMAP); on the mail server: inbox",
                         "arp                 neighbours I know by MAC address",
-                        "route               my routing table",
+                        "mac                 which MAC address is behind which port",
+                        "route               my routing table (R = learned by RIP)",
                         "speedtest [name]    real speed and the bottleneck on the way",
                         "ping6 <name>        IPv6 ping (no NAT; inbound needs a firewall rule)",
                         "wifi                my signal and every network in the air",
@@ -2133,7 +2464,7 @@ impl Network {
                 };
                 o.lines.push(format!("PING {arg} ({dst}): 56 data bytes"));
                 let t = self.send(id, src, dst, "ICMP", 0, None);
-                o.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "ICMP", layer: "Network", info: "Echo request".into(), dev: id });
+                o.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto: "ICMP", layer: "Network", info: "Echo request".into(), dev: id, ..Default::default() });
                 o.log.extend(t.log.clone());
                 if !t.ok {
                     o.lines.push(format!("Request timeout — {}", t.error));
@@ -2156,7 +2487,7 @@ impl Network {
                 }
                 let rtt = ms + back.ms + queue;
                 o.traces.push(back);
-                o.log.push(Log { src: dst.to_string(), dst: src.to_string(), proto: "ICMP", layer: "Network", info: "Echo reply".into(), dev: id });
+                o.log.push(Log { src: dst.to_string(), dst: src.to_string(), proto: "ICMP", layer: "Network", info: "Echo reply".into(), dev: id, ..Default::default() });
                 // Live: each packet takes its own chance (reproducible from the plan's seed and the clock).
                 // Planning: the expected outcome.
                 let tick = (self.clock * 1000.0) as u64;
@@ -2209,26 +2540,10 @@ impl Network {
                     o.lines.push(if svc == "web" { crate::html::plain(&text) } else { text });
                 }
             }
-            "arp" => {
-                // Only neighbours it has talked to: ARP asks for a MAC address the first time it's needed.
-                let segs = self.segments();
-                let known = self.arp_seen.get(&id).cloned().unwrap_or_default();
-                let mut any = false;
-                for (i, _) in d.ifaces.iter().enumerate() {
-                    let Some(&s) = segs.get(&(id, i)) else { continue };
-                    for x in &self.devices {
-                        for (j, f) in x.ifaces.iter().enumerate() {
-                            if x.id != id && segs.get(&(x.id, j)) == Some(&s) && f.addr().is_some_and(|a| known.contains(&a.0)) {
-                                o.lines.push(format!("{:<16} {}   {}", f.ip, f.mac, x.name));
-                                any = true;
-                            }
-                        }
-                    }
-                }
-                if !any {
-                    o.lines.push("No entries yet: a device learns a neighbour's MAC address (ARP) the first time it talks to it — try a ping first.".into());
-                }
-            }
+            "arp" => o.lines.extend(self.arp_lines(id)),
+            "mac" | "mactable" | "mac-address-table" => o.lines.extend(self.mac_lines(id)),
+            "mail" | "sendmail" => self.send_mail(id, arg, &words.get(2..).unwrap_or_default().join(" "), &mut o),
+            "inbox" | "imap" => self.read_inbox(id, arg, &mut o),
             "route" | "netstat" => {
                 o.lines.push("Destination        Gateway          Interface".into());
                 for f in &d.ifaces {
@@ -2239,8 +2554,18 @@ impl Network {
                 for (n, p, gw) in Self::parse_routes(&d) {
                     o.lines.push(format!("{:<18} {:<16}", format!("{n}/{p}"), gw));
                 }
+                let (rip, rounds) = self.rip_routes();
+                let learned = rip.get(&id).map_or(&[][..], |v| v);
+                for (n, p, gw, m) in learned {
+                    o.lines.push(format!("{:<18} {:<16} R  metric {m}", format!("{n}/{p}"), gw));
+                }
                 if !d.gateway.is_empty() {
                     o.lines.push(format!("{:<18} {:<16}", "default (0.0.0.0/0)", d.gateway));
+                }
+                if !learned.is_empty() {
+                    o.lines.push(format!("R = learned by RIP (metric = routers on the way, 16 = unreachable). Settled after {rounds} update round(s); RIP sends one every 30 s."));
+                } else if d.services.rip {
+                    o.lines.push("RIP is on, but no neighbour router runs it yet.".into());
                 }
             }
             "dhcp" | "dhclient" | "renew" => {
@@ -2265,6 +2590,58 @@ impl Network {
             }
         }
         o
+    }
+}
+
+impl Network {
+    /// The ARP cache: neighbours this device has talked to, by address and MAC.
+    pub fn arp_lines(&self, id: u32) -> Vec<String> {
+        // Only neighbours it has talked to: ARP asks for a MAC address the first time it's needed.
+        let segs = self.segments();
+        let known = self.arp_seen.get(&id).cloned().unwrap_or_default();
+        let mut v = vec![];
+        for (i, _) in self.dev(id).map(|d| d.ifaces.as_slice()).unwrap_or_default().iter().enumerate() {
+            let Some(&s) = segs.get(&(id, i)) else { continue };
+            for x in &self.devices {
+                for (j, f) in x.ifaces.iter().enumerate() {
+                    if x.id != id && segs.get(&(x.id, j)) == Some(&s) && f.addr().is_some_and(|a| known.contains(&a.0)) {
+                        v.push(format!("{:<16} {}   {}", f.ip, f.mac, x.name));
+                    }
+                }
+            }
+        }
+        if v.is_empty() {
+            v.push("No entries yet: a device learns a neighbour's MAC address (ARP) the first time it talks to it — try a ping first.".into());
+        }
+        v
+    }
+
+    /// The switch's MAC address table: which address it saw arrive on which port.
+    pub fn mac_lines(&self, id: u32) -> Vec<String> {
+        let seen = self.mac_seen.get(&id).map_or(&[][..], |v| v);
+        if seen.is_empty() {
+            return vec!["No entries yet: a switch learns which MAC address is behind which port from the frames passing through — try a ping first.".into()];
+        }
+        let mut v = vec![format!("{:<18} {:<24} Device", "MAC address", "Port")];
+        for (mac, link) in seen {
+            let owner = self.devices.iter().find(|d| d.ifaces.iter().any(|f| f.mac == *mac)).map(|d| d.name.clone()).unwrap_or_default();
+            let port = match self.links.iter().find(|l| l.id == *link) {
+                Some(l) if l.medium.wireless() => format!("Wi-Fi ({})", self.name(l.other(id).0)),
+                Some(l) => l.port_at(id).map(|p| self.port_name(id, p)).unwrap_or_else(|| format!("cable to {}", self.name(l.other(id).0))),
+                None => "?".into(),
+            };
+            v.push(format!("{mac:<18} {port:<24} {owner}"));
+        }
+        v
+    }
+}
+
+/// A port's MAC address; a VLAN sub-interface uses its physical port's.
+fn mac_of(d: &Device, i: usize) -> String {
+    let f = &d.ifaces[i];
+    match f.parent {
+        Some(p) if f.mac.is_empty() => d.ifaces.get(p).map(|x| x.mac.clone()).unwrap_or_default(),
+        _ => f.mac.clone(),
     }
 }
 
@@ -2325,7 +2702,7 @@ pub fn template_seeded(name: &str, seed: u64) -> Network {
             n.story = "A two-storey house: the router sits in the hall, a switch feeds the office and an access point upstairs. Brick outer walls, a concrete stairwell and coated windows shape the Wi-Fi — turn on the Wi-Fi map to see it.".into();
             n.auto_address();
         }
-        "flat" | "roaming" | "extender" | "apartment" | "speakers" | "office" | "nightmare" | "campus" => crate::scenarios::build(name, &mut n),
+        "flat" | "roaming" | "extender" | "apartment" | "speakers" | "office" | "nightmare" | "campus" | "rip" => crate::scenarios::build(name, &mut n),
         "classroom" => {
             n.title = "Two networks and a router".into();
             let s1 = n.add_device(Kind::Switch, [260.0, 260.0]);
@@ -2381,6 +2758,89 @@ mod tests {
     fn run(n: &mut Network, name: &str, cmd: &str) -> String {
         let id = n.lookup_dev(name).unwrap().id;
         n.exec(id, cmd).lines.join("\n")
+    }
+
+    #[test]
+    fn tcp_counts_bytes_with_its_sequence_numbers_and_dns_uses_plain_udp() {
+        let mut n = template("classroom");
+        let pc = n.lookup_dev("pc-1").unwrap().id;
+        let o = n.exec(pc, "open www.school.test");
+        let tcp: Vec<&Hdr> = o.log.iter().filter(|l| l.hdr.l4 == "TCP" && !l.hdr.flags.is_empty() && l.layer != "Network").map(|l| &l.hdr).collect();
+        let flags: Vec<&str> = tcp.iter().map(|h| h.flags).collect();
+        assert_eq!(&flags[..3], ["SYN", "SYN, ACK", "ACK"], "{flags:?}");
+        assert_eq!(&flags[flags.len() - 3..], ["FIN, ACK", "FIN, ACK", "ACK"], "{flags:?}");
+        let (syn, synack, ack) = (tcp[0], tcp[1], tcp[2]);
+        assert_eq!((synack.ack, ack.seq, ack.ack), (syn.seq.wrapping_add(1), syn.seq.wrapping_add(1), synack.seq.wrapping_add(1)));
+        // Every segment's number is the last one's plus the bytes it carried; the other side acknowledges exactly that.
+        let client = syn.ports.0;
+        let mut next = (syn.seq, synack.seq);
+        for h in &tcp {
+            let mine = if h.ports.0 == client { &mut next.0 } else { &mut next.1 };
+            assert_eq!(h.seq, *mine, "{h:?}");
+            *mine = h.seq.wrapping_add(h.len + h.flags.contains("SYN") as u32 + h.flags.contains("FIN") as u32);
+        }
+        // The hop lines carry the segment's ports, and TTL goes down by one at the router.
+        let hops: Vec<&Hdr> = o.log.iter().filter(|l| l.layer == "Network" && l.hdr.ports.0 == client).map(|l| &l.hdr).collect();
+        assert_eq!(hops.iter().map(|h| h.ip.unwrap().2).collect::<Vec<_>>(), [64, 63]);
+        assert!(hops.iter().all(|h| h.flags == "SYN" && h.mac.is_some()));
+        let dns = o.log.iter().find(|l| l.proto == "DNS").unwrap();
+        assert_eq!((dns.hdr.l4, dns.hdr.ports.1, dns.hdr.flags), ("UDP", 53, ""));
+        assert!(dns.layers().iter().any(|(l, t)| *l == "Transport" && t.starts_with("UDP")));
+    }
+
+    #[test]
+    fn mail_goes_by_smtp_to_the_domains_server_and_is_read_by_imap() {
+        let mut n = template("classroom");
+        let srv = n.lookup_dev("web-server").unwrap().id;
+        let ip = n.dev(srv).unwrap().first_ip().unwrap();
+        n.dev_mut(srv).unwrap().dns_records += &format!("\nschool.test {ip}");
+        assert!(run(&mut n, "pc-1", "mail anna@school.test Hello there").contains("refused"));
+        n.dev_mut(srv).unwrap().services.mail = true;
+        let pc = n.lookup_dev("pc-1").unwrap().id;
+        let o = n.exec(pc, "mail anna@school.test Hello there");
+        assert!(o.lines.join(" ").contains("Mail sent"), "{:?}", o.lines);
+        assert!(o.log.iter().any(|l| l.proto == "SMTP" && l.hdr.ports.1 == 587 && l.info.contains("Hello there")));
+        run(&mut n, "pc-2", "mail ben@school.test Not for Anna");
+        assert!(run(&mut n, "web-server", "inbox").contains("Not for Anna"));
+        let out = run(&mut n, "pc-4", "inbox anna@school.test");
+        assert!(out.contains("Hello there") && !out.contains("Not for Anna"), "{out}");
+        assert!(run(&mut n, "pc-1", "mail nobody").contains("usage"));
+    }
+
+    #[test]
+    fn switches_learn_which_mac_is_behind_which_port() {
+        let mut n = template("classroom");
+        let sw = n.devices.iter().find(|d| d.kind == Kind::Switch).unwrap().id;
+        assert!(n.mac_lines(sw)[0].contains("No entries"));
+        let pc2 = n.lookup_dev("pc-2").unwrap().ifaces[0].ip.clone();
+        run(&mut n, "pc-1", &format!("ping {pc2}"));
+        let table = n.mac_lines(sw).join("\n");
+        let mac = |name: &str| n.lookup_dev(name).unwrap().ifaces[0].mac.clone();
+        assert!(table.contains(&mac("pc-1")) && table.contains(&mac("pc-2")), "{table}");
+        assert!(table.contains("port ") && table.contains("PC 1"), "{table}");
+        assert!(run(&mut n, "router-1", "mac").contains("No entries"));
+    }
+
+    #[test]
+    fn rip_counts_hops_and_gives_up_after_fifteen() {
+        // 18 routers in a row, a network between each pair: R0 only learns the ones up to 15 routers away.
+        let mut n = Network::default();
+        let rs: Vec<u32> = (0..18).map(|i| n.add_device(Kind::Router, [i as f32 * 60.0, 0.0])).collect();
+        for w in rs.windows(2) {
+            n.connect(w[0], w[1], Medium::Cat6).unwrap();
+        }
+        n.auto_address();
+        for r in &rs {
+            let d = n.dev_mut(*r).unwrap();
+            d.routes.clear();
+            d.services.rip = true;
+        }
+        let (rip, rounds) = n.rip_routes();
+        let r0 = &rip[&rs[0]];
+        let far = |k: usize| r0.iter().find(|x| x.0 == Ipv4Addr::new(10, 0, k as u8 + 1, 0)).map(|x| x.3);
+        assert_eq!((far(1), far(15), far(16)), (Some(1), Some(15), None), "{r0:?}");
+        assert!((15..=17).contains(&rounds), "{rounds}");
+        assert!(run(&mut n, "router-1", "route").contains("R  metric 15"));
     }
 
     #[test]
