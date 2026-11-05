@@ -10,7 +10,7 @@ NetSketch started as a modern successor to [Filius](https://www.lernsoftware-fil
 
 ### Design your network
 - Drag routers, switches, access points, extenders, mesh speakers, PCs, phones, TVs, NAS boxes, cameras and more onto the map, and connect them with Cat 5/5e/6/6A, fibre, powerline, Wi-Fi or a 5G backup line.
-- Draw walls by material (drywall, brick, concrete, glass, metal…). Work across several storeys, and put a picture of your floor plan underneath to trace over.
+- Draw walls by material (drywall, wood, glass, low-E windows, aerated concrete, thin and thick brick, concrete, stone, metal). Work across several storeys, and put a picture of your floor plan underneath to trace over.
 - Model **ports properly**: a router can have "1 × 10G SFP+ WAN, 1 × 2.5G, 4 × 1G". Every cable plugs into a specific port, and its speed comes from the ports at both ends.
 - Plan VLANs, guest Wi-Fi, firewall rules (port ranges, TCP/UDP, time schedules for parental control), UPnP, ad blocking, IPv6 with prefix delegation, Power over Ethernet budgets, spanning tree and LACP bundles.
 - Storey heights and mounting heights, cable routes drawn along the walls, Thread and Zigbee gadgets with their hub, VPN remote access (it tells you when carrier-grade NAT gets in the way), per-device priority (QoS), Wi-Fi 7 multi-link and UPS runtime.
@@ -29,9 +29,10 @@ A built-in catalog fills in the radio, ports, power draw and price in one click:
 Each entry links to the page its specs come from. Values that had to be estimated (often power draw, price or launch year) say so in the entry's note.
 
 ### See the Wi-Fi
-- A coverage heat map per storey and band (2.4, 5 and 6 GHz), from a multi-wall path-loss model: free-space distance plus each wall's material (hit at an angle costs more) and the floors in between.
+- A coverage heat map per storey and band (2.4, 5 and 6 GHz), from a multi-wall path-loss model: free-space distance plus each wall's material (hit at an angle costs more) and the floors in between. Signals also bend round wall ends and corners (doorways, halls). Wall losses, receiver sensitivity per data rate, fading and reconnect times follow published measurements (ITU-R P.2040, P.1238, P.526, 3GPP TR 38.901, TGn/TGax channel models, the 802.11 sensitivity tables).
+- How steady each Wi-Fi link is: fading by line of sight, antennas and channel width, frames resent, packets lost, and how often a link drops. In Simulate a weak link really drops out and takes a moment to join again; powerline slows down while a noisy appliance runs.
 - European rules built in: 5 GHz channels 36–64 and 100–140 (30 dBm on the upper ones), 6 GHz up to 6425 MHz, radar (DFS) channel checks, and the 1/5/9/13 plan on 2.4 GHz.
-- Channel planning, neighbours' networks and interference, roaming and band steering. You can take a phone for a walk through the house and watch it hand over.
+- Channel planning, neighbours' networks and interference, roaming and band steering. The checks also catch routers and neighbours that both pick their channel automatically, radar channels that push you onto the neighbours' channels, extenders on the worse uplink and repeaters chained behind repeaters. You can take a phone for a walk through the house and watch it hand over.
 - "Where would another access point help most?", a coverage score for every storey, and outdoor areas (garden, terrace) with their own score. You choose what good Wi-Fi means for you (browsing, video calls, or 4K and gaming), and the score, the map colours and its dBm legend follow.
 - Calibrate the model with real measurements: import survey files, or use the companion phone app (below).
 
@@ -39,7 +40,8 @@ Each entry links to the page its specs come from. Values that had to be estimate
 - DHCP, DNS, NAT, routing, VLANs and spanning tree behave like the real thing.
 - Every device has a terminal: `ipconfig`, `ping`, `traceroute`, `nslookup`, `speedtest` (real speed and the bottleneck on the way), `wifi`, `stp`, `vlan`, `arp`, `route` and more.
 - A built-in browser opens pages hosted on your simulated servers, or real websites.
-- Watch packets travel along the cables in the packet log, try "what if this cable breaks?", and see traffic at the evening busy hour.
+- Watch packets travel along the cables in the packet log and try "what if this cable breaks?".
+- Traffic: each device's everyday apps follow the time of day, and a chart shows how full the internet line and the busiest cable or Wi-Fi get over the whole day; a Household slider makes everyone busier. Or switch to Custom and choose what each device runs at once ("what if everyone streams?"). Traffic is shared fairly over every cable and Wi-Fi channel (each access point's devices take turns, the line uploads only as fast as the plan), with priorities first. In Simulate it comes and goes like real apps (pages load on a click, video fetches a few seconds at a time) and flows along the cables as dots (turn them off under Traffic).
 - Click any packet to see its layers (Ethernet, IP with TTL, TCP/UDP with sequence numbers, the application), or step through a packet's journey hop by hop.
 - Mail that follows MX records and is relayed between servers (`mail`, `inbox`), ARP and switch MAC tables, and RIP dynamic routing that spreads one 30-second update at a time.
 

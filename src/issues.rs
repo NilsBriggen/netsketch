@@ -30,6 +30,8 @@ pub enum Fix {
     Bundle(u32, u32),
     /// Move a smart-home hub to another Thread/Zigbee channel.
     ZigbeeChannel(u32, u8),
+    /// Pick the best channels once and keep them (automatic channel selection off on your own radios).
+    FixChannels,
 }
 
 impl Fix {
@@ -42,6 +44,7 @@ impl Fix {
             Fix::EnableStp(_) => "Turn on spanning tree",
             Fix::Unplug(_) => "Unplug the loop",
             Fix::AutoChannels => "Pick better channels",
+            Fix::FixChannels => "Pick and keep the best channels",
             Fix::Wpa3(_) => "Switch to WPA3",
             Fix::FastRoamEverywhere => "Turn on fast roaming",
             Fix::Reconnect(_) => "Reconnect to the best",
@@ -154,6 +157,21 @@ impl Network {
             if s.band == Band::B24 && !ap.band_steer && cl.bands[1] && ap.bands[1] {
                 v.push(issue(Level::Tip, Some(cl.id), Some(l.id), crate::i18n::trf("{} sits on 2.4 GHz because it's the loudest band. With band steering on {} it would move to 5 GHz and get more speed.", &[&cl.name, &ap.name]), None));
             }
+            if cl.kind.radio() {
+                // Repeaters keep the uplink they found first; after a restart or an outage that can be the worse one.
+                let now = self.best_rssi(ap, cl.pos, cl.floor);
+                if let Some((o, r)) = self.roam_candidates(cl, Network::joined(cl, ap)).into_iter().find(|c| c.0 != ap.id && !self.feeds_from(self.dev(c.0).unwrap(), cl.id)) {
+                    let od = self.dev(o).unwrap();
+                    // Hopping through another extender is only better when it's much louder.
+                    let need = if od.kind == Kind::Extender && ap.kind != Kind::Extender { 15.0 } else { 8.0 };
+                    if r >= now + need {
+                        v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} repeats {} ({} dBm) although {} is much louder where it stands ({} dBm). Extenders and mesh points keep the uplink they found first, so after a restart or an outage they can end up on the worse one. Connect it to {}.", &[&cl.name, &ap.name, &format!("{:.0}", now), &od.name, &format!("{:.0}", r), &od.name]), Some(Fix::Reconnect(cl.id))));
+                    }
+                }
+                if ap.kind == Kind::Extender {
+                    v.push(issue(Level::Tip, Some(cl.id), Some(l.id), crate::i18n::trf("{} repeats {}, which is a repeater itself: everything crosses the air three times, so a third of the speed at best and more delay. Connect it to the router or to a wired access point.", &[&cl.name, &ap.name]), None));
+                }
+            }
             if cl.kind == Kind::Extender {
                 if s.rssi < -70.0 {
                     v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} hears {} at only {} dBm{}. It can only pass on what it receives, then halves it: place it halfway, where the signal is still good — or run a cable to a real access point.", &[&cl.name, &ap.name, &format!("{:.0}", s.rssi), &walls]), None));
@@ -166,7 +184,10 @@ impl Network {
             if cl.kind.radio() {
                 continue;
             }
-            if s.rssi < -75.0 {
+            if let Some(st) = self.stability(l).filter(|st| st.drops_h >= 0.5 || st.loss >= 0.01) {
+                let how = if st.drops_h >= 0.5 { crate::i18n::trf("loses its Wi-Fi about {} times an hour", &[&format!("{:.0}", st.drops_h.max(1.0))]) } else { crate::i18n::trf("loses {}% of its packets", &[&format!("{:.0}", st.loss * 100.0)]) };
+                v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} {}: its signal from {} is only {} dB above where Wi-Fi gives up, and people walking by or a door closing push it under. Each time it needs a few seconds to join again. Move it or the access point, or add one closer.", &[&cl.name, &how, &ap.name, &format!("{:.0}", st.margin)]), None));
+            } else if s.rssi < -75.0 {
                 v.push(issue(Level::Warning, Some(cl.id), Some(l.id), crate::i18n::trf("{} gets a {} signal from {} ({} dBm{}): ≈ {} Mbit/s and dropouts.", &[&cl.name, &(s.quality()), &ap.name, &format!("{:.0}", s.rssi), &walls, &format!("{:.0}", s.mbps)]), None));
             }
             let now = self.rssi_at(ap, cl.pos, cl.floor, Band::B5);
@@ -206,7 +227,14 @@ impl Network {
                     v.push(issue(Level::Warning, Some(r.id), None, crate::i18n::trf("{}: channel {} doesn't fit a {} MHz block on {} — pick one from the list.", &[&r.name, &ch, &w, &(b.label())]), Some(Fix::AutoChannels)));
                 }
                 if crate::wifi::dfs(b, ch, w) && r.kind != Kind::Neighbor {
-                    v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{} uses radar (DFS) channel {}: it must listen for a minute before sending and may jump away if radar shows up.", &[&r.name, &ch]), None));
+                    let mut text = crate::i18n::trf("{} uses radar (DFS) channel {}: it must listen for a minute before sending and may jump away if radar shows up.", &[&r.name, &ch]);
+                    // After radar it must leave the channel for 30 minutes; the radar-free channels are where the neighbours are.
+                    let low: Vec<String> = self.heard_on(r, b, |c| c <= 48).iter().map(|t| t.name.clone()).collect();
+                    if !low.is_empty() {
+                        text += " ";
+                        text += &crate::i18n::trf("It then sends on channels 36–48 for at least 30 minutes, where {} already are.", &[&low.join(", ")]);
+                    }
+                    v.push(issue(Level::Tip, Some(r.id), None, text, None));
                 }
                 if b == Band::B24 && w >= 40 {
                     v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{} uses 40 MHz on 2.4 GHz: that's two of the three free channels — neighbours suffer and so do you.", &[&r.name]), None));
@@ -236,6 +264,27 @@ impl Network {
                 }
             }
         }
+        // Automatic channel selection on both sides. Most routers only re-pick at start-up (hostapd); some also when
+        // the channel gets busy (FRITZ!Box) or every night (UniFi). Half of home routers keep one channel for a month
+        // (WiSe, 2013), and back-and-forth between neighbours is shown in theory, not measured: a tip unless the phone
+        // really saw channel changes.
+        for r in radios.iter().filter(|r| r.auto_ch) {
+            for band in [Band::B24, Band::B5].into_iter().filter(|b| r.bands[b.i()]) {
+                let loud: Vec<&crate::net::Device> = self.heard_on(r, band, |_| true).into_iter().filter(|t| t.auto_ch && self.rssi_at(t, r.pos, r.floor, band) >= -70.0).collect();
+                let jumped = self.channel_jumps(r.id) + loud.iter().map(|t| self.channel_jumps(t.id)).sum::<usize>();
+                if loud.is_empty() {
+                    continue;
+                }
+                let names = loud.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ");
+                let mut text = crate::i18n::trf("{} and the loud neighbouring {} all pick their {} channel by themselves. Most only re-pick after a restart, some also when the channel gets busy or every night. Then each reacts to the others: two can land on the same channel or move back and forth, and devices that miss the announcement drop off for a moment. A fixed channel avoids it.", &[&r.name, &names, &(band.label())]);
+                if jumped > 0 {
+                    text += " ";
+                    text += &crate::i18n::trf("The phone saw {} channel changes while it watched.", &[&jumped]);
+                }
+                v.push(issue(if jumped > 0 { Level::Warning } else { Level::Tip }, Some(r.id), None, text, Some(Fix::FixChannels)));
+            }
+        }
+        self.measured_checks(v);
         if radios.len() > 1 && radios.iter().any(|r| !r.fast_roam) && self.devices.iter().any(|d| matches!(d.kind, Kind::Phone | Kind::Laptop)) {
             v.push(issue(Level::Tip, None, None, crate::i18n::tr("Several access points but fast roaming (802.11k/v/r) is off: phones hang on to a far access point and calls stutter when they finally switch.").into(), Some(Fix::FastRoamEverywhere)));
         }
@@ -268,21 +317,25 @@ impl Network {
 
         // --- Busy hour: everyone's apps at once ---
         let load = self.loads();
-        for l in &self.links {
-            let u = self.utilisation(&load, l.id);
+        // Wi-Fi links share their channel: the airtime warning below covers them.
+        for l in self.links.iter().filter(|l| l.medium != crate::net::Medium::WiFi) {
+            // What the apps ask of it: above 100% they get less than they want.
+            let u = self.utilisation(&load, l.id).max(self.wanted(&load, l.id));
             if u > 0.8 {
                 let who = load.who.get(&l.id).map(|w| w.iter().collect::<std::collections::HashSet<_>>().len()).unwrap_or(0);
-                let sensitive = load.who.get(&l.id).is_some_and(|w| w.iter().any(|d| self.dev(*d).is_some_and(|d| d.uses.iter().any(|u| u.sensitive()))));
+                let sensitive = load.who.get(&l.id).is_some_and(|w| w.iter().any(|d| self.dev(*d).is_some_and(|d| self.apps(d).iter().any(|u| u.sensitive()))));
                 v.push(issue(
-                    if u > 1.0 { Level::Error } else { Level::Warning },
+                    if u > 1.02 { Level::Error } else { Level::Warning },
                     None,
                     Some(l.id),
                     format!(
-                        "{} {}",
+                        "{} {} {}",
                         crate::i18n::trf(
                             "{} {}–{} is {}% full ({} share ≈ {} Mbit/s).",
                             &[
-                                &(if (18.0..23.5).contains(&self.hour) { crate::i18n::trf("At the busy hour ({})", &[&(crate::more::clock(self.hour))]) } else { crate::i18n::trf("At {}", &[&(crate::more::clock(self.hour))]) }),
+                                &(if self.custom_traffic {
+                                    crate::i18n::tr("With your test load").to_string()
+                                } else if (18.0..23.5).contains(&self.hour) { crate::i18n::trf("At the busy hour ({})", &[&(crate::more::clock(self.hour))]) } else { crate::i18n::trf("At {}", &[&(crate::more::clock(self.hour))]) }),
                                 &self.name(l.a),
                                 &self.name(l.b),
                                 &format!("{:.0}", u * 100.0),
@@ -294,9 +347,12 @@ impl Network {
                             (_, true) => "Smart queueing keeps the delay low; more speed needs a faster plan or fewer heavy apps.",
                             (true, false) => "Video calls and games will lag — full queues add delay. Smart queueing (SQM) on the router keeps them smooth.",
                             _ => "",
-                        })
+                        }),
+                        if u > 1.02 { crate::i18n::tr("The apps get less than they want: videos drop to a lower quality, downloads and page loads take longer.") } else { "" }
                     )
-                    .trim_end()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
                     .to_string(),
                     [l.a, l.b].iter().filter_map(|x| self.dev(*x)).find(|d| d.kind == Kind::HomeRouter && !d.sqm).filter(|_| [l.a, l.b].iter().any(|x| self.dev(*x).is_some_and(|d| d.kind == Kind::Internet))).map(|r| Fix::Sqm(r.id)),
                 ));
@@ -467,6 +523,11 @@ impl Network {
                 crate::i18n::tr("Removed the looping cable.").into()
             }
             Fix::AutoChannels => self.auto_channels(),
+            Fix::FixChannels => {
+                let said = self.auto_channels();
+                self.devices.iter_mut().filter(|d| d.kind.radio()).for_each(|d| d.auto_ch = false);
+                said
+            }
             Fix::Wpa3(id) => {
                 let d = self.dev_mut(*id).unwrap();
                 d.security = Security::Wpa3;
@@ -572,8 +633,8 @@ impl Network {
                 let free = t
                     .path
                     .windows(2)
-                    .filter_map(|w| self.link_between(w[0], w[1]))
-                    .map(|l| self.flow_rate(l) * (1.0 - self.utilisation_for(&load, l.id, d.qos)).max(0.05))
+                    .filter_map(|w| Some((self.link_between(w[0], w[1])?, w[0])))
+                    .map(|(l, near)| self.fair_share(&load, l, l.a == near, d.qos))
                     .fold(f32::MAX, f32::min);
                 let mut mbps = raw.min(free);
                 // One TCP connection can't beat its round trip and loss: Mathis et al. (MSS/RTT · 1.22/√p),

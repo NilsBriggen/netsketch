@@ -8,6 +8,8 @@ Install
   2. Open it on the phone. Android asks to allow installing apps from this source — allow it once.
   3. Open "NetSketch Survey". The first measurement asks for permission to see nearby Wi-Fi networks
      (Android files this under location), and Location has to be switched on while you measure.
+     "Watch my Wi-Fi" also asks to show a notification (Android 13+): it shows while watching and has a
+     Stop button. Watching works without it, the notification is just hidden then.
 
 Link it to NetSketch (recommended)
   1. On the computer: overview → Real measurements → "Link a phone (live)". A 4-digit code appears.
@@ -37,6 +39,33 @@ On the phone
     counts down (quick points don't count); turning off "Wi-Fi scan throttling" in Developer options
     makes surveys faster.
   - The app follows the phone's language (English or German) and its dark or light setting.
+
+The other tabs
+  - Around you: every network the phone hears, grouped into the boxes (router, extender, mesh node) that
+    send them, with band, channel, width, Wi-Fi generation, security, a short signal history and what
+    each one announces: fast roaming (802.11k/v/r), WPS, streams, country, and its distance where both the
+    phone and the access point support Wi-Fi RTT (802.11mc). Yours are marked. It refreshes about every
+    30 s while open (Android's scan limit).
+  - Watch: "Watch my Wi-Fi" records every second (signal, access point, link speed, router delay) and scans
+    when allowed, also with the screen locked. It lists dropouts, delay spikes, lost bursts, deep signal
+    dips, switches between access points and any access point changing channel, with a timeline. The
+    last 24 hours stay on the phone. It keeps the phone's processor awake: plug it in for long watches.
+  - Check-up: plain-language findings from all of that and your measured points: crowded channels and
+    the quietest one, routers that keep jumping channel (yours and the neighbours'), a phone sticking to
+    a far access point, extenders whose link back is probably weak, settings (WPS, old encryption,
+    40 MHz on 2.4 GHz, radar channels, separate names per band), and the internet side (double NAT or
+    shared provider addresses, IPv6, slow name lookups). "Check my network" asks the router over UPnP and
+    looks up your public address at Cloudflare.
+  - Devices: what's on your network (UPnP and mDNS announcements, and a quick knock on common ports).
+  - Send to NetSketch (or Save & share file) includes the watch log, the findings and the devices.
+
+What a phone can't see (Android limits)
+  - Which way an extender or mesh node really links back to the router: the app estimates it from where
+    each one's signal is strongest, and says so.
+  - Other devices' hardware (MAC) addresses (hidden from apps since Android 10), retry counters, or raw
+    packets (that needs root).
+  - The extra details of a scan (802.11k/v/r, WPS, streams, country) need Android 11; Wi-Fi 6 streams
+    need Android 12. Distances need a phone with Wi-Fi RTT.
 
 In NetSketch afterwards
   In the list of measured networks, networks named like yours are linked to your devices. For the

@@ -13,6 +13,12 @@ struct SurveyFile {
     #[serde(default)]
     device: String,
     points: Vec<FilePoint>,
+    #[serde(default)]
+    watch: Option<Watch>,
+    #[serde(default)]
+    findings: Vec<Finding>,
+    #[serde(default)]
+    lan: Vec<LanDevice>,
 }
 
 #[derive(Deserialize)]
@@ -30,6 +36,8 @@ struct FilePoint {
     connected: Option<Connected>,
     #[serde(default)]
     speed: Option<Speed>,
+    #[serde(default)]
+    ping: Option<Ping>,
     networks: Vec<Seen>,
 }
 
@@ -50,6 +58,19 @@ pub struct Seen {
     /// From the access point's own "BSS load" announcement, when it sends one.
     pub stations: Option<u16>,
     pub utilization: Option<f32>,
+    /// Weakest and strongest reading over the scans at this point: a big spread means a flaky spot.
+    pub rssi_min: Option<f32>,
+    pub rssi_max: Option<f32>,
+    /// What the access point announces: 802.11k/v/r, Wi-Fi RTT (fine timing), WPS, spatial streams, country.
+    pub k: bool,
+    pub v: bool,
+    pub r: bool,
+    pub ftm: bool,
+    pub wps: bool,
+    pub streams: Option<u8>,
+    pub country: String,
+    /// Distance measured with Wi-Fi RTT (802.11mc), when both sides support it.
+    pub distance_m: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -60,6 +81,11 @@ pub struct Connected {
     pub rssi: f32,
     pub link_mbps: f32,
     pub freq: u32,
+    /// Current send / receive rates and the best the pair could do; the Wi-Fi standard in use.
+    pub tx_mbps: Option<f32>,
+    pub rx_mbps: Option<f32>,
+    pub max_mbps: Option<f32>,
+    pub standard: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -70,6 +96,73 @@ pub struct Speed {
     /// Upload and delay variation; 0 in files from phone app 1.0, which didn't measure them.
     pub up_mbps: f32,
     pub jitter_ms: f32,
+}
+
+/// Pings to the router at a point.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ping {
+    pub avg_ms: f32,
+    pub jitter_ms: f32,
+    pub loss_pct: f32,
+    pub max_ms: f32,
+}
+
+/// Something the phone noticed while watching the Wi-Fi: a channel change, a hand-over, a dropout, a delay spike.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WatchEvent {
+    pub time: String,
+    /// "channel", "roam", "drop", "spike", "loss" or "dip".
+    pub kind: String,
+    pub bssid: String,
+    pub ssid: String,
+    /// Old and new channel ("channel") or access point address ("roam").
+    pub from: String,
+    pub to: String,
+    /// Seconds offline ("drop"), ms ("spike"), % ("loss"), dBm ("dip").
+    pub value: f32,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Watch {
+    pub start: String,
+    pub end: String,
+    pub samples: u32,
+    pub events: Vec<WatchEvent>,
+}
+
+/// A problem the phone's own assistant found ("error", "warning" or "tip"), in the phone's language.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Finding {
+    pub level: String,
+    pub text: String,
+    pub bssid: String,
+    pub key: String,
+}
+
+/// A device the phone found on the network (UPnP, mDNS, a knock on common ports).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LanDevice {
+    pub ip: String,
+    pub name: String,
+    pub kind: String,
+    pub vendor: String,
+    pub model: String,
+}
+
+/// What the phone watched, found and discovered, kept with the plan (the latest of each).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhoneReport {
+    pub phone: String,
+    pub watch: Option<Watch>,
+    pub findings: Vec<Finding>,
+    pub lan: Vec<LanDevice>,
 }
 
 /// A measuring point in the plan.
@@ -86,6 +179,7 @@ pub struct MeasurePoint {
     pub phone: String,
     pub connected: Option<Connected>,
     pub speed: Option<Speed>,
+    pub ping: Option<Ping>,
     pub networks: Vec<Seen>,
 }
 
@@ -151,8 +245,9 @@ impl Network {
             };
             nets += p.networks.len();
             self.next_id += 1;
-            self.points.push(MeasurePoint { id: self.next_id, name: p.name, pos, floor: p.floor, placed, time: p.time, phone: f.device.clone(), connected: p.connected, speed: p.speed, networks: p.networks });
+            self.points.push(MeasurePoint { id: self.next_id, name: p.name, pos, floor: p.floor, placed, time: p.time, phone: f.device.clone(), connected: p.connected, speed: p.speed, ping: p.ping, networks: p.networks });
         }
+        self.take_report(&f.device, f.watch, f.findings, f.lan);
         // Networks named like one of your access points belong to it.
         for m in self.measured_networks() {
             if m.dev.is_none() {
@@ -162,6 +257,116 @@ impl Network {
             }
         }
         Ok((n_points, nets))
+    }
+
+    /// Keeps the phone's watch log (events added up, none twice), its latest findings and device list. An access
+    /// point the phone saw change channel picks its channel by itself.
+    fn take_report(&mut self, phone: &str, watch: Option<Watch>, findings: Vec<Finding>, lan: Vec<LanDevice>) {
+        if !phone.is_empty() {
+            self.phone.phone = phone.to_string();
+        }
+        if let Some(w) = watch {
+            let mine = self.phone.watch.get_or_insert_with(Watch::default);
+            if mine.start.is_empty() || (!w.start.is_empty() && w.start < mine.start) {
+                mine.start = w.start.clone();
+            }
+            mine.end = mine.end.clone().max(w.end.clone());
+            mine.samples = mine.samples.max(w.samples);
+            for e in w.events {
+                if !mine.events.contains(&e) {
+                    mine.events.push(e);
+                }
+            }
+            mine.events.sort_by(|a, b| a.time.cmp(&b.time));
+            // A day's worth is plenty; old events go first.
+            let extra = mine.events.len().saturating_sub(2000);
+            mine.events.drain(..extra);
+        }
+        if !findings.is_empty() {
+            self.phone.findings = findings;
+        }
+        if !lan.is_empty() {
+            self.phone.lan = lan;
+        }
+        let jumpers: Vec<u32> = self.phone.watch.iter().flat_map(|w| &w.events).filter(|e| e.kind == "channel").filter_map(|e| self.device_of_bssid(&e.ssid, &e.bssid)).collect();
+        for id in jumpers {
+            if let Some(d) = self.dev_mut(id) {
+                d.auto_ch = true;
+            }
+        }
+    }
+
+    /// The plan's device a measured access point address belongs to, if it was matched.
+    pub fn device_of_bssid(&self, ssid: &str, bssid: &str) -> Option<u32> {
+        let key = key_of(&Seen { ssid: ssid.into(), bssid: bssid.into(), ..Default::default() });
+        self.measured.iter().find(|m| m.0 == key).map(|m| m.1).filter(|d| self.dev(*d).is_some())
+    }
+
+    /// How often the phone saw this device's access point change channel by itself.
+    pub fn channel_jumps(&self, id: u32) -> usize {
+        self.phone.watch.iter().flat_map(|w| &w.events).filter(|e| e.kind == "channel" && self.device_of_bssid(&e.ssid, &e.bssid) == Some(id)).count()
+    }
+
+    /// Checks that need the phone's measurements: an extender's uplink as heard right next to it, and what the
+    /// phone's own assistant found.
+    pub fn measured_checks(&self, v: &mut Vec<crate::net::Issue>) {
+        use crate::net::{Issue, Level};
+        let push = |v: &mut Vec<Issue>, level, dev, text| v.push(Issue { level, dev, link: None, text, fix: None });
+        for x in self.devices.iter().filter(|d| d.kind.radio() && !d.kind.foreign()) {
+            let Some(up) = self.upstream(x) else { continue };
+            let Some(p) = self.points.iter().filter(|p| p.placed && p.floor == x.floor).filter(|p| ((p.pos[0] - x.pos[0]).hypot(p.pos[1] - x.pos[1])) < 3.0 * PX_PER_M).min_by(|a, b| {
+                let d = |p: &MeasurePoint| (p.pos[0] - x.pos[0]).hypot(p.pos[1] - x.pos[1]);
+                d(a).total_cmp(&d(b))
+            }) else {
+                continue;
+            };
+            // Loudest reading at that point of each of your access points.
+            let heard = |dev: u32| p.networks.iter().filter(|s| self.measured.iter().any(|m| m.0 == key_of(s) && m.1 == dev)).map(|s| s.rssi).fold(None, |m: Option<f32>, r| Some(m.map_or(r, |m| m.max(r))));
+            let Some(uplink) = heard(up.id) else { continue };
+            if uplink < -70.0 {
+                push(v, Level::Warning, Some(x.id), crate::i18n::trf("Measured next to {} ('{}'): {}, the access point it repeats, came in at only {} dBm. Its link back is weak, so everyone on it is slow: move it closer to {}.", &[&x.name, &p.name, &up.name, &format!("{:.0}", uplink), &up.name]));
+            }
+            if let Some((o, r)) = self.devices.iter().filter(|o| o.kind.radio() && !o.kind.foreign() && o.id != x.id && o.id != up.id && !self.feeds_from(o, x.id)).filter_map(|o| heard(o.id).map(|r| (o, r))).max_by(|a, b| a.1.total_cmp(&b.1)) {
+                if r >= uplink + 8.0 {
+                    push(v, Level::Warning, Some(x.id), crate::i18n::trf("Measured next to {} ('{}'): {} is {} dBm there, {} only {} dBm. If {} really repeats {}, it uses the worse uplink: check it in its app.", &[&x.name, &p.name, &o.name, &format!("{:.0}", r), &up.name, &format!("{:.0}", uplink), &x.name, &up.name]));
+                }
+            }
+        }
+        // What the phone measured from your own access points against what the plan says.
+        for m in self.measured_networks() {
+            let Some(d) = m.dev.and_then(|id| self.dev(id)).filter(|d| d.kind.radio() && !d.kind.foreign()) else { continue };
+            for (band, ch, _) in &m.radios {
+                let planned = self.channel(d, *band);
+                if *ch != planned && d.bands[band.i()] {
+                    push(v, Level::Tip, Some(d.id), crate::i18n::trf("The plan has {} on {} channel {}, but the phone measured channel {}. It probably picked its channel by itself: set the plan to what's real, or fix the channel on the device.", &[&d.name, &(band.label()), &planned, ch]));
+                }
+            }
+            let seen: Vec<&Seen> = self.points.iter().flat_map(|p| &p.networks).filter(|s| key_of(s) == m.key).collect();
+            // Only files that report capabilities can tell (phone app 0.3 and newer).
+            let reports = seen.iter().any(|s| s.streams.is_some() || s.k || s.v || s.r);
+            if d.fast_roam && reports && !seen.iter().any(|s| s.k || s.v || s.r) {
+                push(v, Level::Tip, Some(d.id), crate::i18n::trf("The plan has fast roaming on {}, but the phone heard no 802.11k, v or r from it: it's off on the real device. Turn it on there (often 'fast roaming', 'smart connect' or 'seamless roaming').", &[&d.name]));
+            }
+            if seen.iter().any(|s| s.wps) {
+                push(v, Level::Tip, Some(d.id), crate::i18n::trf("{} has WPS switched on (the phone saw it announced). Its PIN method can be cracked; turn WPS off unless you need it right now.", &[&d.name]));
+            }
+        }
+        for f in &self.phone.findings {
+            let level = match f.level.as_str() {
+                "error" => Level::Error,
+                "warning" => Level::Warning,
+                _ => Level::Tip,
+            };
+            push(v, level, self.device_of_bssid("", &f.bssid).or_else(|| self.measured_dev_by_bssid(&f.bssid)), crate::i18n::trf("From the phone: {}", &[&f.text]));
+        }
+    }
+
+    /// The device a bssid's access point was matched to, whatever network name it was seen with.
+    fn measured_dev_by_bssid(&self, bssid: &str) -> Option<u32> {
+        if bssid.is_empty() {
+            return None;
+        }
+        self.points.iter().flat_map(|p| &p.networks).filter(|s| s.bssid.eq_ignore_ascii_case(bssid)).find_map(|s| self.measured.iter().find(|m| m.0 == key_of(s)).map(|m| m.1))
     }
 
     /// Ties a measured network to a device, replacing an earlier match.
@@ -289,6 +494,8 @@ impl Network {
         if reads.is_empty() {
             return None;
         }
+        // Wi-Fi RTT distances the phone measured to this access point (metres, good to 1–2 m).
+        let dists: Vec<([f32; 2], i8, f32)> = self.points.iter().filter(|p| p.placed).flat_map(|p| p.networks.iter().filter(|s| keys.contains(&key_of(s))).filter_map(move |s| s.distance_m.filter(|d| d.is_finite() && *d > 0.0).map(|d| (p.pos, p.floor, d)))).collect();
         let mut probe: Device = self.dev(id)?.clone();
         probe.cal_db = 0.0;
         // Offset that makes the model match on average, and what's left over.
@@ -321,7 +528,12 @@ impl Network {
                     let x = x0 - pad + i as f32 * step;
                     probe.pos = [x, y];
                     let (k, err) = fit(self, &probe);
-                    let score = err + 0.05 * k * k + if inside([x, y]) { 40.0 } else { 0.0 };
+                    let rtt: f32 = dists.iter().map(|(p, fl, d)| {
+                        let flat = (p[0] - x).hypot(p[1] - y) / PX_PER_M;
+                        let up = self.floor_z(*fl) - self.floor_z(probe.floor);
+                        ((flat * flat + up * up).sqrt() - d).powi(2)
+                    }).sum::<f32>() / dists.len().max(1) as f32;
+                    let score = err + 0.05 * k * k + 4.0 * rtt + if inside([x, y]) { 40.0 } else { 0.0 };
                     if score < best.0 {
                         best = (score, [x, y]);
                     }
@@ -432,5 +644,99 @@ mod tests {
         assert!(Network::default().import_companion("not json").is_err());
         let huge = r#"{"format":"netsketch-survey","points":[{"name":"x","x":1e39,"y":0,"networks":[]}]}"#;
         assert!(Network::default().import_companion(huge).is_err(), "impossible positions are refused, not searched forever");
+    }
+
+    /// Router left, wired access point right, an extender next to the access point but repeating the router.
+    fn far_extender() -> (Network, u32, u32, u32) {
+        use crate::net::Medium;
+        let mut n = Network::default();
+        let r = n.add_device(Kind::HomeRouter, [0.0, 0.0]);
+        let ap = n.add_device(Kind::AccessPoint, [800.0, 0.0]);
+        let x = n.add_device(Kind::Extender, [740.0, 40.0]);
+        for id in [r, ap, x] {
+            n.dev_mut(id).unwrap().ssid = "Home".into();
+        }
+        n.connect(r, ap, Medium::Cat6).unwrap();
+        n.connect(r, x, Medium::WiFi).unwrap();
+        (n, r, ap, x)
+    }
+
+    #[test]
+    fn an_extender_on_the_worse_uplink_is_found_and_moved() {
+        let (mut n, _r, ap, x) = far_extender();
+        let issues = n.check();
+        let i = issues.iter().find(|i| i.text.contains("found first")).expect("the worse uplink is reported");
+        n.apply_fix(i.fix.as_ref().unwrap());
+        let up = n.upstream(n.dev(x).unwrap()).unwrap().id;
+        assert_eq!(up, ap);
+        assert!(!n.check().iter().any(|i| i.text.contains("found first")));
+    }
+
+    #[test]
+    fn measured_next_to_an_extender_its_uplink_is_checked() {
+        let (mut n, r, ap, x) = far_extender();
+        let json = r#"{"format":"netsketch-survey","device":"Pixel","points":[{"name":"Hall","floor":0,"x":37.5,"y":2.0,"time":"t1","networks":[
+            {"ssid":"Home","bssid":"aa:00:00:00:00:01","freq":5500,"channel":100,"rssi":-79},
+            {"ssid":"Home","bssid":"bb:00:00:00:00:01","freq":5500,"channel":36,"rssi":-52}]}]}"#;
+        n.import_companion(json).unwrap();
+        n.link_measured("Home|aa:00:00:00:00", Some(r));
+        n.link_measured("Home|bb:00:00:00:00", Some(ap));
+        let all: Vec<String> = n.check().into_iter().filter(|i| i.dev == Some(x)).map(|i| i.text).collect();
+        assert!(all.iter().any(|t| t.contains("came in at only -79") || t.contains("came in at only −79")), "{all:?}");
+        assert!(all.iter().any(|t| t.contains("uses the worse uplink")), "{all:?}");
+        // The router was measured on channel 100 with WPS on and no 802.11k/v/r, though the plan says otherwise.
+        n.dev_mut(r).unwrap().fast_roam = true;
+        n.points[0].networks[0].wps = true;
+        n.points[0].networks[0].streams = Some(2);
+        let mine: Vec<String> = n.check().into_iter().filter(|i| i.dev == Some(r)).map(|i| i.text).collect();
+        assert!(mine.iter().any(|t| t.contains("measured channel 100")), "{mine:?}");
+        assert!(mine.iter().any(|t| t.contains("no 802.11k, v or r")) && mine.iter().any(|t| t.contains("WPS")), "{mine:?}");
+    }
+
+    #[test]
+    fn routers_that_both_pick_channels_by_themselves_are_flagged_and_the_phone_proves_it() {
+        let mut n = Network::default();
+        let r = n.add_device(Kind::HomeRouter, [0.0, 0.0]);
+        let nb = n.add_device(Kind::Neighbor, [0.0, 200.0]);
+        let tips = |n: &Network| n.check().into_iter().filter(|i| i.text.contains("by themselves")).collect::<Vec<_>>();
+        let t = tips(&n);
+        assert!(!t.is_empty() && t.iter().all(|i| i.level == crate::net::Level::Tip), "{t:?}");
+        // The phone watched the neighbour's router change channel twice.
+        let json = r#"{"format":"netsketch-survey","device":"Pixel","points":[{"name":"Desk","time":"t0","x":0,"y":5,"networks":[{"ssid":"Nachbar","bssid":"cc:00:00:00:00:02","freq":2437,"channel":6,"rssi":-60}]}],
+            "watch":{"start":"2026-11-05T20:00:00Z","end":"2026-11-05T23:00:00Z","samples":10800,"events":[
+              {"time":"2026-11-05T21:00:00Z","kind":"channel","bssid":"cc:00:00:00:00:02","ssid":"Nachbar","from":"1","to":"6"},
+              {"time":"2026-11-05T22:30:00Z","kind":"channel","bssid":"cc:00:00:00:00:02","ssid":"Nachbar","from":"6","to":"11"},
+              {"time":"2026-11-05T22:31:00Z","kind":"drop","value":4.5}]},
+            "findings":[{"level":"warning","text":"Your router changed channel twice tonight.","key":"jump"}],
+            "lan":[{"ip":"192.168.1.1","name":"Internet-Box","kind":"router","vendor":"Swisscom","model":"Internet-Box 5"}]}"#;
+        n.import_companion(json).unwrap();
+        n.link_measured("Nachbar|cc:00:00:00:00", Some(nb));
+        // Sent again by the live link: nothing counted twice.
+        n.import_companion(&json.replace("\"t0\"", "\"t1\"")).unwrap();
+        assert_eq!(n.channel_jumps(nb), 2);
+        assert_eq!(n.phone.lan[0].model, "Internet-Box 5");
+        let t = tips(&n);
+        assert!(t.iter().any(|i| i.level == crate::net::Level::Warning && i.text.contains("2 channel changes")), "{t:?}");
+        assert!(n.check().iter().any(|i| i.text.contains("From the phone: Your router changed channel twice")));
+        n.apply_fix(&crate::issues::Fix::FixChannels);
+        assert!(!n.dev(r).unwrap().auto_ch && tips(&n).is_empty());
+    }
+
+    #[test]
+    fn everything_the_phone_app_writes_is_read() {
+        let mut n = template("flat");
+        n.import_companion(SAMPLE).unwrap();
+        let s = n.points.iter().flat_map(|p| &p.networks).find(|s| s.bssid == "d4:5d:64:aa:bb:c4").unwrap();
+        assert!(s.k && s.v && s.r && s.ftm && s.streams == Some(2) && s.country == "CH" && s.rssi_min == Some(-61.0) && s.rssi_max == Some(-56.0));
+        assert!(n.points.iter().flat_map(|p| &p.networks).any(|s| s.wps && s.distance_m.is_none()));
+        assert!(n.points.iter().flat_map(|p| &p.networks).any(|s| s.distance_m.is_some()), "an RTT distance");
+        assert!(n.points.iter().any(|p| p.ping.as_ref().is_some_and(|g| g.avg_ms > 0.0)), "a router ping");
+        assert!(n.points.iter().filter_map(|p| p.connected.as_ref()).any(|c| c.tx_mbps.is_some() && !c.standard.is_empty()));
+        let w = n.phone.watch.as_ref().unwrap();
+        for k in ["channel", "roam", "drop", "spike", "loss", "dip"] {
+            assert!(w.events.iter().any(|e| e.kind == k), "{k}");
+        }
+        assert!(!n.phone.findings.is_empty() && n.phone.lan.iter().any(|d| d.model == "FRITZ!Box 7590"));
+        assert!(n.check().iter().any(|i| i.text.starts_with("From the phone:")));
     }
 }

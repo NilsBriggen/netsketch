@@ -132,6 +132,7 @@ impl App {
     pub(crate) fn measured_section(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.phone_card(ui);
+        self.phone_report(ui);
         let pts = self.net.points.len();
         let unplaced = self.net.points.iter().filter(|p| !p.placed).count();
         if pts > 0 {
@@ -207,6 +208,51 @@ impl App {
         }
     }
 
+    /// What the phone watched over time and the devices it found on the network.
+    fn phone_report(&mut self, ui: &mut egui::Ui) {
+        let r = &self.net.phone;
+        if let Some(w) = &r.watch {
+            let count = |k: &str| w.events.iter().filter(|e| e.kind == k).count();
+            let short = |t: &str| t.get(..16).unwrap_or(t).replace('T', " ");
+            ui.label(RichText::new(trf("The phone watched from {} to {}", &[&short(&w.start), &short(&w.end)])).strong());
+            ui.label(trf("{} channel changes · {} hand-overs · {} dropouts · {} delay spikes · {} loss bursts", &[&count("channel"), &count("roam"), &count("drop"), &count("spike"), &count("loss")]));
+            if !w.events.is_empty() {
+                egui::CollapsingHeader::new(trf("What happened ({})", &[&w.events.len()])).id_salt("watch_events").show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("watch_scroll").max_height(200.0).show(ui, |ui| {
+                        for e in w.events.iter().rev().take(200) {
+                            let who = if e.ssid.is_empty() { e.bssid.clone() } else { e.ssid.clone() };
+                            let what = match e.kind.as_str() {
+                                "channel" => trf("{} moved from channel {} to {}", &[&who, &e.from, &e.to]),
+                                "roam" => trf("The phone moved from {} to {}", &[&e.from, &e.to]),
+                                "drop" => trf("Wi-Fi gone for {} s", &[&format!("{:.0}", e.value)]),
+                                "spike" => trf("Delay spike: {} ms", &[&format!("{:.0}", e.value)]),
+                                "loss" => trf("{}% of pings lost", &[&format!("{:.0}", e.value)]),
+                                "dip" => trf("Signal dipped to {} dBm", &[&format!("{:.0}", e.value)]),
+                                _ => e.note.clone(),
+                            };
+                            ui.label(RichText::new(format!("{}  {what}", short(&e.time))).small());
+                        }
+                    });
+                });
+            }
+        }
+        if !r.findings.is_empty() {
+            ui.label(RichText::new(trf("{} findings from the phone are in the problem list.", &[&r.findings.len()])).small().color(pal().dim));
+        }
+        if !r.lan.is_empty() {
+            egui::CollapsingHeader::new(trf("Devices the phone found on the network ({})", &[&r.lan.len()])).id_salt("lan_list").show(ui, |ui| {
+                for d in &r.lan {
+                    let what = [d.kind.as_str(), d.vendor.as_str(), d.model.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&d.ip).monospace().small().color(pal().dim));
+                        ui.label(if d.name.is_empty() { tr("(no name)") } else { &d.name });
+                        ui.label(RichText::new(what).small().color(pal().dim));
+                    });
+                }
+            });
+        }
+    }
+
     /// One measuring point: where, what the phone heard, and how the model compares.
     pub(crate) fn point_editor(&mut self, ui: &mut egui::Ui, id: u32) {
         let mut delete = false;
@@ -228,6 +274,17 @@ impl App {
             if let Some(c) = &p.connected {
                 ui.label(RichText::new(tr("Phone was on")).color(pal().dim));
                 ui.label(trf("{} · {} dBm · {} Mbit/s link", &[&c.ssid, &format!("{:.0}", c.rssi), &format!("{:.0}", c.link_mbps)]));
+                ui.end_row();
+                if let (Some(tx), Some(rx)) = (c.tx_mbps, c.rx_mbps) {
+                    ui.label(RichText::new(tr("Link rates")).color(pal().dim));
+                    let std = if c.standard.is_empty() { String::new() } else { format!(" · {}", c.standard) };
+                    ui.label(trf("{} Mbit/s sending, {} receiving{}", &[&format!("{:.0}", tx), &format!("{:.0}", rx), &std]));
+                    ui.end_row();
+                }
+            }
+            if let Some(g) = &p.ping {
+                ui.label(RichText::new(tr("Router ping")).color(pal().dim));
+                ui.label(trf("{} ms (±{} ms, worst {} ms) · {}% lost", &[&format!("{:.0}", g.avg_ms), &format!("{:.0}", g.jitter_ms), &format!("{:.0}", g.max_ms), &format!("{:.0}", g.loss_pct)]));
                 ui.end_row();
             }
             if let Some(s) = &p.speed {
@@ -251,6 +308,25 @@ impl App {
                         ui.set_width((ui.available_width() - 110.0).max(90.0));
                         ui.label(if s.ssid.is_empty() { tr("(hidden)") } else { &s.ssid });
                         ui.label(RichText::new(trf("{} ch {} · {} MHz", &[&(band_of(s.freq).label()), &s.channel, &s.width])).small().color(pal().dim));
+                        let mut extra: Vec<String> = vec![];
+                        let roam: String = [(s.k, "k"), (s.v, "v"), (s.r, "r")].iter().filter(|x| x.0).map(|x| x.1).collect();
+                        if !roam.is_empty() {
+                            extra.push(format!("802.11{roam}"));
+                        }
+                        if let Some(d) = s.distance_m {
+                            extra.push(trf("{} m away (RTT)", &[&format!("{:.1}", d)]));
+                        }
+                        if let (Some(lo), Some(hi)) = (s.rssi_min, s.rssi_max) {
+                            if hi - lo >= 6.0 {
+                                extra.push(trf("swung {} dB", &[&format!("{:.0}", hi - lo)]));
+                            }
+                        }
+                        if s.wps {
+                            extra.push("WPS".into());
+                        }
+                        if !extra.is_empty() {
+                            ui.label(RichText::new(extra.join(" · ")).small().color(pal().dim));
+                        }
                     });
                     let key = crate::companion::key_of(s);
                     let model = models.iter().find(|m| m.0 == key).and_then(|m| self.net.dev(m.1)).filter(|_| p.placed).map(|d| self.net.rssi_at(d, p.pos, p.floor, band_of(s.freq)));

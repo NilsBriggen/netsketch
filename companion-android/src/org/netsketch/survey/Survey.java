@@ -20,9 +20,20 @@ public final class Survey {
         public double rssi;
         public Integer stations;
         public Double utilization;
+        /** Weakest and strongest reading over the scans at a point; distance from Wi-Fi RTT (802.11mc). */
+        public Double rssiMin, rssiMax, distanceM;
+        /** Fast roaming 802.11k / v / r, a Wi-Fi RTT responder (FTM), WPS switched on. */
+        public boolean k, v, r, ftm, wps;
+        /** Spatial streams (0 = unknown) and the country it announces ("" = unknown). */
+        public int streams;
+        public String country = "";
         /** How many scans heard it (for the average). */
         public transient int count;
         public transient double sum;
+        /** Not saved: the scan's capability string (for TKIP), whether its information elements were read, its timestamps. */
+        public transient String caps = "";
+        public transient boolean ies;
+        public transient long tsUs, at;
     }
 
     /** The phone's own Wi-Fi connection at a point. */
@@ -30,6 +41,62 @@ public final class Survey {
         public String ssid = "", bssid = "";
         public double rssi, linkMbps;
         public int freq;
+        /** Current send and receive rates and the most the link could do (0 = unknown); "Wi-Fi 6" etc. */
+        public double txMbps, rxMbps, maxMbps;
+        public String standard = "";
+    }
+
+    /** A quick round of knocks on the router at a point. */
+    public static final class Ping {
+        public double avgMs, jitterMs, lossPct, maxMs;
+
+        /** From the answer times (ms) of `tries` knocks; null if none answered. */
+        public static Ping of(List<Double> ms, int tries) {
+            if (ms.isEmpty() || tries <= 0) return null;
+            Ping p = new Ping();
+            double sum = 0, jumps = 0;
+            for (int i = 0; i < ms.size(); i++) {
+                sum += ms.get(i);
+                p.maxMs = Math.max(p.maxMs, ms.get(i));
+                if (i > 0) jumps += Math.abs(ms.get(i) - ms.get(i - 1));
+            }
+            p.avgMs = sum / ms.size();
+            p.jitterMs = ms.size() > 1 ? jumps / (ms.size() - 1) : 0;
+            p.lossPct = (tries - ms.size()) * 100.0 / tries;
+            return p;
+        }
+    }
+
+    /** Something that happened while watching: kind is channel, roam, drop, spike, loss or dip. */
+    public static final class Event {
+        public long at;
+        public String kind = "", bssid = "", ssid = "", from = "", to = "", note = "";
+        /** Seconds offline (drop), ms (spike), % (loss), dBm (dip; also the signal for roam and channel). */
+        public double value;
+    }
+
+    /** The watch log as NetSketch gets it: its span, how many readings, and what happened. */
+    public static final class WatchSummary {
+        public long start, end;
+        public int samples;
+        public final List<Event> events = new ArrayList<>();
+    }
+
+    /** One thing the assistant noticed; level is error, warning or tip; key stays the same between runs. */
+    public static final class Finding {
+        public String level = "tip", text = "", bssid = "", key = "";
+
+        public Finding(String level, String key, String bssid, String text) {
+            this.level = level;
+            this.key = key;
+            this.bssid = bssid == null ? "" : bssid;
+            this.text = text;
+        }
+    }
+
+    /** A device found on the home network. */
+    public static final class LanDevice {
+        public String ip = "", name = "", kind = "", vendor = "", model = "";
     }
 
     public static final class Speed {
@@ -46,11 +113,16 @@ public final class Survey {
         public boolean sent;
         public Connected connected;
         public Speed speed;
+        public Ping ping;
         public final List<Seen> networks = new ArrayList<>();
     }
 
     public String device = "";
     public final List<Point> points = new ArrayList<>();
+    /** Beside the points: the watch log, the assistant's findings and the devices found (each optional). */
+    public WatchSummary watch;
+    public final List<Finding> findings = new ArrayList<>();
+    public final List<LanDevice> lan = new ArrayList<>();
 
     /**
      * Keeps a new point; one measured again (replaces) takes the old one's place in the list. Refuses a
@@ -74,6 +146,17 @@ public final class Survey {
         return one.toJson();
     }
 
+    /** A file without points: just the watch log, findings and devices (null if there is none of them). */
+    public String toJsonExtras() {
+        if (watch == null && findings.isEmpty() && lan.isEmpty()) return null;
+        Survey x = new Survey();
+        x.device = device;
+        x.watch = watch;
+        x.findings.addAll(findings);
+        x.lan.addAll(lan);
+        return x.toJson();
+    }
+
     public String toJson() {
         StringBuilder b = new StringBuilder();
         b.append("{\n  \"format\": ").append(q(FORMAT)).append(",\n  \"version\": 1,\n  \"device\": ").append(q(device)).append(",\n  \"points\": [");
@@ -86,12 +169,21 @@ public final class Survey {
             if (p.connected != null) {
                 Connected c = p.connected;
                 b.append(",\n     \"connected\": {\"ssid\": ").append(q(c.ssid)).append(", \"bssid\": ").append(q(c.bssid))
-                        .append(", \"rssi\": ").append(num(c.rssi)).append(", \"link_mbps\": ").append(num(c.linkMbps)).append(", \"freq\": ").append(c.freq).append("}");
+                        .append(", \"rssi\": ").append(num(c.rssi)).append(", \"link_mbps\": ").append(num(c.linkMbps)).append(", \"freq\": ").append(c.freq);
+                if (c.txMbps > 0) b.append(", \"tx_mbps\": ").append(num(c.txMbps));
+                if (c.rxMbps > 0) b.append(", \"rx_mbps\": ").append(num(c.rxMbps));
+                if (c.maxMbps > 0) b.append(", \"max_mbps\": ").append(num(c.maxMbps));
+                if (!c.standard.isEmpty()) b.append(", \"standard\": ").append(q(c.standard));
+                b.append("}");
             }
             if (p.speed != null) {
                 b.append(",\n     \"speed\": {\"down_mbps\": ").append(num(p.speed.downMbps)).append(", \"latency_ms\": ").append(num(p.speed.latencyMs));
                 if (p.speed.upMbps > 0) b.append(", \"up_mbps\": ").append(num(p.speed.upMbps)).append(", \"jitter_ms\": ").append(num(p.speed.jitterMs));
                 b.append("}");
+            }
+            if (p.ping != null) {
+                b.append(",\n     \"ping\": {\"avg_ms\": ").append(num(p.ping.avgMs)).append(", \"jitter_ms\": ").append(num(p.ping.jitterMs))
+                        .append(", \"loss_pct\": ").append(num(p.ping.lossPct)).append(", \"max_ms\": ").append(num(p.ping.maxMs)).append("}");
             }
             b.append(",\n     \"networks\": [");
             for (int j = 0; j < p.networks.size(); j++) {
@@ -101,12 +193,54 @@ public final class Survey {
                         .append(", \"rssi\": ").append(num(s.rssi)).append(", \"security\": ").append(q(s.security)).append(", \"standard\": ").append(q(s.standard));
                 if (s.stations != null) b.append(", \"stations\": ").append(s.stations);
                 if (s.utilization != null) b.append(", \"utilization\": ").append(num(s.utilization));
+                if (s.rssiMin != null && s.rssiMax != null) b.append(", \"rssi_min\": ").append(num(s.rssiMin)).append(", \"rssi_max\": ").append(num(s.rssiMax));
+                if (s.k) b.append(", \"k\": true");
+                if (s.v) b.append(", \"v\": true");
+                if (s.r) b.append(", \"r\": true");
+                if (s.ftm) b.append(", \"ftm\": true");
+                if (s.wps) b.append(", \"wps\": true");
+                if (s.streams > 0) b.append(", \"streams\": ").append(s.streams);
+                if (!s.country.isEmpty()) b.append(", \"country\": ").append(q(s.country));
+                if (s.distanceM != null) b.append(", \"distance_m\": ").append(num(s.distanceM));
                 b.append("}");
             }
             b.append(p.networks.isEmpty() ? "]}" : "\n     ]}");
         }
-        b.append(points.isEmpty() ? "]\n}\n" : "\n  ]\n}\n");
-        return b.toString();
+        b.append(points.isEmpty() ? "]" : "\n  ]");
+        if (watch != null) {
+            b.append(",\n  \"watch\": {\"start\": ").append(q(iso(watch.start))).append(", \"end\": ").append(q(iso(watch.end)))
+                    .append(", \"samples\": ").append(watch.samples).append(", \"events\": [");
+            for (int i = 0; i < watch.events.size(); i++) {
+                Event e = watch.events.get(i);
+                b.append(i == 0 ? "\n" : ",\n").append("    {\"time\": ").append(q(iso(e.at))).append(", \"kind\": ").append(q(e.kind))
+                        .append(", \"bssid\": ").append(q(e.bssid)).append(", \"ssid\": ").append(q(e.ssid)).append(", \"from\": ").append(q(e.from))
+                        .append(", \"to\": ").append(q(e.to)).append(", \"value\": ").append(num(e.value)).append(", \"note\": ").append(q(e.note)).append("}");
+            }
+            b.append(watch.events.isEmpty() ? "]}" : "\n  ]}");
+        }
+        if (!findings.isEmpty()) {
+            b.append(",\n  \"findings\": [");
+            for (int i = 0; i < findings.size(); i++) {
+                Finding f = findings.get(i);
+                b.append(i == 0 ? "\n" : ",\n").append("    {\"level\": ").append(q(f.level)).append(", \"text\": ").append(q(f.text))
+                        .append(", \"bssid\": ").append(q(f.bssid)).append(", \"key\": ").append(q(f.key)).append("}");
+            }
+            b.append("\n  ]");
+        }
+        if (!lan.isEmpty()) {
+            b.append(",\n  \"lan\": [");
+            for (int i = 0; i < lan.size(); i++) {
+                LanDevice d = lan.get(i);
+                b.append(i == 0 ? "\n" : ",\n").append("    {\"ip\": ").append(q(d.ip)).append(", \"name\": ").append(q(d.name))
+                        .append(", \"kind\": ").append(q(d.kind)).append(", \"vendor\": ").append(q(d.vendor)).append(", \"model\": ").append(q(d.model)).append("}");
+            }
+            b.append("\n  ]");
+        }
+        return b.append("\n}\n").toString();
+    }
+
+    public static String iso(long ms) {
+        return java.time.Instant.ofEpochMilli(ms).toString();
     }
 
     static String num(double v) {

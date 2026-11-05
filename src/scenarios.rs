@@ -66,7 +66,7 @@ pub fn build(name: &str, n: &mut Network) {
                 (m(0.0, 3.5), m(2.3, 3.5), WallKind::Drywall),
                 (m(3.2, 3.5), m(4.0, 3.5), WallKind::Drywall),
                 // Tiled bathroom wall.
-                (m(2.3, 3.5), m(2.3, 6.5), WallKind::Brick),
+                (m(2.3, 3.5), m(2.3, 6.5), WallKind::InnerBrick),
                 // Hall | living room, with a door.
                 (m(4.0, 3.5), m(4.0, 4.4), WallKind::Drywall),
                 (m(4.0, 5.4), m(4.0, 6.5), WallKind::Drywall),
@@ -111,7 +111,7 @@ pub fn build(name: &str, n: &mut Network) {
                 ([1040.0, 20.0], [1040.0, 560.0], WallKind::LowE),
                 ([1040.0, 560.0], [140.0, 560.0], WallKind::Brick),
                 ([140.0, 560.0], [140.0, 20.0], WallKind::Brick),
-                ([420.0, 200.0], [420.0, 560.0], WallKind::Brick),
+                ([420.0, 200.0], [420.0, 560.0], WallKind::InnerBrick),
                 ([620.0, 20.0], [620.0, 380.0], WallKind::Concrete),
                 ([760.0, 380.0], [1040.0, 380.0], WallKind::Drywall),
             ] {
@@ -373,7 +373,7 @@ fn nightmare(n: &mut Network) {
     n.dev_mut(ext).unwrap().ssid = "HomeNet_EXT".into();
     let lap = named(n, Kind::Laptop, [760.0, 60.0], "Laptop");
     let ph = named(n, Kind::Phone, [320.0, 360.0], "Phone");
-    let plug = named(n, Kind::SmartHome, [1240.0, 640.0], "Garden shed plug");
+    let plug = named(n, Kind::SmartHome, [1420.0, 760.0], "Garden shed plug");
     let office = named(n, Kind::Desktop, [1240.0, 120.0], "Garden office PC");
     let mw = named(n, Kind::Interference, [230.0, 610.0], "Microwave");
     let _ = mw;
@@ -407,8 +407,8 @@ fn nightmare(n: &mut Network) {
         ([200.0, 470.0], [300.0, 470.0], WallKind::Metal),
         ([300.0, 470.0], [300.0, 570.0], WallKind::Metal),
         ([640.0, 0.0], [640.0, 300.0], WallKind::Concrete),
-        ([640.0, 440.0], [1160.0, 440.0], WallKind::Brick),
-        ([900.0, 0.0], [900.0, 440.0], WallKind::Brick),
+        ([640.0, 440.0], [1160.0, 440.0], WallKind::InnerBrick),
+        ([900.0, 0.0], [900.0, 440.0], WallKind::InnerBrick),
     ] {
         wall(n, a, b, k);
     }

@@ -296,16 +296,9 @@ final class Ui {
                     if (!Survey.bandOf(s.freq).equals(band)) continue;
                     boolean mine = own.contains(s.bssid);
                     if ((pass == 1) != mine) continue; // yours on top
-                    // Centre of the whole (possibly bonded) channel: the scan reports the primary 20 MHz.
-                    float centre = s.freq, half = s.width / 2f;
-                    if (s.width > 20 && s.freq >= 5000) {
-                        float base = s.freq >= 5925 ? 5955 : 5180;
-                        float blockStart = base - 10 + (float) Math.floor((s.freq - (base - 10)) / s.width) * s.width;
-                        centre = blockStart + half;
-                    } else if (s.width == 40 && s.freq < 3000) {
-                        centre = s.freq + 10;
-                    }
-                    float x0 = (centre - half - f0) / (f1 - f0) * w, x1 = (centre + half - f0) / (f1 - f0) * w;
+                    // The whole (possibly bonded) channel: the scan reports the primary 20 MHz.
+                    int[] sp = Air.span(s.freq, s.width);
+                    float x0 = (sp[0] - f0) / (f1 - f0) * w, x1 = (sp[1] - f0) / (f1 - f0) * w;
                     float peak = bottom - (bottom - top) * (float) Math.max(0, Math.min(1, (s.rssi + 95) / 60));
                     android.graphics.Path path = new android.graphics.Path();
                     float edge = Math.min((x1 - x0) * 0.15f, dp(c, 8));
@@ -329,6 +322,144 @@ final class Ui {
                     }
                 }
             }
+        }
+    }
+
+    /** A tiny signal history line (one access point's last readings). */
+    static final class MiniSpark extends View {
+        private float[] v = new float[0];
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        MiniSpark(Context c) {
+            super(c);
+            setLayoutParams(new LinearLayout.LayoutParams(dp(c, 56), dp(c, 18)));
+        }
+
+        void set(float[] values) {
+            v = values;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas cv) {
+            if (v.length < 2) return;
+            float w = getWidth(), h = getHeight(), step = w / (Air.HISTORY - 1), x0 = w - (v.length - 1) * step;
+            p.setStrokeWidth(dp(getContext(), 1.5f));
+            p.setStrokeCap(Paint.Cap.ROUND);
+            p.setColor(quality(v[v.length - 1]));
+            for (int i = 1; i < v.length; i++) cv.drawLine(x0 + (i - 1) * step, y(v[i - 1], h), x0 + i * step, y(v[i], h), p);
+        }
+
+        private static float y(float rssi, float h) {
+            return h * Math.max(0, Math.min(1, (-30 - rssi) / 65f));
+        }
+    }
+
+    /**
+     * The watch log over time: the signal as a coloured line on top, the router's delay as bars below
+     * (red ticks = no answer), offline stretches shaded, and a mark for each event.
+     */
+    static final class Timeline extends View {
+        java.util.List<Watch.Sample> samples = new java.util.ArrayList<>();
+        java.util.List<Survey.Event> events = new java.util.ArrayList<>();
+        long from, to;
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        Timeline(Context c) {
+            super(c);
+        }
+
+        @Override
+        protected void onDraw(Canvas cv) {
+            Context c = getContext();
+            float w = getWidth(), h = getHeight(), left = dp(c, 30), sigTop = dp(c, 6), sigBottom = h * 0.62f, pingTop = h * 0.68f, pingBottom = h - dp(c, 14);
+            p.setTextSize(dp(c, 10));
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(DIM);
+            for (int db : new int[] {-40, -60, -80}) {
+                float y = sigTop + (sigBottom - sigTop) * (-30 - db) / 65f;
+                cv.drawText(String.valueOf(db), 0, y + dp(c, 3), p);
+                p.setColor(LINE);
+                cv.drawRect(left, y, w, y + 1, p);
+                p.setColor(DIM);
+            }
+            cv.drawText("ms", 0, pingBottom, p);
+            if (to <= from) return;
+            java.text.DateFormat tf = android.text.format.DateFormat.getTimeFormat(c);
+            cv.drawText(tf.format(new java.util.Date(from)), left, h - 2, p);
+            p.setTextAlign(Paint.Align.RIGHT);
+            cv.drawText(tf.format(new java.util.Date(to)), w, h - 2, p);
+            p.setTextAlign(Paint.Align.LEFT);
+            int cols = Math.max(1, (int) ((w - left) / dp(c, 2)));
+            float colW = (w - left) / cols;
+            float[] lo = new float[cols], ping = new float[cols];
+            boolean[] off = new boolean[cols], lost = new boolean[cols], any = new boolean[cols];
+            java.util.Arrays.fill(lo, Float.NaN);
+            int lastOff = -1;
+            for (Watch.Sample s : samples) {
+                int i = (int) ((s.at - from) * cols / (double) (to - from));
+                if (i < 0 || i >= cols) continue;
+                any[i] = true;
+                if (!s.online()) {
+                    // One offline stretch, also across columns no reading fell into.
+                    for (int k = lastOff >= 0 ? lastOff : i; k <= i; k++) off[k] = true;
+                    lastOff = i;
+                    continue;
+                }
+                lastOff = -1;
+                lo[i] = Float.isNaN(lo[i]) ? s.rssi : Math.min(lo[i], s.rssi);
+                if (s.ping >= 0) ping[i] = Math.max(ping[i], (float) s.ping);
+                else if (s.ping == Watch.LOST) lost[i] = true;
+            }
+            for (int i = 0; i < cols; i++) {
+                float x = left + i * colW;
+                if (off[i]) {
+                    p.setColor(Color.argb(60, Color.red(RED), Color.green(RED), Color.blue(RED)));
+                    cv.drawRect(x, sigTop, x + colW, pingBottom, p);
+                }
+                if (ping[i] > 0) {
+                    // 0-200 ms on a square-root scale: small delays stay visible, spikes don't flatten them.
+                    float f = (float) Math.min(1, Math.sqrt(ping[i] / 200f));
+                    p.setColor(ping[i] > 100 ? AMBER : BLUE);
+                    cv.drawRect(x, pingBottom - (pingBottom - pingTop) * f, x + Math.max(1, colW - 1), pingBottom, p);
+                }
+                if (lost[i]) {
+                    p.setColor(RED);
+                    cv.drawRect(x, pingTop, x + Math.max(1, colW - 1), pingTop + dp(c, 3), p);
+                }
+            }
+            p.setStrokeWidth(dp(c, 1.5f));
+            int prev = -1;
+            for (int i = 0; i < cols; i++) {
+                if (Float.isNaN(lo[i])) {
+                    prev = any[i] ? -1 : prev;
+                    continue;
+                }
+                float y = sigTop + (sigBottom - sigTop) * Math.max(0, Math.min(1, (-30 - lo[i]) / 65f));
+                p.setColor(quality(lo[i]));
+                if (prev >= 0) {
+                    float py = sigTop + (sigBottom - sigTop) * Math.max(0, Math.min(1, (-30 - lo[prev]) / 65f));
+                    cv.drawLine(left + (prev + 0.5f) * colW, py, left + (i + 0.5f) * colW, y, p);
+                } else {
+                    cv.drawCircle(left + (i + 0.5f) * colW, y, dp(c, 1), p);
+                }
+                prev = i;
+            }
+            for (Survey.Event e : events) {
+                if (e.at < from || e.at > to) continue;
+                float x = left + (float) ((e.at - from) * (w - left) / (double) (to - from));
+                p.setColor(eventColor(e.kind));
+                cv.drawRect(x - dp(c, 1), sigTop, x + dp(c, 1), sigTop + dp(c, 8), p);
+            }
+        }
+    }
+
+    static int eventColor(String kind) {
+        switch (kind) {
+            case "drop": case "loss": return RED;
+            case "spike": case "dip": return AMBER;
+            case "channel": return BLUE;
+            default: return ACCENT;
         }
     }
 }

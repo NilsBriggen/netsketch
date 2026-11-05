@@ -79,7 +79,8 @@ impl App {
             self.focus(id);
         }
         }
-        if !Self::section(ui, "Power and time") {
+        self.traffic_section(ui);
+        if !Self::section(ui, "Power and UPS") {
             return;
         }
         let w = self.net.power_w();
@@ -101,14 +102,137 @@ impl App {
                 ui.label(RichText::new(trf("≈ {}{} a year", &[&cur, &format!("{:.0}", kwh * self.net.kwh_price)])).strong());
             });
             ui.end_row();
-            ui.label(RichText::new(tr("Traffic at")).color(pal().dim));
-            let before = self.net.hour;
-            ui.add(egui::Slider::new(&mut self.net.hour, 0.0..=23.75).step_by(0.25).custom_formatter(|v, _| more::clock(v as f32))).on_hover_text(tr("Apps follow the day: streaming peaks in the evening, calls in the daytime, backups at night"));
-            if self.net.hour != before {
+        });
+    }
+
+    /// Traffic over the day: the hour the plan looks at, how busy the household is, and the whole day as a chart.
+    fn traffic_section(&mut self, ui: &mut egui::Ui) {
+        if !Self::section_hint(ui, "Traffic", "Each device's apps (in its panel) share the cables and the air fairly. Organic: everyday apps that follow the time of day; the chart shows the whole day, click it to pick a time. Custom: you choose what each device runs, all at once at full rate. In Simulate the traffic moves along the cables and comes and goes like real apps: a page loads when clicked, a video fetches a few seconds at a time.") {
+            return;
+        }
+        let (hour, traffic, custom) = (self.net.hour, self.net.traffic, self.net.custom_traffic);
+        ui.horizontal(|ui| {
+            self.traffic_mode(ui);
+            if ui.checkbox(&mut self.settings.flow, tr("Moving dots")).on_hover_text(tr("Show the traffic flowing along the cables in Simulate")).changed() {
+                self.settings.save();
+            }
+        });
+        if custom {
+            self.custom_rows(ui);
+            if self.net.custom_traffic != custom {
                 self.issues = None;
             }
+            return;
+        }
+        egui::Grid::new("traffic").num_columns(2).show(ui, |ui| {
+            ui.label(RichText::new(tr("Traffic at")).color(pal().dim));
+            ui.add(egui::Slider::new(&mut self.net.hour, 0.0..=23.75).step_by(0.25).custom_formatter(|v, _| more::clock(v as f32))).on_hover_text(tr("Apps follow the day: streaming peaks in the evening, calls in the daytime, backups at night"));
+            ui.end_row();
+            ui.label(RichText::new(tr("Household")).color(pal().dim));
+            let mut v = traffic;
+            let r = ui.add(egui::Slider::new(&mut v, 0.25..=3.0).step_by(0.25).custom_formatter(|v, _| format!("×{v}"))).on_hover_text(tr("How much everyone uses at once: ×1 is a typical day, ×2 everyone at home streaming and calling, ×0.5 a quiet home"));
+            // One undo step per drag.
+            if r.drag_started() || (r.changed() && !r.dragged()) {
+                self.snapshot();
+            }
+            self.net.traffic = v;
             ui.end_row();
         });
+        let now = Self::now(ui.ctx());
+        if self.net.traffic != traffic || self.day_cache.as_ref().is_none_or(|c| now - c.0 > 1.0) {
+            self.day_cache = Some((now, self.net.day_load()));
+        }
+        let day = self.day_cache.as_ref().map(|c| c.1.clone()).unwrap_or_default();
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 84.0), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        let top = day.iter().map(|d| d.1).fold(1.2, f32::max);
+        let x = |h: f32| rect.left() + rect.width() * h / 24.0;
+        let y = |u: f32| rect.bottom() - 12.0 - (rect.height() - 16.0) * (u / top).min(1.0);
+        p.rect_filled(rect, 4, pal().card);
+        p.line_segment([pos2(rect.left(), y(1.0)), pos2(rect.right(), y(1.0))], Stroke::new(1.0, pal().red.gamma_multiply(0.6)));
+        p.extend(Shape::dashed_line(&[pos2(rect.left(), y(0.8)), pos2(rect.right(), y(0.8))], Stroke::new(1.0, pal().amber.gamma_multiply(0.6)), 4.0, 4.0));
+        for h in [0, 6, 12, 18] {
+            p.text(pos2(x(h as f32) + 3.0, rect.bottom() - 1.0), Align2::LEFT_BOTTOM, format!("{h:02}:00"), FontId::proportional(9.5), pal().dim);
+        }
+        let series = |f: fn(&(f32, f32)) -> f32| day.iter().enumerate().map(|(i, d)| pos2(x(i as f32 * 0.5 + 0.25), y(f(d)))).collect::<Vec<_>>();
+        p.line(series(|d| d.0), Stroke::new(1.5, pal().dim));
+        p.line(series(|d| d.1), Stroke::new(2.0, pal().accent));
+        p.line_segment([pos2(x(self.net.hour), rect.top()), pos2(x(self.net.hour), rect.bottom())], Stroke::new(1.0, pal().text));
+        if let Some(pp) = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()) {
+            self.net.hour = ((pp.x - rect.left()) / rect.width() * 96.0).round().clamp(0.0, 95.0) / 4.0;
+        }
+        if let Some(d) = resp.hover_pos().and_then(|pp| day.get((((pp.x - rect.left()) / rect.width()) * 48.0) as usize).map(|d| (pp, d))) {
+            let (pp, d) = d;
+            let h = (((pp.x - rect.left()) / rect.width()) * 48.0).floor() * 0.5;
+            resp.on_hover_text(trf("{}: busiest cable or Wi-Fi {}% full, internet line {}%", &[&more::clock(h), &format!("{:.0}", d.1 * 100.0), &format!("{:.0}", d.0 * 100.0)]));
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(format!("— {}", tr("busiest cable or Wi-Fi"))).small().color(pal().accent));
+            ui.label(RichText::new(format!("— {}", tr("internet line"))).small().color(pal().dim));
+            ui.label(RichText::new(tr("red line = full")).small().color(pal().red));
+        });
+        if self.net.hour != hour || self.net.traffic != traffic || self.net.custom_traffic != custom {
+            self.issues = None;
+        }
+    }
+
+    /// Organic or Custom traffic, for the whole plan.
+    pub(crate) fn traffic_mode(&mut self, ui: &mut egui::Ui) {
+        let custom = self.net.custom_traffic;
+        let mut c = custom;
+        ui.selectable_value(&mut c, false, tr("Organic")).on_hover_text(tr("Everyday apps that follow the time of day"));
+        ui.selectable_value(&mut c, true, tr("Custom")).on_hover_text(tr("You choose what each device runs: all at once, at full rate"));
+        if c != custom {
+            self.snapshot();
+            self.net.custom_traffic = c;
+            // A first custom test starts from the everyday apps.
+            if c && self.net.devices.iter().all(|d| d.test_uses.is_empty()) {
+                for d in &mut self.net.devices {
+                    d.test_uses = d.uses.clone();
+                }
+            }
+        }
+    }
+
+    /// Custom traffic: what the test load adds up to, and quick ways to set it.
+    fn custom_rows(&mut self, ui: &mut egui::Ui) {
+        let busy: Vec<_> = self.net.devices.iter().filter(|d| !d.off).map(|d| self.net.demands(d)).filter(|v| !v.is_empty()).collect();
+        let (down, up) = busy.iter().flatten().fold((0.0, 0.0), |s, x| (s.0 + x.2, s.1 + x.3));
+        ui.label(trf("{} devices run a test load: ≈ {} Mbit/s down, {} up in all.", &[&busy.len(), &format!("{down:.0}"), &format!("{up:.0}")]));
+        ui.label(RichText::new(tr("Pick what each device runs in its panel, under Test load: apps, or your own Mbit/s.")).small().color(pal().dim));
+        let mut b = self.net.custom_bursty;
+        if ui.checkbox(&mut b, tr("Real-life ups and downs")).on_hover_text(tr("In Simulate, apps come and go like the real thing: a page loads when you click, a video fetches a few seconds at a time, calls jitter. Off: every test load runs steady.")).changed() {
+            self.snapshot();
+            self.net.custom_bursty = b;
+        }
+        let (mut set, mut clear): (Option<fn(&net::Device) -> Vec<extras::Use>>, bool) = (None, false);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(tr("Everyday apps")).on_hover_text(tr("Each device runs its usual apps, all at once")).clicked() {
+                set = Some(|d| d.uses.clone());
+            }
+            if ui.button(tr("Everyone streams video")).on_hover_text(tr("Every TV, computer and console streams 4K and every phone HD, all at once; other devices keep their test load")).clicked() {
+                set = Some(|d| {
+                    let can = d.kind.uses();
+                    match [extras::Use::Stream4k, extras::Use::StreamHd].into_iter().find(|u| can.contains(u)) {
+                        Some(u) => vec![u],
+                        None => d.test_uses.clone(),
+                    }
+                });
+            }
+            if ui.button(tr("Clear")).on_hover_text(tr("No test load on any device")).clicked() {
+                set = Some(|_| vec![]);
+                clear = true;
+            }
+        });
+        if let Some(f) = set {
+            self.snapshot();
+            for d in &mut self.net.devices {
+                d.test_uses = f(d);
+                if clear {
+                    d.test_mbps = [0.0; 2];
+                }
+            }
+        }
     }
 
     /// Radios: extra network names, each into its own VLAN (one radio, several networks).

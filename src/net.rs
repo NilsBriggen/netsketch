@@ -172,6 +172,8 @@ impl Kind {
             Kind::Console => &[Gaming, Download, StreamHd, Stream4k],
             Kind::Camera => &[Camera],
             Kind::Speaker => &[Music],
+            // Its own backup to the cloud, and downloads straight onto it.
+            Kind::Nas | Kind::Server => &[Backup, Download],
             _ => &[],
         }
     }
@@ -508,6 +510,8 @@ pub struct Device {
     pub model: String,
     /// 802.11k/v/r: helps phones roam quickly and to the right access point.
     pub fast_roam: bool,
+    /// Picks its own channel (automatic channel selection), as almost every router does out of the box.
+    pub auto_ch: bool,
     /// Kick clients weaker than this (dBm, 0 = off).
     pub min_rssi: i16,
     /// Neighbour networks: share of airtime they use (0–1).
@@ -532,6 +536,12 @@ pub struct Device {
     pub stp_short: bool,
     /// What people do on this device at the busiest hour of the day.
     pub uses: Vec<crate::extras::Use>,
+    /// Custom traffic: the apps it runs in your own test, all at once and at full rate ("what if everyone streams?").
+    pub test_uses: Vec<crate::extras::Use>,
+    /// Custom traffic: an own load on top of those apps, Mbit/s (down, up) to and from the internet.
+    pub test_mbps: [f32; 2],
+    /// Where that own load goes: a device in the house (its id), or 0 for the internet.
+    pub test_to: u32,
     /// Power over Ethernet: per-port standard it supplies (index into extras::POE), total budget (W),
     /// and what this device draws over its cable (W, 0 = own power supply).
     pub poe_class: u8,
@@ -618,6 +628,7 @@ impl Default for Device {
             backhaul: false,
             model: String::new(),
             fast_roam: false,
+            auto_ch: true,
             min_rssi: 0,
             busy: 0.3,
             plan_mbps: 500.0,
@@ -629,6 +640,9 @@ impl Default for Device {
             roam_at: -75,
             stp_short: false,
             uses: vec![],
+            test_uses: vec![],
+            test_mbps: [0.0; 2],
+            test_to: 0,
             poe_class: 0,
             poe_budget: 0.0,
             poe_draw: 0.0,
@@ -989,6 +1003,8 @@ pub struct Network {
     /// Measuring points from the companion app, and which measured access point is which device.
     pub points: Vec<crate::companion::MeasurePoint>,
     pub measured: Vec<(String, u32)>,
+    /// What the phone watched over time, the problems it found and the devices it discovered.
+    pub phone: crate::companion::PhoneReport,
     /// Room names written on the map, and names people gave their storeys ("Loft").
     pub labels: Vec<RoomLabel>,
     pub storey_names: Vec<(i8, String)>,
@@ -1000,6 +1016,21 @@ pub struct Network {
     pub kwh_price: f32,
     /// Time of day (hours) the traffic is looked at; 20.5 = the evening busy hour.
     pub hour: f32,
+    /// How busy the household is: every app's demand times this (1 = a typical day, 2 = everyone home at once).
+    pub traffic: f32,
+    /// Custom traffic instead of the day's usual: each device runs its `test_uses` at full rate, whatever the hour.
+    pub custom_traffic: bool,
+    /// Custom traffic comes and goes like real apps in Simulate (page loads, video chunks) instead of staying steady.
+    pub custom_bursty: bool,
+    /// The traffic model's memory between frames (not saved).
+    #[serde(skip)]
+    pub memory: std::cell::RefCell<crate::extras::TrafficMemory>,
+    /// Where signals bend around walls, kept until the walls change (not saved).
+    #[serde(skip)]
+    pub edge_cache: std::cell::RefCell<crate::wifi::EdgeCache>,
+    /// Live Wi-Fi links that lost their access point: (signal gone since, joining again until), clock s; not saved.
+    #[serde(skip)]
+    pub link_down: std::cell::RefCell<HashMap<u32, (f64, f64)>>,
     /// Signal (dBm) that counts as good Wi-Fi in this home: −72 browsing, −67 video calls, −60 4K and gaming.
     /// The coverage score, the Wi-Fi map colours and its legend all follow it.
     pub target: f32,
@@ -1038,12 +1069,19 @@ impl Default for Network {
             models: vec![],
             points: vec![],
             measured: vec![],
+            phone: Default::default(),
             labels: vec![],
             storey_names: vec![],
             storey_heights: vec![],
             outdoor: vec![],
             kwh_price: 0.30,
             hour: 20.5,
+            traffic: 1.0,
+            custom_traffic: false,
+            custom_bursty: false,
+            memory: Default::default(),
+            edge_cache: Default::default(),
+            link_down: Default::default(),
             target: -67.0,
             clock: 0.0,
             live: false,
@@ -1141,6 +1179,9 @@ impl Network {
 
     /// Repairs a plan read from a file so nothing points at devices or ports that don't exist.
     pub fn sanitize(&mut self) {
+        if !(0.1..=5.0).contains(&self.traffic) {
+            self.traffic = 1.0;
+        }
         if !(-80.0..=-50.0).contains(&self.target) {
             self.target = -67.0;
         }

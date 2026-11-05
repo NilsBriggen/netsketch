@@ -1,7 +1,9 @@
 //! The air: walls, signal strength, Wi-Fi speed, channels, neighbours, extenders, roaming, hardware presets,
 //! and the Thread/Zigbee (802.15.4) gadgets that share 2.4 GHz with Wi-Fi.
 //! shortcut: a multi-wall path-loss model over 3-D distance (COST-231 style: near free-space distance loss plus each wall
-//! and floor crossed) — good for planning and teaching, not a ray tracer; reflections are only described, not computed.
+//! and floor crossed), plus one bend around a wall's free end or outside corner (knife-edge diffraction: doorways,
+//! hall corners). Not a ray tracer: reflections are only described, and paths with two bends aren't followed.
+//! Material, fading and receiver values come from published measurements; each constant says which.
 use crate::net::{Device, Kind, Link, Medium, Network, WifiStd, PX_PER_M};
 use serde::{Deserialize, Serialize};
 
@@ -14,10 +16,13 @@ pub enum WallKind {
     Brick,
     Concrete,
     Metal,
+    Aerated,
+    Stone,
+    InnerBrick,
 }
 
 impl WallKind {
-    pub const ALL: [WallKind; 7] = [WallKind::Drywall, WallKind::Wood, WallKind::Glass, WallKind::LowE, WallKind::Brick, WallKind::Concrete, WallKind::Metal];
+    pub const ALL: [WallKind; 10] = [WallKind::Drywall, WallKind::Wood, WallKind::Glass, WallKind::LowE, WallKind::Aerated, WallKind::InnerBrick, WallKind::Brick, WallKind::Concrete, WallKind::Stone, WallKind::Metal];
     pub fn label(self) -> &'static str {
         crate::i18n::tr(self.label_en())
     }
@@ -27,21 +32,32 @@ impl WallKind {
             WallKind::Wood => "Wood / door",
             WallKind::Glass => "Plain glass",
             WallKind::LowE => "Coated (low-E) window",
-            WallKind::Brick => "Brick",
+            WallKind::Brick => "Brick (outer wall)",
+            WallKind::InnerBrick => "Brick (thin inner wall)",
             WallKind::Concrete => "Reinforced concrete",
             WallKind::Metal => "Metal / mirror / fridge",
+            WallKind::Aerated => "Aerated concrete (Ytong)",
+            WallKind::Stone => "Thick stone wall (old house)",
         }
     }
-    /// Signal loss in dB at 2.4 GHz and at 5 GHz (6 GHz loses ~15% more).
-    pub fn loss(self) -> (f32, f32) {
+    /// Signal loss (dB) crossing one wall straight on, at 2.4, 5 and 6 GHz, for a home's usual thickness. From
+    /// ITU-R P.2040-4, 3GPP TR 38.901, NIST IR 6055 and measurements (Shakya et al. 2024 at 6.75 GHz; Rodriguez
+    /// Larrad et al. 2014 for coated glass). Light walls include the clutter fitted per-wall models carry (TGax 5 dB).
+    pub fn loss(self) -> [f32; 3] {
         match self {
-            WallKind::Drywall => (3.0, 4.0),
-            WallKind::Wood => (4.0, 6.0),
-            WallKind::Glass => (2.0, 4.0),
-            WallKind::LowE => (25.0, 30.0),
-            WallKind::Brick => (9.0, 14.0),
-            WallKind::Concrete => (15.0, 23.0),
-            WallKind::Metal => (30.0, 35.0),
+            WallKind::Drywall => [3.0, 4.0, 5.0],
+            WallKind::Wood => [4.0, 5.0, 6.0],
+            WallKind::Glass => [2.0, 3.0, 3.5],
+            WallKind::LowE => [25.0, 30.0, 32.0],
+            // shortcut: no solid 5–6 GHz measurement of aerated concrete exists (4.5 dB dry / 8.3 wet at 2.4 GHz
+            // through one block); 30–36 cm plastered walls assumed.
+            WallKind::Aerated => [6.0, 10.0, 12.0],
+            WallKind::InnerBrick => [5.0, 7.0, 8.0],
+            WallKind::Brick => [9.0, 13.0, 15.0],
+            WallKind::Concrete => [15.0, 23.0, 27.0],
+            // shortcut: no measurement of half-metre stone walls found; a conservative guess above 50 cm marble.
+            WallKind::Stone => [18.0, 28.0, 32.0],
+            WallKind::Metal => [30.0, 35.0, 37.0],
         }
     }
     pub fn note(self) -> &'static str {
@@ -49,7 +65,10 @@ impl WallKind {
             WallKind::LowE => "Energy-saving windows carry a metal coating: they block Wi-Fi almost like a wall of metal.",
             WallKind::Metal => "Metal reflects: a dead zone behind it, and echoes (multipath) in front that cost speed.",
             WallKind::Concrete => "Reinforced concrete and floor slabs are the main reason one router can't cover a house.",
-            WallKind::Brick => "Only about 1/25 of the 5 GHz signal gets through a brick wall (−14 dB), more if it's crossed at a slant.",
+            WallKind::Brick => "Only about 1/20 of the 5 GHz signal gets through a brick outer wall (−13 dB), more if it's crossed at a slant.",
+            WallKind::InnerBrick => "A thin brick inner wall (11 cm) costs about 7 dB at 5 GHz: a fifth of the signal gets through.",
+            WallKind::Aerated => "Aerated concrete blocks are full of air: lighter on Wi-Fi than brick, but a thick outer wall still costs 10 dB at 5 GHz.",
+            WallKind::Stone => "Old stone walls are often half a metre thick: barely anything gets through at 5 GHz. Plan an access point per side, or a cable through.",
             _ => "Light material: costs a little signal per wall.",
         }
     }
@@ -223,29 +242,41 @@ pub fn floor(_band: Band) -> f32 {
     sens(20)
 }
 
-/// Weakest signal a channel width still works at: −92 dBm at 20 MHz, 3 dB more per doubling (more noise).
+/// Weakest signal a channel width still works at: −90 dBm at 20 MHz (the slowest rate, MCS 0: the standard's
+/// −82 dBm minimum less the ~8 dB a typical device does better), 3 dB more per doubling (more noise).
 pub fn sens(width: u16) -> f32 {
-    -92.0 + 3.0 * (width.max(20) as f32 / 20.0).log2()
+    -90.0 + 3.0 * (width.max(20) as f32 / 20.0).log2()
+}
+
+/// Signal each rate needs on 80 MHz (dBm) and that rate as a share of Wi-Fi 6's top (1024-QAM, MCS 11): the
+/// 802.11ac/ax minimum-sensitivity table (MCS 0–11; 12–13 for Wi-Fi 7) less ~8 dB for a typical device. In between,
+/// rate adaptation mixes the neighbouring rates, hence the straight lines.
+const MCS_80: [(f32, f32); 14] = [(-49.0, 1.2), (-51.0, 1.1), (-54.0, 1.0), (-56.0, 0.9), (-59.0, 0.8), (-61.0, 0.72), (-66.0, 0.6), (-67.0, 0.54), (-68.0, 0.48), (-72.0, 0.36), (-76.0, 0.24), (-79.0, 0.18), (-81.0, 0.12), (-84.0, 0.06)];
+
+/// The top rate of a standard on a band as a share of Wi-Fi 6's (what `stream20` gives): 4096-QAM on Wi-Fi 7,
+/// 256-QAM on Wi-Fi 5 (64-QAM on its 2.4 GHz side, which is Wi-Fi 4).
+fn top_share(std: WifiStd, band: usize) -> f32 {
+    match (std, band) {
+        (WifiStd::Wifi7, _) => 1.2,
+        (WifiStd::Wifi5, 0) => 0.6,
+        (WifiStd::Wifi5, _) => 0.8,
+        _ => 1.0,
+    }
 }
 
 /// Share of the top rate left at a signal strength. Thresholds are for 80 MHz; wider channels
 /// collect more noise (−3 dB per doubling), narrower ones less.
-fn rate_fraction(rssi: f32, width: u16) -> f32 {
+fn rate_fraction(rssi: f32, width: u16, std: WifiStd, band: usize) -> f32 {
     let eff = rssi - 3.0 * (width as f32 / 80.0).log2();
-    let pts = [(-50.0, 1.0), (-58.0, 0.8), (-65.0, 0.55), (-70.0, 0.35), (-75.0, 0.18), (-80.0, 0.07), (sens(80), 0.02)];
-    if eff >= -50.0 {
-        return 1.0;
-    }
-    if eff < sens(80) {
-        return 0.0;
-    }
-    for w in pts.windows(2) {
-        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
-        if eff <= x0 && eff >= x1 {
-            return y1 + (y0 - y1) * (eff - x1) / (x0 - x1);
-        }
-    }
-    0.02
+    let top = top_share(std, band);
+    let share = if eff >= MCS_80[0].0 {
+        MCS_80[0].1
+    } else if eff < MCS_80[13].0 {
+        0.0
+    } else {
+        MCS_80.windows(2).find(|w| eff <= w[0].0 && eff >= w[1].0).map_or(0.0, |w| w[1].1 + (w[0].1 - w[1].1) * (eff - w[1].0) / (w[0].0 - w[1].0))
+    };
+    share.min(top) / top
 }
 
 pub fn width_factor(w: u16) -> f32 {
@@ -282,12 +313,180 @@ pub fn roam_threshold(ap: &Device, cl: &Device) -> f32 {
 }
 
 fn band_loss(k: WallKind, band: Band) -> f32 {
-    let (l24, l5) = k.loss();
-    match band {
-        Band::B24 => l24,
-        Band::B5 => l5,
-        Band::B6 => l5 * 1.15,
+    k.loss()[band.i()]
+}
+
+/// A floor slab's loss for the first storey crossed: P.1238 measured 20 dB at 5.2 GHz through a plain
+/// reinforced-concrete floor, TGax and COST-231 use 18.3 dB; other materials as walls.
+fn slab_loss(k: WallKind, band: Band) -> f32 {
+    if k == WallKind::Concrete { [18.0, 22.0, 26.0][band.i()] } else { band_loss(k, band) }
+}
+
+/// A slanted crossing is longer inside the wall, but far less than 1/cos in air suggests: the wave bends
+/// towards the wall's normal (Snell; ε′ ≈ 5 for brick and concrete), so at most ~1.12× (ITU-R P.2040 slab model).
+fn slant_path(cos_in: f32) -> f32 {
+    let sin2 = 1.0 - cos_in * cos_in;
+    1.0 / (1.0 - 0.19 * sin2).sqrt()
+}
+
+/// The rest of the slant's cost is reflection off the wall's faces (dB): nothing below 45°, then +1 at 60°,
+/// +2.5 at 70°, +5 at 80°, capped at +6 (fitted to P.2040's results for concrete and plasterboard).
+fn slant_reflect(cos_in: f32) -> f32 {
+    let deg = cos_in.clamp(0.0, 1.0).acos().to_degrees();
+    let pts = [(45.0, 0.0), (60.0, 1.0), (70.0, 2.5), (80.0, 5.0), (90.0, 6.0)];
+    if deg <= 45.0 {
+        return 0.0;
     }
+    pts.windows(2).find(|w| deg <= w[1].0).map_or(6.0, |w| w[0].1 + (w[1].1 - w[0].1) * (deg - w[0].0) / (w[1].0 - w[0].0))
+}
+
+/// Centre frequency (MHz) the path loss is worked out at.
+fn mhz(band: Band) -> f32 {
+    match band {
+        Band::B24 => 2437.0,
+        Band::B5 => 5500.0,
+        Band::B6 => 6100.0,
+    }
+}
+
+/// Distance loss (dB) over `d` metres indoors: free space with a slightly steeper slope (furniture, people).
+fn dist_loss(band: Band, d: f32) -> f32 {
+    20.0 * mhz(band).log10() + 22.0 * d.max(1.0).log10() - 28.0
+}
+
+/// Extra loss (dB) bending around an edge (knife-edge diffraction, ITU-R P.526), from the Fresnel parameter ν.
+fn knife_edge(v: f32) -> f32 {
+    if v <= -0.78 { 0.0 } else { 6.9 + 20.0 * (((v - 0.1).powi(2) + 1.0).sqrt() + v - 0.1).log10() }
+}
+
+// How signals vary over time on a link that stays put (see `Network::fading`).
+/// Slow change over time (people walking through or standing in the way, doors), sd in dB, with and without a
+/// line of sight. ITU-R P.1238 §8: a person in a line-of-sight path costs 6–8 dB; behind walls people barely matter.
+pub const SHADOW_SD_LOS: f32 = 3.0;
+pub const SHADOW_SD_NLOS: f32 = 1.5;
+/// A device that's carried around: shadowing by position (TGn models B–D after the breakpoint: 4–5 dB).
+pub const SHADOW_SD_CARRIED: f32 = 4.0;
+/// How long such a change takes (s).
+pub const SHADOW_S: f64 = 5.0;
+/// Rician K-factor (linear) of a line-of-sight link: 0 dB, as in the TGn residential models B and C.
+pub const LOS_K: f32 = 1.0;
+/// Width (MHz) over which a home's echoes fade together (coherence bandwidth ≈ 1/(5 × 15–30 ns delay spread)).
+pub const COHERENCE_MHZ: f32 = 10.0;
+/// Speed of what moves in a home (m/s, 1.2 km/h as in TGn), which sets how fast multipath fading changes.
+pub const MOVE_MPS: f64 = 0.33;
+/// Window rate adaptation and the live view average over (s).
+pub const HALF_S: f64 = 0.5;
+/// How long a device keeps trying before it gives up on the access point (s: Linux waits 7 beacons, then probes:
+/// 1–3 s), and how long joining again takes (s: scan, authentication, keys, address; 1.5 s typical, 5 s worst).
+pub const BEACON_LOSS_S: f64 = 2.0;
+pub const REJOIN_S: f64 = 1.5;
+
+/// How steady a Wi-Fi link is over time.
+#[derive(Clone, Copy, Debug)]
+pub struct Stability {
+    /// dB the average signal sits above the edge where the link gives up.
+    pub margin: f32,
+    /// Share of frames sent again, and share lost even after all retries.
+    pub retry: f32,
+    pub loss: f32,
+    /// How often an hour the device loses the access point and must join again, and the share of time it's off.
+    pub drops_h: f32,
+    pub down: f32,
+}
+
+/// Standard normal distribution function.
+fn phi(z: f32) -> f32 {
+    // Abramowitz & Stegun 7.1.26 (error < 1.5e-7).
+    let x = z.abs() / std::f32::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let erf = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
+    if z >= 0.0 { 0.5 * (1.0 + erf) } else { 0.5 * (1.0 - erf) }
+}
+
+/// Fading power (mean 1) of a Nakagami-m channel — Gamma(m, 1/m) — at the standard-normal value z
+/// (Wilson–Hilferty: accurate to a few % for m ≥ 1).
+pub fn gamma_quantile(m: f32, z: f32) -> f32 {
+    let c = 1.0 / (9.0 * m.max(0.5));
+    ((1.0 - c) + c.sqrt() * z).max(0.05).powi(3)
+}
+
+/// Chance a Nakagami-m fading power (mean 1) is below x.
+pub fn gamma_below(m: f32, x: f32) -> f32 {
+    let c = 1.0 / (9.0 * m.max(0.5));
+    phi((x.max(1e-9).cbrt() - (1.0 - c)) / c.sqrt())
+}
+
+/// Diffraction behind a corner is capped: walls next to it reflect signal into the shadow, so pure knife-edge
+/// (27–37 dB 1–4 m into the shadow at 5 GHz) is far too pessimistic. ITU-R P.1411 uses 20 dB for a street corner.
+/// shortcut: a cap instead of computing those reflections; no measured indoor value exists.
+const BEND_CAP_DB: f32 = 20.0;
+
+fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
+}
+
+/// Where a signal can bend around a wall: the corner itself, a spot 0.3 m out into the open side, and the storey.
+#[derive(Clone, Copy, Debug)]
+pub struct Edge {
+    pub at: [f32; 2],
+    pub open: [f32; 2],
+    pub floor: i8,
+}
+
+/// Spots where a signal can bend around a wall: free ends (door frames, openings) and outside corners.
+/// A point where walls meet straight on, or in a T, is no edge.
+pub fn wall_edges(walls: &[Wall]) -> Vec<Edge> {
+    let near = 0.2 * PX_PER_M;
+    let mut seen: Vec<([f32; 2], i8)> = vec![];
+    let mut out = vec![];
+    for w in walls {
+        for end in [w.a, w.b] {
+            if seen.iter().any(|s| s.1 == w.floor && dist(s.0, end) < near) {
+                continue;
+            }
+            seen.push((end, w.floor));
+            let mut ang: Vec<f32> = vec![];
+            for o in walls.iter().filter(|o| o.floor == w.floor) {
+                let toward = |p: [f32; 2]| (p[1] - end[1]).atan2(p[0] - end[0]);
+                if dist(o.a, end) < near {
+                    ang.push(toward(o.b));
+                } else if dist(o.b, end) < near {
+                    ang.push(toward(o.a));
+                } else if seg_dist(end, o.a, o.b) < near {
+                    ang.push(toward(o.a));
+                    ang.push(toward(o.b));
+                }
+            }
+            ang.sort_by(f32::total_cmp);
+            let tau = std::f32::consts::TAU;
+            let (mut gap, mut mid) = (0.0, 0.0);
+            for (i, a) in ang.iter().enumerate() {
+                let next = if i + 1 < ang.len() { ang[i + 1] } else { ang[0] + tau };
+                if next - a > gap {
+                    gap = next - a;
+                    mid = a + gap / 2.0;
+                }
+            }
+            if gap > 200f32.to_radians() {
+                out.push(Edge { at: end, open: [end[0] + 0.3 * PX_PER_M * mid.cos(), end[1] + 0.3 * PX_PER_M * mid.sin()], floor: w.floor });
+            }
+        }
+    }
+    out
+}
+
+/// The wall edges, worked out again only when the walls change.
+#[derive(Clone, Default, Debug)]
+pub struct EdgeCache {
+    stamp: u64,
+    edges: Vec<Edge>,
+}
+
+fn walls_stamp(walls: &[Wall]) -> u64 {
+    walls.iter().fold(walls.len() as u64, |h, w| {
+        let v = [w.a[0], w.a[1], w.b[0], w.b[1]].iter().fold(h, |h, x| crate::sim::hash(h, x.to_bits() as u64, 1));
+        crate::sim::hash(v, w.floor as u64, w.kind as u64)
+    })
 }
 
 fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
@@ -414,7 +613,9 @@ pub const CLIENT_PRESETS: &[Preset] = &[
 
 /// Household things that send on 2.4 GHz without being Wi-Fi: (name, channel, width, share of time, power dBm).
 pub const DISTURBERS: &[(&str, u16, u16, f32, f32)] = &[
-    ("Microwave oven (while cooking)", 9, 40, 0.5, -8.0),
+    // A magnetron oven: ≈ +14 dBm (−50 dBm at 15 m, Nassar et al. 2011), on for half of each mains cycle,
+    // centred near 2.455 GHz and sweeping over channels 6–13 (worst 8–11).
+    ("Microwave oven (while cooking)", 9, 40, 0.5, 14.0),
     ("Analog baby monitor / video sender", 6, 20, 0.9, 3.0),
     ("Bluetooth speaker or headphones", 6, 40, 0.06, 0.0),
     ("Zigbee / Thread smart-home hub", 11, 20, 0.04, 5.0),
@@ -450,40 +651,115 @@ pub fn default_preset(k: Kind) -> Option<&'static Preset> {
 }
 
 impl Network {
-    /// Walls crossed between two points (only walls on the storeys of either end count). A wall crossed
-    /// at a slant is thicker on the way through: ×1/cos of the angle, at most double.
-    pub fn wall_loss(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, band: Band) -> (f32, usize) {
-        let mut loss = 0.0;
+    /// Walls crossed between two points (only walls on the storeys of either end count): loss per band, and how
+    /// many. A wall crossed at a slant costs more (see `slant_path`, `slant_reflect`).
+    pub fn wall_losses(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8) -> ([f32; 3], usize) {
+        let mut loss = [0.0; 3];
         let mut n = 0;
+        let mut seen: Vec<WallKind> = vec![];
         let p = [b[0] - a[0], b[1] - a[1]];
         for w in self.walls.iter().filter(|w| w.floor == fa || w.floor == fb) {
             if crosses(a, b, w.a, w.b) {
                 let v = [w.b[0] - w.a[0], w.b[1] - w.a[1]];
                 // |sin| of the angle between path and wall = cos of the angle to the wall's normal.
-                let cos = (p[0] * v[1] - p[1] * v[0]).abs() / ((p[0].hypot(p[1]) * v[0].hypot(v[1])).max(1e-6));
-                loss += band_loss(w.kind, band) / cos.max(0.5);
+                let cos = ((p[0] * v[1] - p[1] * v[0]).abs() / ((p[0].hypot(p[1]) * v[0].hypot(v[1])).max(1e-6))).min(1.0);
+                // A second, third… wall of the same kind costs less (Lott & Forkel: 16 → 14 dB, 29 → 24 dB).
+                let again = if seen.contains(&w.kind) { 0.85 } else { 1.0 };
+                seen.push(w.kind);
+                for (l, k) in loss.iter_mut().zip(w.kind.loss()) {
+                    *l += (k * slant_path(cos) + slant_reflect(cos)) * again;
+                }
                 n += 1;
             }
         }
         (loss, n)
     }
 
+    pub fn wall_loss(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, band: Band) -> (f32, usize) {
+        let (l, n) = self.wall_losses(a, fa, b, fb);
+        (l[band.i()], n)
+    }
+
+    fn edges(&self) -> std::cell::Ref<'_, Vec<Edge>> {
+        let stamp = walls_stamp(&self.walls);
+        if self.edge_cache.borrow().stamp != stamp || (stamp == 0 && !self.walls.is_empty()) {
+            *self.edge_cache.borrow_mut() = EdgeCache { stamp, edges: wall_edges(&self.walls) };
+        }
+        std::cell::Ref::map(self.edge_cache.borrow(), |c| &c.edges)
+    }
+
     /// Path loss (dB) between two spots, multi-wall style: near free-space loss over the real 3-D distance
     /// (storey heights, plus `dh` = how much higher b's antenna sits above its floor than a's), plus every
     /// wall crossed, plus the floor slabs (each further slab costs a little less).
     pub fn path_loss(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, dh: f32, band: Band) -> f32 {
+        self.path_losses(a, fa, b, fb, dh)[band.i()]
+    }
+
+    /// `path_loss` for all three bands at once (the geometry is the same). When walls block the straight way,
+    /// the signal also bends around the best nearby wall end or corner (a doorway, the corner of a hall);
+    /// both ways add up as power.
+    pub fn path_losses(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, dh: f32) -> [f32; 3] {
         let storeys = (fa as f32 - fb as f32).abs();
-        let flat = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() / PX_PER_M;
+        let flat = dist(a, b) / PX_PER_M;
         let up = self.floor_z(fb) - self.floor_z(fa) + dh;
         let d = (flat * flat + up * up).sqrt().max(1.0);
-        let f_mhz: f32 = match band {
-            Band::B24 => 2437.0,
-            Band::B5 => 5500.0,
-            Band::B6 => 6100.0,
-        };
-        // COST-231 multi-wall: k slabs cost Lf·k^((k+2)/(k+1) − 0.46).
-        let slabs = if storeys > 0.0 { band_loss(self.slab, band) * storeys.powf((storeys + 2.0) / (storeys + 1.0) - 0.46) } else { 0.0 };
-        20.0 * f_mhz.log10() + 22.0 * d.log10() - 28.0 + self.wall_loss(a, fa, b, fb, band).0 + slabs
+        let (walls, _) = self.wall_losses(a, fa, b, fb);
+        let mut out = [0.0; 3];
+        for band in Band::ALL {
+            // COST-231 multi-wall: k slabs cost Lf·k^((k+2)/(k+1) − 0.46).
+            let slabs = if storeys > 0.0 { slab_loss(self.slab, band) * storeys.powf((storeys + 2.0) / (storeys + 1.0) - 0.46) } else { 0.0 };
+            out[band.i()] = dist_loss(band, d) + walls[band.i()] + slabs;
+        }
+        if fa != fb {
+            return out;
+        }
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let ab_len = ab[0].hypot(ab[1]).max(1e-6);
+        // How far a point sits off the straight line (m), and where along it (0 = a, 1 = b).
+        let off = |p: [f32; 2]| ((p[0] - a[0]) * ab[1] - (p[1] - a[1]) * ab[0]).abs() / ab_len / PX_PER_M;
+        let along = |p: [f32; 2]| ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / (ab_len * ab_len);
+        // Fresnel parameter of an edge h metres off the way, d1 and d2 metres from the ends.
+        let nu = |h: f32, d1: f32, d2: f32, band: Band| h * (2.0 * (d1 + d2) / (300.0 / mhz(band) * d1 * d2)).sqrt();
+        let worst = walls.iter().fold(0.0f32, |m, x| m.max(*x));
+        if worst == 0.0 {
+            // A clear way that passes close to a wall's end still loses some signal (up to 6 dB right at the edge):
+            // the edge cuts into the zone the radio wave fills around the straight line.
+            for band in Band::ALL {
+                let lit = self.edges().iter().filter(|e| e.floor == fa && (0.02..0.98).contains(&along(e.at))).map(|e| {
+                    let (d1, d2) = ((dist(a, e.at) / PX_PER_M).max(0.5), (dist(e.at, b) / PX_PER_M).max(0.5));
+                    knife_edge(-nu(off(e.at), d1, d2, band))
+                }).fold(0.0f32, f32::max);
+                out[band.i()] += lit;
+            }
+            return out;
+        }
+        if worst < 6.0 {
+            return out;
+        }
+        let mut bent = [f32::INFINITY; 3];
+        for e in self.edges().iter().filter(|e| e.floor == fa) {
+            let (d1, d2) = ((dist(a, e.open) / PX_PER_M).max(0.5), (dist(e.open, b) / PX_PER_M).max(0.5));
+            let len = ((d1 + d2).powi(2) + up * up).sqrt().max(1.0);
+            // Even grazing an edge costs 6 dB: skip detours that can't beat the straight way.
+            let extra = 22.0 * (len / d).log10();
+            if extra + 6.0 >= worst {
+                continue;
+            }
+            let (legs, _) = self.wall_losses(a, fa, e.open, fa);
+            let (legs2, _) = self.wall_losses(e.open, fa, b, fa);
+            // The deeper the shadow (how far the corner sits off the straight line), the more bending costs.
+            let h = off(e.at);
+            for band in Band::ALL {
+                let l = dist_loss(band, len) + legs[band.i()] + legs2[band.i()] + knife_edge(nu(h, d1, d2, band)).min(BEND_CAP_DB);
+                bent[band.i()] = bent[band.i()].min(l);
+            }
+        }
+        for i in 0..3 {
+            if bent[i].is_finite() {
+                out[i] = -10.0 * (10f32.powf(-out[i] / 10.0) + 10f32.powf(-bent[i] / 10.0)).log10();
+            }
+        }
+        out
     }
 
     /// Power (dBm EIRP) a radio sends towards a spot: a dish's gain counts, but never above the legal limit.
@@ -497,13 +773,21 @@ impl Network {
         if !ap.bands[band.i()] {
             return -120.0;
         }
+        self.rssi_from(ap, pos, band, self.path_loss(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount, band))
+    }
+
+    fn rssi_from(&self, ap: &Device, pos: [f32; 2], band: Band, loss: f32) -> f32 {
         let gain = if ap.streams >= 4 { 2.0 } else { 0.0 };
-        self.eirp(ap, pos, band) + gain + ap.cal_db - self.path_loss(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount, band)
+        self.eirp(ap, pos, band) + gain + ap.cal_db - loss
     }
 
     /// Best signal over the bands a radio has on (2.4 GHz counted 6 dB lower: it's the slow band).
     pub fn best_rssi(&self, ap: &Device, pos: [f32; 2], floor: i8) -> f32 {
-        Band::ALL.iter().map(|b| self.rssi_at(ap, pos, floor, *b) - if *b == Band::B24 { 6.0 } else { 0.0 }).fold(-120.0, f32::max)
+        if !ap.bands.iter().any(|b| *b) {
+            return -120.0;
+        }
+        let loss = self.path_losses(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount);
+        Band::ALL.iter().filter(|b| ap.bands[b.i()]).map(|b| self.rssi_from(ap, pos, *b, loss[b.i()]) - if *b == Band::B24 { 6.0 } else { 0.0 }).fold(-120.0, f32::max)
     }
 
     /// Reflecting surfaces (metal, coated glass, plain glass) within 4 m of a spot: they cause multipath fading.
@@ -515,22 +799,78 @@ impl Network {
             .count()
     }
 
-    /// Live signal variation (dB) on a link: slow shadowing from people moving around, plus fast multipath
-    /// fading that gets deeper near reflecting surfaces. Zero when live variation is off (planning uses averages).
-    fn fade(&self, key: u64, band: Band, rx: &Device) -> f32 {
+    /// How a link's signal varies over time: (slow shadowing sd in dB, fast-fading Nakagami m per frame,
+    /// coherence time of the fast fading in s). See `fading` constants.
+    pub fn fading(&self, ap: &Device, cl: &Device, band: Band, width: u16) -> (f32, f32, f64) {
+        let los = ap.floor == cl.floor && self.wall_loss(ap.pos, ap.floor, cl.pos, cl.floor, band).1 == 0;
+        let refl = (self.reflectors(cl.pos, cl.floor) + self.reflectors(ap.pos, ap.floor)).min(4) as f32;
+        // Rician K: a line of sight gives a steady direct ray; reflecting surfaces around add echoes that weaken it.
+        let k = if los { LOS_K / (1.0 + 0.5 * refl) } else { 0.0 };
+        let m_k = (k + 1.0).powi(2) / (2.0 * k + 1.0);
+        // Diversity: every receive antenna, and every slice of a wide channel that fades on its own, averages fades out.
+        let antennas = ap.streams.min(cl.streams).clamp(1, 4) as f32;
+        let slices = (width.max(20) as f32 / COHERENCE_MHZ).clamp(1.0, 16.0);
+        let m = (m_k * antennas * slices).min(64.0);
+        // Phones and laptops get carried around: their signal also changes with where they are (TGn/TGax: 4–5 dB).
+        let carried = matches!(cl.kind, Kind::Phone | Kind::Laptop);
+        let sd = if carried { SHADOW_SD_CARRIED } else if los { SHADOW_SD_LOS } else { SHADOW_SD_NLOS };
+        let lambda = 300.0 / mhz(band) as f64;
+        (sd, m, 0.423 * lambda / MOVE_MPS)
+    }
+
+    /// Live signal variation (dB) on a link: slow shadowing (people walking through, doors), plus fast multipath
+    /// fading averaged over half a second (rate adaptation follows that, not single frames). Zero when live
+    /// variation is off (planning uses averages).
+    fn fade(&self, key: u64, band: Band, ap: &Device, cl: &Device, width: u16) -> f32 {
         if !self.live {
             return 0.0;
         }
-        let refl = self.reflectors(rx.pos, rx.floor).min(3) as f32;
-        let slow = 4.0 * crate::sim::wander(self.seed, key * 8 + band as u64, self.clock, 6.0);
-        let fast = (1.2 + 1.3 * refl) * crate::sim::wander(self.seed, key * 8 + 4 + band as u64, self.clock, 0.4);
-        slow + fast
+        let (sd, m, tc) = self.fading(ap, cl, band, width);
+        let slow = sd * crate::sim::wander(self.seed, key * 8 + band as u64, self.clock, SHADOW_S);
+        let z = crate::sim::wander(self.seed, key * 8 + 4 + band as u64, self.clock, HALF_S);
+        slow + 10.0 * gamma_quantile(m * (HALF_S / tc).max(1.0) as f32, z).log10()
+    }
+
+    /// How steady a Wi-Fi link is over time, from its average signal and fading (see `Stability`).
+    pub fn stability(&self, l: &Link) -> Option<Stability> {
+        let s = self.signal(l, false)?;
+        let (ap, cl) = match l.medium {
+            Medium::WiFi => self.wifi_ends(l)?,
+            Medium::Mesh => (self.dev(l.a)?, self.dev(l.b)?),
+            _ => return None,
+        };
+        if !s.alive() {
+            return Some(Stability { margin: 0.0, retry: 1.0, loss: 1.0, drops_h: 0.0, down: 1.0 });
+        }
+        let (sd, m, tc) = self.fading(ap, cl, s.band, s.width);
+        // Both directions must get through; the access point hears a little better (more antennas).
+        let margin = s.rssi.min(s.up + 3.0) - sens(20);
+        let collide = 0.03 * self.hidden(l).len() as f32 + 0.08 * (s.contention - 1.0);
+        // Rate adaptation probes faster rates and leaves ~3 dB to spare: a frame caught in a deeper fade, or in a
+        // collision, is sent again. Real homes resend about a quarter of frames (median 25%, WiSe, 30 homes).
+        let retry = (0.1 + 0.5 * gamma_below(m, 0.5) + collide).min(0.95);
+        // Lost even after 7 tries: retries come within milliseconds, inside one fade, so they fail together.
+        // Averaged over the slow shadowing (Gauss–Hermite, 7 points).
+        const GH: [(f32, f32); 7] = [(-2.651961, 0.000971781), (-1.673552, 0.054515583), (-0.816288, 0.42560725), (0.0, 0.81026462), (0.816288, 0.42560725), (1.673552, 0.054515583), (2.651961, 0.000971781)];
+        let outage: f32 = GH.iter().map(|(x, w)| w * gamma_below(m, 10f32.powf((-margin - std::f32::consts::SQRT_2 * sd * x) / 10.0))).sum::<f32>() / std::f32::consts::PI.sqrt();
+        let loss = (outage + collide.min(1.0).powi(4)).min(1.0);
+        // Dropouts: the half-second signal sinks below the edge for longer than the beacons last. Rice's formula
+        // for how often a smooth Gaussian process crosses a level (u sd below its mean).
+        let fast_10 = -10.0 * gamma_quantile(m * (HALF_S / tc).max(1.0) as f32, -1.2816).log10();
+        let u = (margin - fast_10) / sd;
+        let per_s = 0.25 / SHADOW_S as f32 * (-u.powi(2) / 2.0).exp();
+        // Only dips that outlast the beacons count; they last Φ(−u)/rate on average, taken as exponential.
+        let lasts = phi(-u) / per_s.max(1e-12);
+        let drops_h = (3600.0 * per_s * (-(BEACON_LOSS_S as f32) / lasts.max(1e-6)).exp()).min(3600.0 / (REJOIN_S + BEACON_LOSS_S) as f32);
+        let down = (drops_h * (REJOIN_S + BEACON_LOSS_S) as f32 / 3600.0 + outage).min(1.0);
+        Some(Stability { margin, retry, loss, drops_h, down })
     }
 
     /// Share of airtime a transmitter uses right now. Neighbours' traffic comes and goes (streaming, downloads).
     fn busy_now(&self, t: &Device, band: Band, live: bool) -> f32 {
         let base = if t.kind.foreign() { t.busy } else { self.demand_airtime(t, band) };
-        if !live {
+        // Your own radios' real traffic already comes and goes (see extras::want); only neighbours' is guessed.
+        if !live || (!t.kind.foreign() && self.memory.borrow().air.contains_key(&(self.chan_src(t).id, band.i()))) {
             return base;
         }
         (base * (1.0 + 0.6 * crate::sim::wander(self.seed, t.id as u64 + 0x5EED, self.clock, 7.0))).clamp(0.0, 0.95)
@@ -538,7 +878,11 @@ impl Network {
 
     /// Airtime your own radio needs on a band, plus ~2% for beacons: each device's apps at this hour over the rate
     /// its own signal allows, so a far, slow device takes more of the air than a near one with the same traffic.
-    fn demand_airtime(&self, ap: &Device, band: Band) -> f32 {
+    pub(crate) fn demand_airtime(&self, ap: &Device, band: Band) -> f32 {
+        // What the last sharing of the traffic really sent on this channel, once there is one.
+        if let Some(a) = self.memory.borrow().air.get(&(self.chan_src(ap).id, band.i())) {
+            return (0.02 + a).min(0.95);
+        }
         let w = ap.width[band.i()].max(20);
         let used: f32 = self
             .links
@@ -547,13 +891,10 @@ impl Network {
             .filter_map(|l| self.dev(l.other(ap.id).0))
             .filter(|c| !c.off && !c.kind.radio())
             .map(|c| {
-                let demand: f32 = c.uses.iter().map(|u| {
-                    let (down, up) = u.demand();
-                    (down + up) * crate::more::activity(*u, self.hour)
-                }).sum();
+                let demand: f32 = self.demands(c).iter().map(|x| x.2 + x.3).sum();
                 let rssi = self.rssi_at(ap, c.pos, c.floor, band);
                 let streams = usable_streams(rssi, ap.streams.min(c.streams).max(1));
-                let rate = (ap.wifi.stream20(band.i()) * width_factor(w) * streams as f32 * rate_fraction(rssi, w)).max(1.0);
+                let rate = (ap.wifi.stream20(band.i()) * width_factor(w) * streams as f32 * rate_fraction(rssi, w, ap.wifi, band.i())).max(1.0);
                 demand / (rate * mac_eff(rate))
             })
             .sum();
@@ -561,7 +902,7 @@ impl Network {
     }
 
     /// The radio whose channel a device really uses: single-radio repeaters follow their upstream.
-    fn chan_src<'a>(&'a self, d: &'a Device) -> &'a Device {
+    pub(crate) fn chan_src<'a>(&'a self, d: &'a Device) -> &'a Device {
         if d.kind.radio() && !d.backhaul && d.kind != Kind::HomeRouter { self.upstream(d).unwrap_or(d) } else { d }
     }
 
@@ -618,12 +959,18 @@ impl Network {
             }
             // Wi-Fi waits for anything it can decode on its main 20 MHz (from −82 dBm); traffic that only
             // touches the extra width of a wide channel counts once it's loud (energy detect, −62 dBm).
-            let heard_from = if overlap(band, (mine.0, 20), theirs) > 0.0 { -82.0 } else { -62.0 };
+            // Non-Wi-Fi noise (a microwave oven) can't be decoded: only energy detection, from −62 dBm.
+            let heard_from = if t.kind != Kind::Interference && overlap(band, (mine.0, 20), theirs) > 0.0 { -82.0 } else { -62.0 };
             if self.rssi_at(t, pos, floor, band) >= heard_from {
                 v.push((t.id, ov * self.busy_now(t, band, live)));
             }
         }
         v
+    }
+
+    /// Neighbours' radios `ap` hears on a band (from −82 dBm, where Wi-Fi waits for them) on a channel that passes `which`.
+    pub fn heard_on(&self, ap: &Device, band: Band, which: impl Fn(u16) -> bool) -> Vec<&Device> {
+        self.devices.iter().filter(|t| t.kind == Kind::Neighbor && !t.off && t.bands[band.i()] && which(self.channel(t, band)) && self.rssi_at(t, ap.pos, ap.floor, band) >= -82.0).collect()
     }
 
     /// Which end of a Wi-Fi link is the access point.
@@ -665,7 +1012,7 @@ impl Network {
                 continue;
             }
             let loss = self.path_loss(ap.pos, ap.floor, cl.pos, cl.floor, cl.mount - ap.mount, band);
-            let fade = if live { self.fade(l.id as u64, band, cl) } else { 0.0 };
+            let fade = if live { self.fade(l.id as u64, band, ap, cl, width) } else { 0.0 };
             // Directional antennas help (or hurt) at both ends of the link; sending is capped at the legal limit.
             let rssi = self.eirp(ap, cl.pos, band) + dir_gain(cl, ap.pos) + rx_gain + ap.cal_db - loss + fade;
             let up = self.eirp(cl, ap.pos, band) + dir_gain(ap, cl.pos) + rx_gain + ap.cal_db - loss + fade;
@@ -680,7 +1027,7 @@ impl Network {
                 let mut best = (0.0, width);
                 let mut w = 20;
                 while w <= width {
-                    let r = std.stream20(band.i()) * width_factor(w) * usable_streams(sig, streams) as f32 * rate_fraction(sig, w);
+                    let r = std.stream20(band.i()) * width_factor(w) * usable_streams(sig, streams) as f32 * rate_fraction(sig, w, std, band.i());
                     if r > best.0 {
                         best = (r, w);
                     }
@@ -713,7 +1060,58 @@ impl Network {
             let (a, b) = (alive[0], alive[1]);
             best = Some(Signal { mbps: a.mbps + b.mbps, up_mbps: a.up_mbps + b.up_mbps, phy: a.phy + b.phy, also: Some(b.band), ..a });
         }
+        if live && l.medium == Medium::WiFi {
+            best = self.hold_drop(l.id, best);
+        }
         best
+    }
+
+    /// A live link whose signal stays below the edge longer than the beacons last is dropped: the device must
+    /// find the access point again, authenticate and renew its address before anything flows.
+    fn hold_drop(&self, id: u32, best: Option<Signal>) -> Option<Signal> {
+        let alive = best.is_some_and(|s| s.alive());
+        let t = self.clock;
+        let mut m = self.link_down.borrow_mut();
+        let e = m.entry(id).or_insert((f64::NAN, f64::NEG_INFINITY));
+        // The clock went back (Simulate restarted): forget.
+        if e.1 - t > REJOIN_S + BEACON_LOSS_S || e.0 > t {
+            *e = (f64::NAN, f64::NEG_INFINITY);
+        }
+        if t < e.1 {
+            return best.map(|s| Signal { mbps: 0.0, up_mbps: 0.0, ..s });
+        }
+        if alive {
+            e.0 = f64::NAN;
+        } else if e.0.is_nan() {
+            e.0 = t;
+        } else if t - e.0 >= BEACON_LOSS_S {
+            *e = (f64::NAN, t + REJOIN_S);
+        }
+        best
+    }
+
+    /// How steady a link is, in a few words: dropouts, then packets lost, then frames resent.
+    pub fn steadiness(&self, l: &Link) -> Option<String> {
+        use crate::i18n::trf;
+        let st = self.stability(l)?;
+        if st.down >= 1.0 {
+            return None;
+        }
+        let resent = format!("{:.0}", st.retry * 100.0);
+        Some(if st.drops_h >= 1.0 {
+            trf("drops about {} times an hour · {}% of frames resent", &[&format!("{:.0}", st.drops_h), &resent])
+        } else if st.drops_h >= 0.04 {
+            trf("drops about once every {} hours · {}% of frames resent", &[&format!("{:.0}", 1.0 / st.drops_h), &resent])
+        } else if st.loss >= 0.002 {
+            trf("stays connected, but {}% of packets get lost", &[&format!("{:.1}", st.loss * 100.0)])
+        } else {
+            trf("steady · {}% of frames resent", &[&resent])
+        })
+    }
+
+    /// Whether a live Wi-Fi link is joining again after a dropout.
+    pub fn rejoining(&self, id: u32) -> bool {
+        self.live && self.link_down.borrow().get(&id).is_some_and(|e| self.clock < e.1)
     }
 
     /// What the cable itself carries (Mbit/s), whatever it's plugged into.
@@ -751,7 +1149,7 @@ impl Network {
             Medium::Powerline => {
                 // Old wiring, distance and other appliances: every house is different (seeded per link).
                 let wiring = 0.35 + 0.75 * crate::sim::unit(self.seed, l.id as u64, 0x9A);
-                let now = if self.live { 1.0 + 0.2 * crate::sim::wander(self.seed, l.id as u64 + 0x9B, self.clock, 4.0) } else { 1.0 };
+                let now = if self.live { (1.0 + 0.2 * crate::sim::wander(self.seed, l.id as u64 + 0x9B, self.clock, 4.0)) * self.appliance_noise(l) } else { 1.0 };
                 let close = crate::catalog::find_kit(&l.kit).map_or(300.0, |k| k.real_mbps);
                 (close * (-self.wiring_m(l) / 70.0).exp() * wiring * now * self.phase_factor(l)).min(self.negotiated(l) as f32 * 0.94)
             }
@@ -763,6 +1161,14 @@ impl Network {
         let rate = isp.map(|i| base.min(i.plan_mbps)).unwrap_or(base);
         // Smart queueing shapes the line a little below its speed so the queue stays in the router.
         if self.sqm_on(l) { rate * 0.92 } else { rate }
+    }
+
+    /// A noisy appliance on the wiring (vacuum cleaner, cheap charger, dimmer, washing machine motor) switched on
+    /// for a few minutes now and then: powerline loses most of its speed while it runs. Live only.
+    /// shortcut: a seeded on/off pattern (on about 15% of the minutes), not a model of the house's appliances.
+    fn appliance_noise(&self, l: &Link) -> f32 {
+        let minute = (self.clock / 60.0).floor() as u64;
+        if crate::sim::unit(self.seed, l.id as u64 + 0x9C, minute) < 0.15 { 0.4 } else { 1.0 }
     }
 
     /// Live swing of a mobile line (1 = its average).
@@ -829,7 +1235,7 @@ impl Network {
     }
 
     /// Radio hops along a path: chance a packet is lost after retries, mean extra delay waiting for
-    /// airtime (ms), and the weakest signal on the way.
+    /// airtime and resending (ms), and the weakest signal on the way.
     pub fn path_air(&self, path: &[u32]) -> (f32, f32, Option<f32>) {
         let mut ok = 1.0f32;
         let mut jitter = 0.0;
@@ -837,13 +1243,10 @@ impl Network {
         for w in path.windows(2) {
             let Some(l) = self.link_between(w[0], w[1]) else { continue };
             let Some(s) = self.link_signal(l) else { continue };
-            // Frame error rate from the margin above the weakest usable signal; Wi-Fi tries a frame up to 7 times.
-            let margin = s.rssi.min(s.up + 3.0) - sens(s.width);
-            // Hidden stations add collisions on top (each one that can't hear us ~3%).
-            let frame = (1.0 / (1.0 + ((margin - 4.0) / 1.3).exp()) + 0.03 * self.hidden(l).len() as f32).min(1.0);
-            let after_retries = frame.powi(7) + 0.01 * (s.contention - 1.0);
-            ok *= 1.0 - after_retries.clamp(0.0, 1.0);
-            jitter += 0.6 + 2.5 * (s.contention - 1.0) + 2.0 * frame;
+            let Some(st) = self.stability(l) else { continue };
+            ok *= 1.0 - st.loss;
+            // Each retry waits a little longer (back-off doubles); shared airtime makes everyone wait their turn.
+            jitter += 0.6 + 2.5 * (s.contention - 1.0) + 6.0 * st.retry;
             worst = Some(worst.map_or(s.rssi, |w: f32| w.min(s.rssi)));
         }
         (1.0 - ok, jitter, worst)
@@ -1020,7 +1423,7 @@ impl Network {
     }
 
     /// Whether `dev` gets its Wi-Fi through `via` (directly or further up a chain of extenders).
-    fn feeds_from(&self, dev: &Device, via: u32) -> bool {
+    pub(crate) fn feeds_from(&self, dev: &Device, via: u32) -> bool {
         let mut cur = self.upstream(dev);
         for _ in 0..8 {
             match cur {
@@ -1317,6 +1720,8 @@ mod tests {
         let e1 = n.add_device(Kind::Extender, [300.0, 0.0]);
         let e2 = n.add_device(Kind::Extender, [650.0, 0.0]);
         let ph = n.add_device(Kind::Phone, [690.0, 0.0]);
+        // A concrete wall between the two extenders makes that hop the slow one.
+        n.walls.push(Wall { id: 1, a: [450.0, -2000.0], b: [450.0, 2000.0], kind: WallKind::Concrete, floor: 0 });
         n.connect(inet, r, Medium::Fiber).unwrap();
         let ids: Vec<u32> = [(r, e1), (e1, e2), (e2, ph)].iter().map(|(a, b)| n.connect(*a, *b, Medium::WiFi).unwrap()).collect();
         let rates: Vec<f32> = ids.iter().map(|id| n.link_rate(n.links.iter().find(|l| l.id == *id).unwrap())).collect();
@@ -1332,7 +1737,8 @@ mod tests {
         let mut n = Network::default();
         let link = pair(&mut n, 300.0);
         let open = n.link_signal(&link).unwrap();
-        n.walls.push(Wall { id: 99, a: [150.0, -100.0], b: [150.0, 100.0], kind: WallKind::Concrete, floor: 0 });
+        // A wall across the whole house: nothing to bend around.
+        n.walls.push(Wall { id: 99, a: [150.0, -2000.0], b: [150.0, 2000.0], kind: WallKind::Concrete, floor: 0 });
         let walled = n.link_signal(&link).unwrap();
         assert!(walled.mbps < open.mbps / 2.0, "{open:?} {walled:?}");
         assert_eq!(walled.walls, 1);
@@ -1481,7 +1887,8 @@ mod tests {
         n.walls.push(Wall { id: 1, a: [100.0, -400.0], b: [100.0, 400.0], kind: WallKind::Brick, floor: 0 });
         let straight = n.wall_loss([0.0, 0.0], 0, [200.0, 0.0], 0, Band::B5).0;
         let slant = n.wall_loss([0.0, 0.0], 0, [200.0, 400.0], 0, Band::B5).0;
-        assert!(straight == 14.0 && slant > 20.0 && slant <= 28.0, "{straight} {slant}");
+        // At a slant the wave bends towards the wall's normal inside it: a little longer, plus some reflection.
+        assert!(straight == 13.0 && slant > 14.0 && slant < 18.0, "{straight} {slant}");
         // Every further concrete slab costs less than the first one.
         let pl = |f: i8| n.path_loss([0.0, 0.0], 0, [0.0, 0.0], f, 0.0, Band::B5);
         assert!(pl(2) - pl(1) < pl(1) - pl(0) - 5.0, "{} {} {}", pl(0), pl(1), pl(2));
@@ -1496,7 +1903,7 @@ mod tests {
         assert!(near.streams == 2 && near.up_mbps < near.mbps * 1.01, "{near:?}");
         // A phone far away: one stream, a narrow part of the channel, and its weaker radio uploads slower.
         n.dev_mut(link.b).unwrap().pos = [800.0, 0.0];
-        n.walls.push(Wall { id: 50, a: [400.0, -100.0], b: [400.0, 100.0], kind: WallKind::Concrete, floor: 0 });
+        n.walls.push(Wall { id: 50, a: [400.0, -2000.0], b: [400.0, 2000.0], kind: WallKind::Concrete, floor: 0 });
         let far = n.signal(&link, false).unwrap();
         assert!(far.alive() && far.streams == 1 && far.up_mbps < far.mbps / 2.0, "{far:?}");
         assert!(mac_eff(10.0) < 0.5 && mac_eff(1200.0) == 0.7);
@@ -1522,9 +1929,9 @@ mod tests {
         assert!(n.contention(n.dev(link.a).unwrap(), Band::B5).0 > 1.1);
         // A neighbour behind the phone that the access point can't hear still slows the phone down.
         n.dev_mut(nb).unwrap().ch[1] = 36;
-        n.dev_mut(nb).unwrap().pos = [300.0, 600.0];
-        n.walls.push(Wall { id: 7, a: [-50.0, 60.0], b: [120.0, 60.0], kind: WallKind::Metal, floor: 0 });
-        n.dev_mut(link.b).unwrap().pos = [300.0, 0.0];
+        n.dev_mut(nb).unwrap().pos = [1500.0, 0.0];
+        n.dev_mut(nb).unwrap().tx[1] = 5.0;
+        n.dev_mut(link.b).unwrap().pos = [500.0, 0.0];
         let s = n.signal(&link, false).unwrap();
         assert!(n.contention(n.dev(link.a).unwrap(), Band::B5).0 < 1.01 && s.contention > base + 0.1, "{s:?}");
     }
@@ -1590,8 +1997,95 @@ mod tests {
         let phone = n.devices.iter().find(|d| d.kind == Kind::Phone).unwrap().id;
         let start_ap = n.wifi_ends(n.wifi_link_of(phone).unwrap()).unwrap().0.id;
         let far = n.devices.iter().find(|d| d.kind == Kind::AccessPoint).unwrap().pos;
-        n.dev_mut(phone).unwrap().pos = [far[0] - 20.0, far[1] + 40.0];
+        // Right next to the far access point. The router still reaches −68 dBm through the opening beside the
+        // concrete wall, so a typical phone hangs on; with 802.11k/v it's nudged across.
+        n.dev_mut(phone).unwrap().pos = [far[0] - 20.0, far[1]];
+        n.dev_mut(phone).unwrap().roam_at = -72;
+        assert!(n.roam_step(phone).is_none(), "sticky without 802.11k/v");
+        n.devices.iter_mut().filter(|d| d.kind.radio()).for_each(|d| d.fast_roam = true);
         let r = n.roam_step(phone).expect("should hand over");
         assert_ne!(r.to, start_ap);
+    }
+
+    #[test]
+    fn signals_bend_round_wall_ends_and_corners_but_not_through_joints() {
+        let w = |a: [f32; 2], b: [f32; 2]| Wall { id: 0, a, b, kind: WallKind::Brick, floor: 0 };
+        // A wall drawn as two pieces in a straight line: its ends bend, the joint doesn't.
+        assert_eq!(wall_edges(&[w([0.0, 0.0], [100.0, 0.0]), w([100.0, 0.0], [200.0, 0.0])]).len(), 2);
+        // An L: two free ends and the outside of the corner.
+        let l = wall_edges(&[w([0.0, 0.0], [100.0, 0.0]), w([100.0, 0.0], [100.0, 100.0])]);
+        assert_eq!(l.len(), 3);
+        let c = l.iter().find(|e| e.at == [100.0, 0.0]).unwrap();
+        assert!(c.open[0] > 100.0 && c.open[1] < 0.0, "outside the corner: {c:?}");
+        // A T: only the three free ends.
+        assert_eq!(wall_edges(&[w([0.0, 0.0], [200.0, 0.0]), w([100.0, 0.0], [100.0, 100.0])]).len(), 3);
+    }
+
+    #[test]
+    fn a_doorway_lets_signal_round_the_corner_smoothly() {
+        // Router in a room; a concrete wall with a 1 m door gap; a phone behind the wall, off to the side.
+        let mut n = Network::default();
+        let r = [0.0, 0.0];
+        let wall = |n: &mut Network, a, b| n.walls.push(Wall { id: n.walls.len() as u32, a, b, kind: WallKind::Concrete, floor: 0 });
+        wall(&mut n, [100.0, -2000.0], [100.0, 0.0]);
+        wall(&mut n, [100.0, 20.0], [100.0, 2000.0]);
+        let behind = [200.0, 100.0];
+        let through = 22.0 * (dist(r, behind) / PX_PER_M).log10() + 20.0 * 5500f32.log10() - 28.0 + WallKind::Concrete.loss()[1];
+        let got = n.path_loss(r, 0, behind, 0, 0.0, Band::B5);
+        assert!(got < through - 3.0, "round the door frame beats 23 dB of concrete: {got} vs {through}");
+        assert!(got > dist_loss(Band::B5, dist(r, behind) / PX_PER_M) + 6.0, "but it's no open door: {got}");
+        // Walking past the door: no sudden jumps.
+        let mut last = None;
+        for i in 0..80 {
+            let p = [300.0, -100.0 + i as f32 * 5.0];
+            let l = n.path_loss(r, 0, p, 0, 0.0, Band::B5);
+            if let Some(o) = last {
+                assert!((l - o as f32).abs() < 3.5, "jump at {p:?}: {o} → {l}");
+            }
+            last = Some(l);
+        }
+        // Lower frequencies bend more easily.
+        let lit = |b| n.path_loss(r, 0, behind, 0, 0.0, b) - dist_loss(b, dist(r, behind) / PX_PER_M);
+        assert!(lit(Band::B24) < lit(Band::B5));
+    }
+
+    #[test]
+    fn far_links_drop_now_and_then_and_live_ones_rejoin_after_a_pause() {
+        let mut n = Network::default();
+        let ap = n.add_device(Kind::HomeRouter, [0.0, 0.0]);
+        let near = n.add_device(Kind::Phone, [100.0, 0.0]);
+        let far = n.add_device(Kind::Phone, [3600.0, 0.0]);
+        n.walls.push(Wall { id: 1, a: [50.0, -3000.0], b: [50.0, 3000.0], kind: WallKind::Brick, floor: 0 });
+        let link = |n: &mut Network, d| {
+            let id = n.connect(ap, d, Medium::WiFi).unwrap();
+            n.links.iter().find(|l| l.id == id).unwrap().clone()
+        };
+        let (ln, lf) = (link(&mut n, near), link(&mut n, far));
+        let (sn, sf) = (n.stability(&ln).unwrap(), n.stability(&lf).unwrap());
+        // A phone in the next room: steady, and resending about as much as a healthy home does. One at the far end
+        // of the garden drops now and then.
+        assert!(sn.drops_h < 0.01 && sn.loss < 0.001 && (0.08..0.35).contains(&sn.retry), "{sn:?}");
+        assert!(sf.drops_h >= 1.0 && sf.retry > sn.retry && sf.loss > sn.loss, "{sf:?}");
+        // An hour of Simulate: the far phone drops about as often as predicted, and each time stays off while it
+        // joins again.
+        n.live = true;
+        let (mut drops, mut was, mut since) = (0, false, 0.0);
+        let step = 0.25;
+        for t in 0..(3600.0 / step) as usize {
+            n.clock = t as f64 * step;
+            let _ = n.signal(&lf, true);
+            let now = n.rejoining(lf.id);
+            if now && !was {
+                drops += 1;
+                since = n.clock;
+            }
+            if !now && was {
+                assert!(n.clock - since >= REJOIN_S - step, "rejoined too fast");
+            }
+            was = now;
+        }
+        let want = sf.drops_h;
+        assert!((drops as f32) > want / 4.0 && (drops as f32) < want * 4.0 + 2.0, "{drops} drops in an hour, predicted {want}");
+        assert!(!n.rejoining(ln.id));
     }
 }

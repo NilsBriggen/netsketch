@@ -6,27 +6,43 @@
     {"name": "Bedroom desk", "floor": 0, "time": "2026-11-04T10:00:00Z", "scans": 3,
      "networks": [
       {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c0", "freq": 2412, "channel": 1, "width": 20, "rssi": -47.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
-      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -58.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
-      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -56.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42},
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -58.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6", "rssi_min": -61.00, "rssi_max": -56.00, "k": true, "v": true, "r": true, "ftm": true, "streams": 2, "country": "CH"},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -56.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42, "wps": true, "streams": 4, "country": "CH"},
       {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:34", "freq": 5220, "channel": 44, "width": 80, "rssi": -69.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 2, "utilization": 0.18},
       {"ssid": "Cafe \"Corner\"", "bssid": "02:11:22:33:44:55", "freq": 2462, "channel": 11, "width": 20, "rssi": -84.00, "security": "Open", "standard": "Wi-Fi 4"}
      ]},
     {"name": "Sofa", "floor": 0, "time": "2026-11-04T10:01:00Z", "scans": 3,
-     "connected": {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "rssi": -41.00, "link_mbps": 864.00, "freq": 5180},
+     "connected": {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "rssi": -41.00, "link_mbps": 864.00, "freq": 5180, "tx_mbps": 780.00, "rx_mbps": 650.00, "max_mbps": 1201.00, "standard": "Wi-Fi 6"},
      "speed": {"down_mbps": 312.50, "latency_ms": 14.20, "up_mbps": 48.50, "jitter_ms": 2.10},
+     "ping": {"avg_ms": 4.50, "jitter_ms": 3.33, "loss_pct": 20.00, "max_ms": 9.00},
      "networks": [
       {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c0", "freq": 2412, "channel": 1, "width": 20, "rssi": -35.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
-      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -41.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
-      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -64.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42},
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -41.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6", "rssi_min": -44.00, "rssi_max": -39.00, "k": true, "v": true, "r": true, "ftm": true, "streams": 2, "country": "CH", "distance_m": 3.40},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -64.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42, "wps": true, "streams": 4, "country": "CH"},
       {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:34", "freq": 5220, "channel": 44, "width": 80, "rssi": -80.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 2, "utilization": 0.18},
       {"ssid": "", "bssid": "8e:00:11:22:33:44", "freq": 2437, "channel": 6, "width": 20, "rssi": -78.00, "security": "WPA2", "standard": ""}
      ]},
     {"name": "Hall", "floor": 0, "time": "2026-11-04T10:02:00Z", "scans": 3,
      "networks": [
       {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c0", "freq": 2412, "channel": 1, "width": 20, "rssi": -21.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
-      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -24.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6"},
-      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -68.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42},
+      {"ssid": "HomeNet", "bssid": "d4:5d:64:aa:bb:c4", "freq": 5180, "channel": 36, "width": 80, "rssi": -24.00, "security": "WPA2/WPA3", "standard": "Wi-Fi 6", "rssi_min": -27.00, "rssi_max": -22.00, "k": true, "v": true, "r": true, "ftm": true, "streams": 2, "country": "CH"},
+      {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:30", "freq": 2437, "channel": 6, "width": 20, "rssi": -68.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 5, "utilization": 0.42, "wps": true, "streams": 4, "country": "CH"},
       {"ssid": "Flat-3B", "bssid": "3c:a6:2f:11:22:34", "freq": 5220, "channel": 44, "width": 80, "rssi": -86.00, "security": "WPA2", "standard": "Wi-Fi 6", "stations": 2, "utilization": 0.18}
      ]}
+  ],
+  "watch": {"start": "2026-11-04T09:00:00Z", "end": "2026-11-04T10:00:00Z", "samples": 3600, "events": [
+    {"time": "2026-11-04T09:05:10Z", "kind": "channel", "bssid": "d4:5d:64:aa:bb:c4", "ssid": "HomeNet", "from": "36", "to": "44", "value": -48.00, "note": "5 GHz"},
+    {"time": "2026-11-04T09:12:00Z", "kind": "roam", "bssid": "d4:5d:64:aa:bb:c0", "ssid": "HomeNet", "from": "d4:5d:64:aa:bb:c4", "to": "d4:5d:64:aa:bb:c0", "value": -52.00, "note": ""},
+    {"time": "2026-11-04T09:20:30Z", "kind": "drop", "bssid": "d4:5d:64:aa:bb:c0", "ssid": "HomeNet", "from": "", "to": "", "value": 12.00, "note": ""},
+    {"time": "2026-11-04T09:31:00Z", "kind": "spike", "bssid": "d4:5d:64:aa:bb:c4", "ssid": "HomeNet", "from": "", "to": "", "value": 340.00, "note": ""},
+    {"time": "2026-11-04T09:40:00Z", "kind": "loss", "bssid": "d4:5d:64:aa:bb:c4", "ssid": "HomeNet", "from": "", "to": "", "value": 40.00, "note": ""},
+    {"time": "2026-11-04T09:50:00Z", "kind": "dip", "bssid": "d4:5d:64:aa:bb:c4", "ssid": "HomeNet", "from": "", "to": "", "value": -83.00, "note": ""}
+  ]},
+  "findings": [
+    {"level": "warning", "text": "Wi-Fi dropped once while watching, for 12 s.", "bssid": "", "key": "drops"}
+  ],
+  "lan": [
+    {"ip": "192.168.1.1", "name": "FRITZ!Box 7590", "kind": "Router", "vendor": "AVM", "model": "FRITZ!Box 7590"},
+    {"ip": "192.168.1.40", "name": "Office printer", "kind": "Printer", "vendor": "", "model": ""}
   ]
 }

@@ -191,11 +191,13 @@ struct Settings {
     quiz: u64,
     /// Index into i18n::LANGUAGES.
     lang: usize,
+    /// Traffic drawn as dots moving along the cables in Simulate.
+    flow: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, zoom: 1.0, quiz: 0, lang: 0 }
+        Settings { theme: 0, zoom: 1.0, quiz: 0, lang: 0, flow: true }
     }
 }
 
@@ -436,6 +438,8 @@ struct App {
     /// Spanning tree as of the last refresh (it's costly to work out on big plans every frame).
     stp_cache: Option<crate::stp::Stp>,
     load_cache: Option<extras::Load>,
+    /// The same as a long-run average, for the hover tag while traffic comes and goes.
+    avg_cache: Option<extras::Load>,
     /// Wi-Fi map cells in map coordinates, with what they were computed for and when.
     /// (storey, cell size, band), the area covered in cells, the cells, when it was checked, and a fingerprint of the radios and walls.
     heat_cache: Option<((i8, i32, usize), [i32; 4], Vec<(Rect, Color32)>, f64, u64)>,
@@ -443,6 +447,8 @@ struct App {
     heat_band: usize,
     /// Outdoor areas' coverage on the shown storey, and when it was worked out.
     outdoor_cache: Option<(f64, Vec<(u32, plan::Coverage)>)>,
+    /// The day's load chart (time computed, every half hour: internet line, busiest link), refreshed once a second.
+    day_cache: Option<(f64, Vec<(f32, f32)>)>,
     /// Coverage score of the shown storey (storey, when computed, score).
     cov_cache: Option<(i8, f64, Option<plan::Coverage>)>,
     /// Suggested spot for one more access point: storey, position, good share before → after.
@@ -536,10 +542,12 @@ impl App {
             e2e: HashMap::new(),
             stp_cache: None,
             load_cache: None,
+            avg_cache: None,
             heat_cache: None,
             heat_band: 0,
             cov_cache: None,
             outdoor_cache: None,
+            day_cache: None,
             ap_hint: None,
             redo: vec![],
             snap: true,
@@ -1221,6 +1229,38 @@ impl App {
             } else {
                 painter.line(pts.clone(), Stroke::new(w, col));
             }
+            // Traffic moving along the link, one stream per direction. Spacing, size and speed follow the Mbit/s on a
+            // log scale (0.3 Mbit/s: a dot now and then; 500: a fast, thick stream), so one-sided traffic looks one-sided.
+            if let Some((to_a, to_b)) = load.as_ref().and_then(|ld| ld.per_link.get(&l.id)).filter(|_| self.settings.flow && !standby && !storm) {
+                let (u, w) = load.as_ref().map_or((0.0, 0.0), |ld| (self.net.utilisation(ld, l.id), self.net.wanted(ld, l.id)));
+                // Red: the apps want more than it carries; amber: nearly full.
+                let c = if w > 1.02 { pal().red } else if u > 0.8 { pal().amber } else { pal().accent };
+                let lens: Vec<f32> = pts.windows(2).map(|w| (w[1] - w[0]).length()).collect();
+                let total: f32 = lens.iter().sum();
+                let (zz, t) = (z.max(0.6), ui.input(|i| i.time) as f32);
+                for (mbps, forward) in [(*to_b, true), (*to_a, false)] {
+                    if mbps < 0.05 || total < 1.0 {
+                        continue;
+                    }
+                    let lg = (1.0 + mbps).log10();
+                    let gap = (90.0 / (1.0 + mbps).powf(0.45)).clamp(5.0, 120.0) * zz;
+                    let speed = (25.0 + 25.0 * lg) * zz;
+                    let r = (1.3 + 0.7 * lg).min(3.6) * zz;
+                    let mut d = (t * speed).rem_euclid(gap);
+                    while d < total {
+                        let (mut rest, mut i) = (if forward { d } else { total - d }, 0);
+                        while i + 1 < lens.len() && rest > lens[i] {
+                            rest -= lens[i];
+                            i += 1;
+                        }
+                        let dir = (pts[i + 1] - pts[i]) / lens[i].max(0.01);
+                        let side = if forward { 1.0 } else { -1.0 };
+                        painter.circle_filled(pts[i] + dir * rest + dir.rot90() * side * (1.0 * zz + r), r, c);
+                        d += gap;
+                    }
+                }
+                ui.ctx().request_repaint();
+            }
             let k = (pts.len() - 1) / 2;
             let m = pts[k] + (pts[k + 1] - pts[k]) * 0.5;
             if standby || storm {
@@ -1239,12 +1279,37 @@ impl App {
                 painter.galley(r.min + vec2(5.0, 2.0), g, c);
             } else if let Some(u) = load.as_ref().map(|ld| self.net.utilisation(ld, l.id)).filter(|u| *u > 0.5 && sig.is_none() && !(selected || near)) {
                 let c = if u > 1.0 { pal().red } else if u > 0.8 { pal().amber } else { pal().dim };
-                painter.text(m, Align2::CENTER_CENTER, trf("{}% busy", &[&format!("{:.0}", u * 100.0)]), FontId::proportional(10.0 * z.max(0.8)), c);
+                // On a background: a busy link's dots would hide it.
+                let g = painter.layout_no_wrap(trf("{}% busy", &[&format!("{:.0}", u * 100.0)]), FontId::proportional(10.0 * z.max(0.8)), c);
+                let r = Rect::from_center_size(m, g.size() + vec2(8.0, 2.0));
+                painter.rect_filled(r, 5, pal().bg);
+                painter.galley(r.min + vec2(4.0, 1.0), g, c);
             }
             if selected || near {
                 let mut txt = format!("{} · {} m · ≈ {:.0} Mbit/s", l.medium.label(), self.net.link_len(l), self.net.link_rate(l));
                 if let Some(s) = sig {
                     txt = trf("Wi-Fi {} dBm on {} · {} wall(s) · ≈ {} Mbit/s", &[&format!("{:.0}", s.rssi), &s.band.label(), &s.walls, &format!("{:.0}", s.mbps)]);
+                    txt += "\n";
+                    txt += &if self.net.rejoining(l.id) { tr("Lost the access point: joining again…").to_string() } else { self.net.steadiness(l).unwrap_or_default() };
+                }
+                if let Some(ld) = load.as_ref() {
+                    let (a, b) = ld.per_link.get(&l.id).copied().unwrap_or_default();
+                    let mbps = |x: f32| if x < 10.0 { format!("{x:.1}") } else { format!("{x:.0}") };
+                    let (u, w) = (self.net.utilisation(ld, l.id), self.net.wanted(ld, l.id));
+                    txt += "\n";
+                    txt += &if a + b < 0.01 {
+                        tr("Now: no app traffic").to_string()
+                    } else {
+                        trf("Now {} Mbit/s to {}, {} to {} · {}% full", &[&mbps(b), &self.net.name(l.b), &mbps(a), &self.net.name(l.a), &format!("{:.0}", u * 100.0)])
+                    };
+                    if w > u + 0.02 {
+                        txt += &trf(" · the apps want {}%", &[&format!("{:.0}", w * 100.0)]);
+                    }
+                    // While traffic comes and goes, the long-run average too.
+                    if let Some((a, b)) = self.avg_cache.as_ref().filter(|_| self.net.live && (!self.net.custom_traffic || self.net.custom_bursty)).map(|av| av.per_link.get(&l.id).copied().unwrap_or_default()) {
+                        txt += "\n";
+                        txt += &trf("On average {} Mbit/s to {}, {} to {}", &[&mbps(b), &self.net.name(l.b), &mbps(a), &self.net.name(l.a)]);
+                    }
                 }
                 let g = painter.layout_no_wrap(txt, FontId::proportional(11.5), pal().text);
                 let r = Rect::from_center_size(m, g.size() + vec2(12.0, 6.0));
@@ -1710,7 +1775,7 @@ impl App {
     /// A section whose explanation sits behind an info icon instead of filling the panel.
     fn section_hint(ui: &mut egui::Ui, title: &str, hint: &str) -> bool {
         // The essentials start open; details start folded away.
-        const OPEN: &[&str] = &["Measured here", "Real measurements", "Joined network", "Addresses", "Internet plan", "Wi-Fi hardware", "Their Wi-Fi", "Speaker mesh radio", "What it is", "Bands", "Material", "Type", "Length", "Ports", "How it performs", "At a glance", "Wi-Fi coverage", "Connected devices", "Channels", "Overlaps with", "Networks in the air here", "Try it", "About this setup", "How to"];
+        const OPEN: &[&str] = &["Measured here", "Real measurements", "Joined network", "Test load", "Addresses", "Internet plan", "Wi-Fi hardware", "Their Wi-Fi", "Speaker mesh radio", "What it is", "Bands", "Material", "Type", "Length", "Ports", "How it performs", "At a glance", "Wi-Fi coverage", "Connected devices", "Channels", "Overlaps with", "Networks in the air here", "Try it", "About this setup", "How to"];
         let id = Id::new(("section", title));
         let mut open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(id, OPEN.contains(&title)));
         ui.add(egui::Separator::default().spacing(6.0));
@@ -2227,6 +2292,7 @@ impl App {
         };
         Self::header(ui, kind_icon(d.kind), kind_color(d.kind), &d.name, &sub);
         self.power_toggle(ui, id);
+        self.apps_picker(ui, id);
         let d = self.net.dev(id).unwrap();
         ui.add_space(4.0);
         // Only the apps this kind of device really has.
@@ -3058,7 +3124,14 @@ impl eframe::App for App {
         if due && (key == 0 || key != self.issues_key || self.issues.is_none()) {
             self.issues_key = key;
             self.issues = Some(self.net.check());
-            self.load_cache = (self.mode == Mode::Simulate).then(|| self.net.loads());
+            // Traffic right now comes and goes with live variation; the problem list above stays on averages.
+            self.load_cache = (self.mode == Mode::Simulate).then(|| {
+                self.net.live = live;
+                let now = self.net.loads_now();
+                self.net.live = false;
+                now
+            });
+            self.avg_cache = (self.mode == Mode::Simulate).then(|| self.net.loads());
             let stp = self.net.stp();
             self.stp_cache = Some(stp.clone());
             self.e2e = self.net.devices.iter().filter(|d| d.kind.is_host() && !d.off).filter_map(|d| Some((d.id, self.net.internet_rate(d.id, &stp)?))).collect();

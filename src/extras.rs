@@ -78,100 +78,379 @@ pub fn default_uses(kind: Kind) -> Vec<Use> {
     }
 }
 
-/// Busy-hour traffic on every link.
+/// A capacity traffic shares: one direction of a cable (`TO_A`/`TO_B`), both directions of a half-duplex link
+/// (`BOTH`: powerline, speaker mesh), or the airtime of one radio channel (`AIR` + band): an access point and every
+/// device on it take turns, and a single-radio repeater shares its upstream's channel.
+pub type Res = (u32, u8);
+const TO_A: u8 = 0;
+const TO_B: u8 = 1;
+const BOTH: u8 = 2;
+const AIR: u8 = 3;
+
+/// Everyone's traffic on every link, after sharing.
 #[derive(Default, Debug)]
 pub struct Load {
-    /// Per link: (towards the device, away from it) summed — kept per direction for full-duplex cables.
+    /// Per link: what gets through (towards its end `a`, towards its end `b`), Mbit/s.
     pub per_link: HashMap<u32, (f32, f32)>,
     /// Who causes load on each link.
     pub who: HashMap<u32, Vec<u32>>,
-    /// The same per link and QoS priority of the device that causes it.
-    pub per_class: HashMap<(u32, Qos), (f32, f32)>,
+    /// Per device and demand (index into `demands`): Mbit/s a transfer that grabs what it can got towards the device.
+    pub got: HashMap<(u32, usize), f32>,
+    /// What each link draws on: (capacity, its size, cost of one Mbit/s towards a, towards b).
+    res: HashMap<u32, Vec<(Res, f32, f32, f32)>>,
+    cap: HashMap<Res, f32>,
+    /// Used per capacity and priority, and how many transfers share it.
+    used: HashMap<(Res, Qos), f32>,
+    count: HashMap<(Res, Qos), u32>,
+    /// What apps ask of each capacity (a transfer that grabs what it can counts what it got).
+    wanted: HashMap<Res, f32>,
+}
+
+impl Load {
+    /// The fullest of the capacities a link draws on, by `of`.
+    fn fullest(&self, link: u32, of: impl Fn(Res) -> f32) -> f32 {
+        self.res.get(&link).map_or(0.0, |v| v.iter().map(|x| of(x.0) / x.1.max(1e-3)).fold(0.0, f32::max))
+    }
+    fn used_upto(&self, r: Res, q: Qos) -> f32 {
+        Qos::ALL.iter().filter(|c| **c <= q).filter_map(|c| self.used.get(&(r, *c))).sum()
+    }
+}
+
+/// The traffic model's memory, not saved: each radio channel's airtime from the last sharing (so Wi-Fi contention
+/// follows what was really sent) and what each app got while busy (so a burst on a slow way lasts longer, as a
+/// page or a video buffer really takes longer to fill).
+#[derive(Clone, Default, Debug)]
+pub struct TrafficMemory {
+    pub air: HashMap<(u32, usize), f32>,
+    pub got: HashMap<(u32, usize), f32>,
+}
+
+/// What one direction of a transfer asks for: a steady rate, or as much as it can get (TCP filling the way), at most so much.
+#[derive(Clone, Copy, Debug)]
+enum Want {
+    Fixed(f32),
+    Grab(f32),
+}
+
+/// One direction of one app's transfer while sharing.
+struct Ask {
+    dev: u32,
+    idx: usize,
+    to_dev: bool,
+    q: Qos,
+    cap: f32,
+    grab: bool,
+    res: Vec<(Res, f32)>,
+    links: Vec<(u32, bool)>,
 }
 
 impl Network {
-    /// Where a device's app traffic goes: the internet, or a NAS/server in the house for backups and cameras.
-    fn target(&self, u: Use) -> Option<Ipv4Addr> {
+    /// Where a device's app traffic goes: the internet, or a NAS/server in the house for backups and cameras
+    /// (the NAS's own backup goes to the cloud).
+    fn target(&self, from: u32, u: Use) -> Option<Ipv4Addr> {
         if u.local() {
-            if let Some(ip) = self.devices.iter().find(|d| matches!(d.kind, Kind::Nas | Kind::Server)).and_then(|d| d.first_ip()) {
+            if let Some(ip) = self.devices.iter().find(|d| d.id != from && matches!(d.kind, Kind::Nas | Kind::Server)).and_then(|d| d.first_ip()) {
                 return Some(ip);
             }
         }
         self.devices.iter().any(|d| d.kind == Kind::Internet).then(|| crate::net::site_ip(0))
     }
 
-    /// Adds up everyone's apps along their real paths.
+    /// Where a device's own custom load goes: the device picked for it, else the internet.
+    fn own_target(&self, d: &Device) -> Option<Ipv4Addr> {
+        match self.dev(d.test_to).filter(|t| t.id != d.id).and_then(|t| t.first_ip()) {
+            Some(ip) => Some(ip),
+            None => self.target(d.id, Use::Browsing),
+        }
+    }
+
+    /// The apps a device runs in the current traffic mode: its everyday ones, or the custom test load.
+    pub fn apps<'a>(&self, d: &'a Device) -> &'a [Use] {
+        if self.custom_traffic { &d.test_uses } else { &d.uses }
+    }
+
+    /// What a device asks of the network now: per app (None = its own custom load), how active it is and the
+    /// average Mbit/s (down, up) it wants.
+    pub fn demands(&self, d: &Device) -> Vec<(Option<Use>, f32, f32, f32)> {
+        let mut v: Vec<_> = self.apps(d).iter().map(|u| (Some(*u), self.activity(*u), u.demand().0 * self.activity(*u), u.demand().1 * self.activity(*u))).collect();
+        if self.custom_traffic && d.test_mbps.iter().any(|x| *x > 0.0) {
+            v.push((None, 1.0, d.test_mbps[0], d.test_mbps[1]));
+        }
+        v
+    }
+
+    /// How active an app is now: a custom test load runs at full rate; everyday apps follow their curve over
+    /// the day, times how busy the household is.
+    pub fn activity(&self, u: Use) -> f32 {
+        if self.custom_traffic { 1.0 } else { crate::more::activity(u, self.hour) * self.traffic }
+    }
+
+    /// The day at a glance, every half hour: how much the apps ask of the internet line and of the busiest cable
+    /// or Wi-Fi (1.0 = all it carries; above that they get less than they want).
+    pub fn day_load(&self) -> Vec<(f32, f32)> {
+        let mut n = self.clone();
+        n.live = false;
+        let line: Vec<u32> = n.links.iter().filter(|l| [l.a, l.b].iter().any(|x| n.dev(*x).is_some_and(|d| d.kind == Kind::Internet))).map(|l| l.id).collect();
+        (0..48)
+            .map(|i| {
+                n.hour = i as f32 * 0.5;
+                let ld = n.loads();
+                let links = n.links.iter().map(|l| n.wanted(&ld, l.id));
+                let air = n.devices.iter().filter(|d| d.kind.radio()).map(|d| n.airtime(&ld, d.id));
+                (line.iter().map(|l| n.wanted(&ld, *l)).fold(0.0, f32::max), links.chain(air).fold(0.0, f32::max))
+            })
+            .collect()
+    }
+
+    /// Everyone's apps shared out over the network as long-run averages: what plans, warnings and the chart use.
     pub fn loads(&self) -> Load {
+        self.settle(false)
+    }
+
+    /// The same right now, in Simulate with live variation: pages load on clicks, videos fetch in chunks, calls
+    /// jitter. A custom test load stays steady unless `custom_bursty`.
+    pub fn loads_now(&self) -> Load {
+        self.settle(self.live && (!self.custom_traffic || self.custom_bursty))
+    }
+
+    /// Shares twice: the second round's Wi-Fi contention follows the airtime the first round really used.
+    fn settle(&self, live: bool) -> Load {
+        self.memory.borrow_mut().air.clear();
+        let first = self.share(live);
+        let air: HashMap<(u32, usize), f32> = first.cap.keys().filter(|r| r.1 >= AIR).map(|r| ((r.0, (r.1 - AIR) as usize), first.used_upto(*r, Qos::Low))).collect();
+        self.memory.borrow_mut().air = air;
+        let out = self.share(live);
+        if live {
+            self.memory.borrow_mut().got.extend(out.got.iter().map(|(k, v)| (*k, *v)));
+        }
+        out
+    }
+
+    /// What a link draws on: (capacity, its size, cost of one Mbit/s towards a, towards b).
+    fn link_res(&self, l: &crate::net::Link) -> Vec<(Res, f32, f32, f32)> {
+        if l.medium == Medium::WiFi {
+            if let (Some((ap, cl)), Some(s)) = (self.wifi_ends(l), self.link_signal(l)) {
+                // Airtime: a Mbit/s sent costs 1/rate of the channel's time, at the rate of the direction it goes.
+                let (to_cl, to_ap) = (1.0 / s.mbps.max(0.01), 1.0 / s.up_mbps.max(0.01));
+                let r = (self.chan_src(ap).id, AIR + s.band.i() as u8);
+                return vec![if l.a == cl.id { (r, 1.0, to_cl, to_ap) } else { (r, 1.0, to_ap, to_cl) }];
+            }
+        }
+        let rate = self.link_rate(l);
+        if matches!(l.medium, Medium::Mesh | Medium::Powerline | Medium::WiFi) {
+            return vec![((l.id, BOTH), rate, 1.0, 1.0)];
+        }
+        // Full duplex; towards the internet only the plan's upload speed (a mobile line: about a sixth of its download).
+        let up = |end: u32| {
+            self.dev(end).filter(|d| d.kind == Kind::Internet).map(|i| match l.medium {
+                Medium::Cellular => rate / 6.0,
+                _ => ((if i.plan_up_mbps > 0.0 { i.plan_up_mbps } else { i.plan_mbps }) * if self.sqm_on(l) { 0.92 } else { 1.0 }).min(rate),
+            })
+        };
+        vec![((l.id, TO_A), up(l.a).unwrap_or(rate), 1.0, 0.0), ((l.id, TO_B), up(l.b).unwrap_or(rate), 0.0, 1.0)]
+    }
+
+    /// Shares the capacities out: every transfer gets the same Mbit/s until a capacity on its way is full or it has
+    /// what it wants (max-min fairness, which TCP roughly reaches), high priority first, then normal, then low.
+    /// shortcut: TCP really favours short round trips a little; that's left out.
+    fn share(&self, live: bool) -> Load {
         let mut out = Load::default();
-        // (device, app, how active, path, goes out to the internet)
-        let mut flows = vec![];
-        for d in self.devices.iter().filter(|d| !d.uses.is_empty() && !d.off) {
+        let mut asks: Vec<Ask> = vec![];
+        let got = self.memory.borrow().got.clone();
+        for d in self.devices.iter().filter(|d| !d.off) {
             let Some(src) = d.first_ip() else { continue };
-            for u in &d.uses {
-                let act = crate::more::activity(*u, self.hour);
-                if act < 0.01 {
+            for (idx, (u, act, down, up)) in self.demands(d).into_iter().enumerate() {
+                let dst = match u {
+                    Some(u) => self.target(d.id, u),
+                    None => self.own_target(d),
+                };
+                let Some(dst) = dst.filter(|_| act >= 0.01 && down + up >= 0.001) else { continue };
+                let t = self.send(d.id, src, dst, "TCP", 443, None);
+                if !t.ok {
                     continue;
                 }
-                let Some(dst) = self.target(*u) else { continue };
-                let t = self.send(d.id, src, dst, "TCP", 443, None);
-                if t.ok {
-                    flows.push((d.id, *u, act, t.path, t.site.is_some()));
+                let (mut back, mut along, mut links) = (vec![], vec![], vec![]);
+                // One connection rides one cable of a bundle (LACP).
+                let mut one = f32::INFINITY;
+                for w in t.path.windows(2) {
+                    let Some(l) = self.link_between(w[0], w[1]) else { continue };
+                    let rs = out.res.entry(l.id).or_insert_with(|| self.link_res(l)).clone();
+                    // The path runs from the device outwards: uploads go along it, downloads come back.
+                    let towards_a = l.a == w[0];
+                    for (r, c, wa, wb) in rs {
+                        out.cap.insert(r, c);
+                        let (b, a) = if towards_a { (wa, wb) } else { (wb, wa) };
+                        for (v, x) in [(&mut back, b), (&mut along, a)] {
+                            match v.iter_mut().find(|e: &&mut (Res, f32)| e.0 == r) {
+                                Some(e) => e.1 += x,
+                                None => v.push((r, x)),
+                            }
+                        }
+                    }
+                    if l.medium.cable() {
+                        one = one.min(self.flow_rate(l));
+                    }
+                    links.push((l.id, towards_a));
+                    out.who.entry(l.id).or_default().push(d.id);
+                }
+                let speed = |res: &[(Res, f32)]| res.iter().filter(|x| x.1 > 0.0).map(|(r, x)| out.cap[r] / x).fold(one, f32::min);
+                let key = ((d.id as u64) << 16) | idx as u64;
+                let (wd, wu) = self.want(key, u, act, (down, up), speed(&back), live, got.get(&(d.id, idx)).copied());
+                for (to_dev, want, res) in [(true, wd, back), (false, wu, along)] {
+                    let (cap, grab) = match want {
+                        Want::Fixed(x) => (x, false),
+                        Want::Grab(most) => (most.min(speed(&res)), true),
+                    };
+                    let links = links.iter().map(|(l, a)| (*l, *a == to_dev)).collect();
+                    asks.push(Ask { dev: d.id, idx, to_dev, q: d.qos, cap, grab, res: res.into_iter().filter(|x| x.1 > 0.0).collect(), links });
                 }
             }
         }
-        // A big download (TCP) fills whatever the internet line has left, shared between all of them.
-        let line = self.devices.iter().find(|d| d.kind == Kind::Internet).map(|d| d.plan_mbps);
-        let busy: f32 = flows.iter().filter(|f| f.4 && f.1 != Use::Download).map(|f| f.1.demand().0 * f.2).sum();
-        let downloads: f32 = flows.iter().filter(|f| f.4 && f.1 == Use::Download).map(|f| f.2).sum();
-        for (id, u, act, path, net) in flows {
-            let qos = self.dev(id).map_or(Qos::Normal, |d| d.qos);
-            let (mut down, up) = u.demand();
-            if let (Use::Download, true, Some(l)) = (u, net, line) {
-                down = (l - busy).max(l * 0.1) / downloads.max(1.0);
-            }
-            let (down, up) = (down * act, up * act);
-            {
-                for w in path.windows(2) {
-                    if let Some(l) = self.link_between(w[0], w[1]) {
-                        // Direction "a→b" vs "b→a" for full-duplex cables.
-                        let (to_a, to_b) = if l.a == w[0] { (up, down) } else { (down, up) };
-                        for e in [out.per_link.entry(l.id).or_default(), out.per_class.entry((l.id, qos)).or_default()] {
-                            e.0 += to_a;
-                            e.1 += to_b;
-                        }
-                        out.who.entry(l.id).or_default().push(id);
+        let mut left = out.cap.clone();
+        let mut rate = vec![0.0f32; asks.len()];
+        for q in Qos::ALL {
+            let mut on: Vec<usize> = (0..asks.len()).filter(|&i| asks[i].q == q && asks[i].cap > 1e-4 && !asks[i].res.is_empty()).collect();
+            for _ in 0..asks.len() + left.len() + 2 {
+                if on.is_empty() {
+                    break;
+                }
+                let mut cost: HashMap<Res, f32> = HashMap::new();
+                for &i in &on {
+                    for (r, x) in &asks[i].res {
+                        *cost.entry(*r).or_default() += x;
                     }
                 }
+                let step = on.iter().map(|&i| asks[i].cap - rate[i]).chain(cost.iter().map(|(r, x)| left[r].max(0.0) / x)).fold(f32::INFINITY, f32::min);
+                if !step.is_finite() {
+                    break;
+                }
+                for &i in &on {
+                    rate[i] += step;
+                }
+                for (r, x) in &cost {
+                    *left.get_mut(r).unwrap() -= step * x;
+                }
+                on.retain(|&i| asks[i].cap - rate[i] > 1e-4 && asks[i].res.iter().all(|(r, _)| left[r] > 1e-5 * out.cap[r].max(1.0)));
+            }
+        }
+        for (a, r) in asks.iter().zip(rate) {
+            for (res, x) in &a.res {
+                *out.used.entry((*res, a.q)).or_default() += r * x;
+                *out.count.entry((*res, a.q)).or_default() += 1;
+                *out.wanted.entry(*res).or_default() += if a.grab { r } else { a.cap } * x;
+            }
+            for (l, to_a) in &a.links {
+                let e = out.per_link.entry(*l).or_default();
+                if *to_a { e.0 += r } else { e.1 += r }
+            }
+            if a.grab && a.to_dev {
+                out.got.insert((a.dev, a.idx), r);
             }
         }
         out
     }
 
-    /// How full a link is (0..): radio links share the air both ways, cables are full duplex.
+    /// What one of a device's demands asks for, (towards it, from it). As an average (not `live`) apps are steady
+    /// at their mean rate and only a big download grabs; live they come and go like the real thing. `speed` is
+    /// its way's speed towards the device, `got` what it got while busy last time.
+    fn want(&self, key: u64, u: Option<Use>, act: f32, (down, up): (f32, f32), speed: f32, live: bool, got: Option<f32>) -> (Want, Want) {
+        use Want::*;
+        if !live {
+            return match u {
+                Some(Use::Download) if act >= 0.99 => (Grab(f32::INFINITY), Fixed(up)),
+                // Downloading part of the time: on average that share of what the way carries.
+                Some(Use::Download) => (Fixed(act * speed), Fixed(up)),
+                _ => (Fixed(down), Fixed(up)),
+            };
+        }
+        let t = self.clock;
+        let unit = |salt: u64, slot: f64| crate::sim::unit(self.seed, key ^ salt, slot as i64 as u64);
+        let jit = |period: f64, amp: f32| (1.0 + amp * crate::sim::wander(self.seed, key ^ 0x717, t, period)).max(0.0);
+        // Everyday apps run in sessions of a few minutes, `act` of the time; a busier household (act > 1) uses more.
+        let scale = if self.custom_traffic { 1.0 } else { act.max(1.0) };
+        if !self.custom_traffic && unit(0x5E55, (t / 300.0).floor()) >= act {
+            return (Fixed(0.0), Fixed(0.0));
+        }
+        let (down, up) = u.map_or((down, up), |u| (u.demand().0 * scale, u.demand().1 * scale));
+        // How fast a burst goes: what it got last time, else the way's speed.
+        let fast = got.filter(|g| *g > 0.01).unwrap_or(speed);
+        match u {
+            Some(Use::Browsing) => {
+                // A click loads a page with its pictures and scripts (~2.5 MB = 20 Mbit) as fast as the way allows
+                // (servers and TCP start-up: at most ~100 Mbit/s); in between only a trickle. Clicks come often
+                // enough to average the app's demand; on a slow way a page takes long and the loads run together.
+                const PAGE: f32 = 20.0;
+                let took = (PAGE / fast.min(100.0).max(0.05)) as f64;
+                let clicks = down / PAGE;
+                let busy = (0..=took.ceil() as i64 + 1).any(|k| {
+                    let s = t.floor() - k as f64;
+                    let at = s + unit(0xC1C1, s) as f64;
+                    unit(0xC11C, s) < clicks && t >= at && t < at + took
+                });
+                if busy { (Grab(100.0), Fixed(up.max(1.0))) } else { (Fixed(0.05), Fixed(0.02)) }
+            }
+            Some(u @ (Use::Stream4k | Use::StreamHd | Use::Music)) => {
+                // Players fetch the next seconds of video (music: of the song) as fast as they can, then rest until
+                // the buffer runs low. When the way is slower than the video, the rest disappears: it fetches nonstop
+                // and the picture drops to a lower quality.
+                let (period, most) = if u == Use::Music { (10.0, 20.0) } else { (4.0, 150.0) };
+                let on = (down * period / fast.min(most).max(0.01)).max(0.6);
+                let phase = unit(0xFA5E, 0.0) * period;
+                if on >= period || ((t + phase as f64).rem_euclid(period as f64) as f32) < on {
+                    (Grab(most), Fixed(up))
+                } else {
+                    (Fixed(0.02), Fixed(0.02))
+                }
+            }
+            Some(Use::VideoCall) => (Fixed(down * jit(2.0, 0.15)), Fixed(up * jit(2.0, 0.15))),
+            Some(Use::Gaming) => (Fixed(down * jit(0.5, 0.35)), Fixed(up * jit(0.5, 0.35))),
+            // More movement in view: more to encode.
+            Some(Use::Camera) => (Fixed(down), Fixed(up * jit(3.0, 0.25))),
+            Some(Use::Download) => (Grab(f32::INFINITY), Fixed(up)),
+            Some(Use::Backup) => (Fixed(down), Fixed(up)),
+            None => (Fixed(down * jit(1.5, 0.25)), Fixed(up * jit(1.5, 0.25))),
+        }
+    }
+
+    /// How full a link is (0..1): the fullest capacity it draws on (for Wi-Fi: its channel's airtime).
     pub fn utilisation(&self, load: &Load, link: u32) -> f32 {
-        self.fill(link, load.per_link.get(&link).copied())
+        load.fullest(link, |r| load.used_upto(r, Qos::Low))
+    }
+
+    /// How much the apps on a link ask of it (1.0 = all it carries; above that they get less than they want).
+    pub fn wanted(&self, load: &Load, link: u32) -> f32 {
+        load.fullest(link, |r| load.wanted.get(&r).copied().unwrap_or(0.0))
     }
 
     /// How full a link looks to traffic of priority `q`: a full link serves higher priorities first, so only
     /// traffic of the same or a higher priority is in its way (with nobody prioritised: everyone's).
     pub fn utilisation_for(&self, load: &Load, link: u32, q: Qos) -> f32 {
-        let ahead = Qos::ALL.iter().filter(|c| **c <= q).filter_map(|c| load.per_class.get(&(link, *c))).fold((0.0, 0.0), |s, x| (s.0 + x.0, s.1 + x.1));
-        self.fill(link, Some(ahead))
+        load.fullest(link, |r| load.used_upto(r, q))
     }
 
-    fn fill(&self, link: u32, load: Option<(f32, f32)>) -> f32 {
-        let (Some(l), Some((a, b))) = (self.links.iter().find(|l| l.id == link), load) else { return 0.0 };
-        let rate = self.link_rate(l).max(0.1);
-        if l.medium.wireless() { (a + b) / rate } else { a.max(b) / rate }
+    /// What one more transfer of priority `q` would get over a link right now (Mbit/s, towards end a or b): what
+    /// higher priorities leave, less what its own class uses, but at least a fair share with the transfers there.
+    pub fn fair_share(&self, load: &Load, l: &crate::net::Link, towards_a: bool, q: Qos) -> f32 {
+        let rs = load.res.get(&l.id).cloned().unwrap_or_else(|| self.link_res(l));
+        rs.iter()
+            .filter_map(|(r, c, wa, wb)| {
+                let x = if towards_a { *wa } else { *wb };
+                (x > 0.0).then(|| {
+                    let free = c - Qos::ALL.iter().filter(|k| **k < q).filter_map(|k| load.used.get(&(*r, *k))).sum::<f32>();
+                    let mine = load.used.get(&(*r, q)).copied().unwrap_or(0.0);
+                    let n = load.count.get(&(*r, q)).copied().unwrap_or(0) as f32;
+                    (free - mine).max(free / (n + 1.0)).max(0.0) / x
+                })
+            })
+            .fold(self.flow_rate(l), f32::min)
     }
 
-    /// Airtime an access point needs on its channel for all its clients (1.0 = the channel is full).
+    /// Airtime an access point's channel needs for all its devices (1.0 = the channel is full; above that they
+    /// get less than they want), on its busiest band.
     pub fn airtime(&self, load: &Load, ap: u32) -> f32 {
-        let links: Vec<&crate::net::Link> = self.links.iter().filter(|l| l.medium == Medium::WiFi && self.wifi_ends(l).is_some_and(|(a, _)| a.id == ap)).collect();
-        // Wi-Fi 6 and later (OFDMA) pack many small transmissions into one: crowds cost less airtime.
-        let modern = |l: &&crate::net::Link| self.wifi_ends(l).is_some_and(|(a, c)| a.wifi >= crate::net::WifiStd::Wifi6 && c.wifi >= crate::net::WifiStd::Wifi6);
-        let packing = if links.len() > 4 { 0.8 } else { 1.0 };
-        links.iter().map(|l| self.utilisation(load, l.id) * if modern(l) { packing } else { 1.0 }).sum()
+        let Some(d) = self.dev(ap) else { return 0.0 };
+        let src = self.chan_src(d).id;
+        (0..3u8).map(|b| load.wanted.get(&(src, AIR + b)).copied().unwrap_or(0.0)).fold(0.0, f32::max)
     }
 
     /// Extra delay (ms) from full queues along a path ("bufferbloat"), for the QoS priority of the device it starts at.
@@ -725,12 +1004,164 @@ mod tests {
     }
 
     #[test]
+    fn a_busier_household_fills_links_more_and_the_day_peaks_in_the_evening() {
+        let mut n = template_seeded("home", 3);
+        let tv = id(&n, "Living room TV");
+        let link = n.links.iter().find(|l| l.a == tv || l.b == tv).unwrap().id;
+        let one = n.utilisation(&n.loads(), link);
+        n.traffic = 2.0;
+        let two = n.utilisation(&n.loads(), link);
+        assert!((two - 2.0 * one).abs() < 1e-3 * one.max(1.0), "{one} {two}");
+        let day = n.day_load();
+        assert_eq!(day.len(), 48);
+        // 21:00 is busier than 04:00, and the busiest link is never less full than the internet line.
+        assert!(day[42].1 > day[8].1 && day.iter().all(|d| d.1 >= d.0), "{day:?}");
+    }
+
+    #[test]
+    fn downloads_stop_at_their_slowest_link_and_leave_the_rest_to_others() {
+        let mut n = template_seeded("home", 3);
+        n.custom_traffic = true;
+        let ids: Vec<u32> = ["Anna's laptop", "Living room TV", "NAS 1"].iter().map(|x| id(&n, x)).collect();
+        for d in &ids {
+            n.dev_mut(*d).unwrap().test_uses = vec![Use::Download];
+        }
+        let ld = n.loads();
+        let into = |d: u32| {
+            let l = n.links.iter().find(|l| l.a == d || l.b == d).unwrap();
+            let x = ld.per_link[&l.id];
+            (if l.a == d { x.0 } else { x.1 }, n.link_rate(l))
+        };
+        // The TV sits on a 100 Mbit/s port: its download gets that, and the laptop and the NAS share the rest.
+        let (tv, port) = into(ids[1]);
+        assert!((tv - port).abs() < 0.5 && port < 100.0, "{tv} {port}");
+        let (lap, nas) = (into(ids[0]).0, into(ids[2]).0);
+        assert!((lap - nas).abs() < 0.5 && (lap + nas + tv - 500.0).abs() < 1.0, "{lap} {nas} {tv}");
+    }
+
+    /// Mbit/s flowing towards (or away from, `away`) a device over its own link.
+    fn into(n: &Network, ld: &Load, d: u32, away: bool) -> f32 {
+        let l = n.links.iter().find(|l| l.a == d || l.b == d).unwrap();
+        let x = ld.per_link.get(&l.id).copied().unwrap_or_default();
+        if (l.a == d) != away { x.0 } else { x.1 }
+    }
+
+    #[test]
+    fn wifi_devices_take_turns_on_one_channel() {
+        let mut n = template_seeded("home", 3);
+        n.custom_traffic = true;
+        let (lap, phone) = (id(&n, "Anna's laptop"), id(&n, "Phone"));
+        n.dev_mut(lap).unwrap().test_uses = vec![Use::Download];
+        let alone = into(&n, &n.loads(), lap, false);
+        n.dev_mut(phone).unwrap().test_uses = vec![Use::Download];
+        let ld = n.loads();
+        let (a, p) = (into(&n, &ld, lap, false), into(&n, &ld, phone, false));
+        let link = n.links.iter().find(|l| l.a == lap || l.b == lap).unwrap().id;
+        // Both on the same channel: together they can't use more than its airtime, so each gets less.
+        assert!(a < alone * 0.8 && p > 1.0 && n.utilisation(&ld, link) <= 1.001, "{alone} {a} {p}");
+    }
+
+    #[test]
+    fn the_line_uploads_only_as_fast_as_the_plan_and_house_traffic_stays_home() {
+        let mut n = template_seeded("home", 3);
+        n.custom_traffic = true;
+        let inet = n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id;
+        n.dev_mut(inet).unwrap().plan_up_mbps = 50.0;
+        let (nas, pc) = (id(&n, "NAS 1"), id(&n, "Office PC"));
+        n.dev_mut(nas).unwrap().test_mbps = [0.0, 400.0];
+        let ld = n.loads();
+        assert!((into(&n, &ld, inet, false) - 50.0).abs() < 0.5, "{}", into(&n, &ld, inet, false));
+        // The same load to the PC in the house never touches the line.
+        n.dev_mut(nas).unwrap().test_to = pc;
+        let ld = n.loads();
+        assert!(into(&n, &ld, inet, false) < 0.01 && (into(&n, &ld, pc, false) - 400.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn browsing_comes_in_bursts_and_slow_video_streams_nonstop() {
+        let mut n = template_seeded("home", 3);
+        n.custom_traffic = true;
+        n.custom_bursty = true;
+        n.live = true;
+        let (lap, tv) = (id(&n, "Anna's laptop"), id(&n, "Living room TV"));
+        n.dev_mut(lap).unwrap().test_uses = vec![Use::Browsing];
+        n.dev_mut(tv).unwrap().test_uses = vec![Use::Stream4k];
+        let mut run = |n: &mut Network| -> (Vec<f32>, Vec<f32>) {
+            n.memory.borrow_mut().got.clear();
+            (0..1200).map(|i| {
+                // An uneven step, so samples don't line up with the video's 4 s rhythm.
+                n.clock = i as f64 * 0.37;
+                let ld = n.loads_now();
+                (into(n, &ld, lap, false), into(n, &ld, tv, false))
+            }).unzip()
+        };
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        let quiet = |v: &[f32]| v.iter().filter(|x| **x < 0.5).count() as f32 / v.len() as f32;
+        let (web, video) = run(&mut n);
+        // A page now and then, fetched fast; mostly quiet, about 3 Mbit/s on average.
+        assert!((1.5..6.0).contains(&mean(&web)) && quiet(&web) > 0.8 && web.iter().cloned().fold(0.0, f32::max) > 30.0, "{} {}", mean(&web), quiet(&web));
+        // Video fetches a few seconds at a time, averaging its 25 Mbit/s.
+        assert!((15.0..35.0).contains(&mean(&video)) && quiet(&video) > 0.4, "{} {}", mean(&video), quiet(&video));
+        // On a 20 Mbit/s line the buffer never fills: it fetches nonstop, all the line gives.
+        let inet = n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id;
+        n.dev_mut(inet).unwrap().plan_mbps = 20.0;
+        let (_, video) = run(&mut n);
+        assert!(quiet(&video) < 0.05 && mean(&video) > 15.0, "{} {}", mean(&video), quiet(&video));
+    }
+
+    #[test]
+    fn wifi_busy_time_follows_what_was_really_sent() {
+        let mut n = template_seeded("home", 3);
+        n.custom_traffic = true;
+        let lap = id(&n, "Anna's laptop");
+        n.dev_mut(lap).unwrap().test_uses = vec![Use::Download];
+        let ld = n.loads();
+        let link = n.links.iter().find(|l| l.a == lap || l.b == lap).unwrap();
+        let (ap, _) = n.wifi_ends(link).unwrap();
+        let band = n.link_signal(link).unwrap().band;
+        // The download fills the line, not the 150 Mbit/s guess: the channel's busy time is what it really used.
+        assert!((n.demand_airtime(ap, band) - 0.02 - n.utilisation(&ld, link.id)).abs() < 0.05, "{} {}", n.demand_airtime(ap, band), n.utilisation(&ld, link.id));
+    }
+
+    #[test]
+    fn an_own_load_flows_from_any_device_only_in_custom_mode() {
+        let mut n = template_seeded("home", 3);
+        let nas = id(&n, "NAS 1");
+        n.dev_mut(nas).unwrap().test_mbps = [40.0, 10.0];
+        let link = n.links.iter().find(|l| l.a == nas || l.b == nas).unwrap().clone();
+        assert!(n.loads().per_link.get(&link.id).is_none(), "organic ignores it");
+        n.custom_traffic = true;
+        let x = n.loads().per_link[&link.id];
+        let (to_nas, from_nas) = if link.a == nas { x } else { (x.1, x.0) };
+        assert!((to_nas - 40.0).abs() < 1e-3 && (from_nas - 10.0).abs() < 1e-3, "{x:?}");
+    }
+
+    #[test]
+    fn a_custom_test_load_runs_at_full_rate_whatever_the_hour() {
+        let mut n = template_seeded("home", 3);
+        let tv = id(&n, "Living room TV");
+        let link = n.links.iter().find(|l| l.a == tv || l.b == tv).unwrap().id;
+        n.hour = 4.0;
+        let night = n.loads().per_link[&link];
+        n.custom_traffic = true;
+        assert!(n.loads().per_link.get(&link).is_none(), "no test load yet");
+        n.dev_mut(tv).unwrap().test_uses = vec![Use::Stream4k, Use::Stream4k];
+        let l = n.links.iter().find(|l| l.id == link).unwrap();
+        let (a, b) = n.loads().per_link[&link];
+        assert!((a + b - 2.0 * (25.0 + 0.3)).abs() < 1e-3 && a + b > 10.0 * (night.0 + night.1), "{a} {b} {night:?}");
+        // The video comes in towards the TV.
+        let to_tv = if l.a == tv { a } else { b };
+        assert!((to_tv - 50.0).abs() < 1e-3, "{a} {b}");
+    }
+
+    #[test]
     fn high_priority_goes_first_on_a_full_line() {
         let mut n = template_seeded("home", 3);
-        for d in n.devices.iter_mut().filter(|d| d.kind.is_host()) {
-            d.uses.push(Use::Download);
-        }
         let pc = id(&n, "Office PC");
+        // Everyone else downloads; the PC plays. Its own download would fill its own queue whatever its priority.
+        for d in n.devices.iter_mut().filter(|d| d.kind.is_host()) {
+            d.uses.push(if d.id == pc { Use::Gaming } else { Use::Download });
+        }
         let path = n.send(pc, n.dev(pc).unwrap().first_ip().unwrap(), crate::net::site_ip(0), "TCP", 443, None).path;
         let normal = n.queue_ms(&n.loads(), &path);
         let speed = |n: &mut Network| n.exec(pc, "speedtest").lines.iter().find_map(|l| l.trim().strip_prefix("Download ≈ ").and_then(|r| r.split(' ').next()?.parse::<f32>().ok())).unwrap();

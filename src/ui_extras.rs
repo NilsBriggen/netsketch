@@ -160,27 +160,84 @@ impl App {
 
     // ---------- device settings ----------
 
+    /// What a device runs: its everyday apps, or in Custom traffic its test load. Shown in Design and in Simulate.
+    pub(crate) fn apps_picker(&mut self, ui: &mut egui::Ui, id: u32) {
+        let d = self.net.dev(id).unwrap();
+        let kind = d.kind;
+        let custom = self.net.custom_traffic;
+        // Any device with an address can carry an own custom load; apps only where they make sense.
+        let own = custom && d.first_ip().is_some() && !kind.routes() && !kind.foreign() && kind != Kind::Internet;
+        let (title, hint) = if custom {
+            ("Test load", "Custom traffic: what this device runs in your test, all at once and at full rate. Tick apps, or set your own Mbit/s.")
+        } else {
+            ("Busy-hour use", "What this device does at its busiest. Together these fill the cables and the air; the traffic slider in the overview picks the hour.")
+        };
+        if (kind.uses().is_empty() && !own) || !Self::section_hint(ui, title, hint) {
+            return;
+        }
+        ui.horizontal(|ui| self.traffic_mode(ui));
+        let d = self.net.dev(id).unwrap();
+        let list = if custom { &d.test_uses } else { &d.uses };
+        let mut flip = None;
+        ui.horizontal_wrapped(|ui| {
+            for u in kind.uses().iter().copied() {
+                let mut on = list.contains(&u);
+                let (down, up) = u.demand();
+                if ui.checkbox(&mut on, u.label()).on_hover_text(trf("≈ {} Mbit/s down, {} up{}", &[&down, &up, &(if u.sensitive() { tr(" — needs low delay") } else { "" })])).changed() {
+                    flip = Some(u);
+                }
+            }
+        });
+        if let Some(u) = flip {
+            self.snapshot();
+            let custom = self.net.custom_traffic;
+            let d = self.net.dev_mut(id).unwrap();
+            let list = if custom { &mut d.test_uses } else { &mut d.uses };
+            if list.contains(&u) {
+                list.retain(|x| *x != u);
+            } else {
+                list.push(u);
+            }
+        }
+        if own {
+            let mut m = self.net.dev(id).unwrap().test_mbps;
+            let mut snap = false;
+            ui.horizontal(|ui| {
+                ui.label(tr("Own load"));
+                for (i, s) in [(0, tr(" Mbit/s down")), (1, tr(" Mbit/s up"))] {
+                    let r = ui.add(egui::DragValue::new(&mut m[i]).range(0.0..=10000.0).speed(1.0).max_decimals(1).suffix(s));
+                    snap |= r.drag_started() || (r.changed() && !r.dragged());
+                }
+            })
+            .response
+            .on_hover_text(tr("Any amount you like, on top of the ticked apps, all the time"));
+            // Where it goes: the internet, or another device in the house (a copy to the NAS, a stream to the TV).
+            let to = self.net.dev(id).unwrap().test_to;
+            let mut pick = to;
+            let name = |n: &Network, t: u32| n.dev(t).filter(|_| t != 0).map_or_else(|| tr("the internet").to_string(), |d| d.name.clone());
+            ui.horizontal(|ui| {
+                ui.label(tr("to and from"));
+                egui::ComboBox::from_id_salt(("test_to", id)).selected_text(name(&self.net, to)).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut pick, 0, tr("the internet"));
+                    for d in self.net.devices.iter().filter(|d| d.id != id && d.first_ip().is_some() && d.kind != Kind::Internet && !d.kind.foreign()) {
+                        ui.selectable_value(&mut pick, d.id, &d.name);
+                    }
+                });
+            });
+            if snap || pick != to {
+                self.snapshot();
+            }
+            let d = self.net.dev_mut(id).unwrap();
+            d.test_mbps = m;
+            d.test_to = pick;
+        }
+    }
+
     pub(crate) fn device_extras(&mut self, ui: &mut egui::Ui, id: u32) {
         let ctx = ui.ctx().clone();
         let kind = self.net.dev(id).unwrap().kind;
 
-        // Busy-hour apps.
-        if !kind.uses().is_empty() && Self::section_hint(ui, "Busy-hour use", "What this device does at its busiest. Together these fill the cables and the air; the traffic slider in the overview picks the hour.") {
-            let d = self.net.dev_mut(id).unwrap();
-            ui.horizontal_wrapped(|ui| {
-                for u in kind.uses().iter().copied() {
-                    let mut on = d.uses.contains(&u);
-                    let (down, up) = u.demand();
-                    if ui.checkbox(&mut on, u.label()).on_hover_text(trf("≈ {} Mbit/s down, {} up{}", &[&down, &up, &(if u.sensitive() { tr(" — needs low delay") } else { "" })])).changed() {
-                        if on {
-                            d.uses.push(u);
-                        } else {
-                            d.uses.retain(|x| *x != u);
-                        }
-                    }
-                }
-            });
-        }
+        self.apps_picker(ui, id);
         if kind.is_host() && !kind.uses().is_empty() {
             let d = self.net.dev_mut(id).unwrap();
             ui.horizontal(|ui| {

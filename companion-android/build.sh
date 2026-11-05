@@ -11,8 +11,11 @@ rm -rf "$OUT"
 mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/gen" "$OUT/test"
 
 # 1. The plain-Java part, checked on this computer (also refreshes the sample file the main app tests with).
-javac -d "$OUT/test" src/org/netsketch/survey/Survey.java src/org/netsketch/survey/Link.java src/org/netsketch/survey/T.java test/SurveyJsonTest.java
+PLAIN="Survey Link T Air Watch Lan Assistant"
+javac -d "$OUT/test" $(for f in $PLAIN; do echo src/org/netsketch/survey/$f.java; done) test/*.java
 java -cp "$OUT/test" SurveyJsonTest sample.netsurvey
+java -cp "$OUT/test" AirTest
+java -cp "$OUT/test" AssistantTest
 
 # 2. Resources and manifest.
 "$BT/aapt2" compile --dir res -o "$OUT/res.zip"

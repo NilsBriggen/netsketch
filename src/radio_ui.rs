@@ -20,8 +20,11 @@ pub fn wall_color(k: WallKind) -> Color32 {
         WallKind::Glass => Color32::from_rgb(140, 200, 240),
         WallKind::LowE => Color32::from_rgb(56, 140, 200),
         WallKind::Brick => Color32::from_rgb(190, 90, 70),
+        WallKind::InnerBrick => Color32::from_rgb(205, 125, 100),
         WallKind::Concrete => Color32::from_rgb(120, 126, 136),
         WallKind::Metal => Color32::from_rgb(200, 210, 225),
+        WallKind::Aerated => Color32::from_rgb(214, 196, 160),
+        WallKind::Stone => Color32::from_rgb(140, 120, 100),
     }
 }
 
@@ -32,8 +35,10 @@ fn wall_width(k: WallKind) -> f32 {
             WallKind::Glass | WallKind::LowE | WallKind::Metal => 0.05,
             WallKind::Drywall => 0.1,
             WallKind::Wood => 0.08,
-            WallKind::Brick => 0.2,
-            WallKind::Concrete => 0.25,
+            WallKind::Brick => 0.3,
+            WallKind::InnerBrick => 0.12,
+            WallKind::Concrete | WallKind::Aerated => 0.25,
+            WallKind::Stone => 0.45,
         }
 }
 
@@ -342,9 +347,9 @@ impl App {
                 }
             });
             ui.end_row();
-            let (l24, l5) = w.kind.loss();
+            let [l24, l5, l6] = w.kind.loss();
             ui.label(RichText::new(tr("Signal loss")).color(pal().dim)).on_hover_text(tr("Every 10 dB lost leaves a tenth of the signal; 3 dB is half."));
-            ui.label(trf("−{} dB at 2.4 GHz · −{} dB at 5 GHz", &[&format!("{:.0}", l24), &format!("{:.0}", l5)])).on_hover_text(w.kind.note());
+            ui.label(trf("−{} dB at 2.4 GHz · −{} at 5 · −{} at 6 GHz", &[&format!("{:.0}", l24), &format!("{:.0}", l5), &format!("{:.0}", l6)])).on_hover_text(w.kind.note());
             ui.end_row();
             ui.label(RichText::new(tr("Storey")).color(pal().dim));
             ui.add(egui::DragValue::new(&mut w.floor).range(-3..=20).custom_formatter(|v, _| crate::net::floor_name(v as i8)));
@@ -543,6 +548,7 @@ impl App {
             .map(|b| format!("{} {:.0}", b.label(), d.wifi.stream20(b.i()) * width_factor(d.width[b.i()].min(d.wifi.max_width(b.i()))) * d.streams as f32))
             .collect();
         ui.label(RichText::new(trf("Top rate {} Mbit/s", &[&(top.join(" · "))])).small().color(pal().dim)).on_hover_text(tr("Link rate on paper; real throughput is about 60% of it, shared by everyone on the channel."));
+        ui.checkbox(&mut d.auto_ch, tr("Picks its channel by itself")).on_hover_text(tr("Almost every router does out of the box. Most pick only at start-up; some also when the channel gets busy, or every night. Next to loud neighbours that do the same, they can end up chasing each other."));
         }
         if kind == Kind::Neighbor {
             ui.add(egui::Slider::new(&mut d.busy, 0.0..=1.0).text(tr("of the airtime they use")).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
@@ -886,6 +892,9 @@ impl App {
                 row(ui, tr("Antennas"), trf("{}×{} streams ({} on both sides)", &[&s.streams, &s.streams, &s.streams]));
                 row(ui, tr("Answer back"), trf("{} dBm at the access point", &[&format!("{:.0}", s.up)]));
                 row(ui, tr("Walls"), trf("{} in the way", &[&s.walls]));
+                if let Some(t) = self.net.wifi_link_of(id).and_then(|l| self.net.steadiness(l)) {
+                    row(ui, tr("Steadiness"), t);
+                }
                 row(ui, tr("Airtime"), if s.contention > 1.05 { trf("shared ×{} with other networks", &[&format!("{:.1}", s.contention)]) } else { tr("channel to itself").into() });
                 let th = crate::wifi::roam_threshold(&ap, &d);
                 row(ui, tr("Roaming"), if ap.fast_roam { trf("fast (802.11k/v/r) — looks around below {} dBm", &[&format!("{:.0}", th)]) } else { trf("basic — this device hangs on until {} dBm", &[&format!("{:.0}", th)]) });
