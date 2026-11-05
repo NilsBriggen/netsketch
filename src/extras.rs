@@ -216,9 +216,11 @@ impl Network {
     /// Shares twice: the second round's Wi-Fi contention follows the airtime the first round really used.
     fn settle(&self, live: bool) -> Load {
         self.memory.borrow_mut().air.clear();
+        self.memo.borrow_mut().forget_air();
         let first = self.share(live);
         let air: HashMap<(u32, usize), f32> = first.cap.keys().filter(|r| r.1 >= AIR).map(|r| ((r.0, (r.1 - AIR) as usize), first.used_upto(*r, Qos::Low))).collect();
         self.memory.borrow_mut().air = air;
+        self.memo.borrow_mut().forget_air();
         let out = self.share(live);
         if live {
             self.memory.borrow_mut().got.extend(out.got.iter().map(|(k, v)| (*k, *v)));

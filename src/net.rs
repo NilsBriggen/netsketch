@@ -1028,6 +1028,12 @@ pub struct Network {
     /// Where signals bend around walls, kept until the walls change (not saved).
     #[serde(skip)]
     pub edge_cache: std::cell::RefCell<crate::wifi::EdgeCache>,
+    /// Path losses already worked out (pure geometry; not saved).
+    #[serde(skip)]
+    pub path_cache: std::cell::RefCell<crate::wifi::PathCache>,
+    /// Results kept for one UI frame (see `wifi::Memo`); not saved.
+    #[serde(skip)]
+    pub memo: std::cell::RefCell<crate::wifi::Memo>,
     /// Live Wi-Fi links that lost their access point: (signal gone since, joining again until), clock s; not saved.
     #[serde(skip)]
     pub link_down: std::cell::RefCell<HashMap<u32, (f64, f64)>>,
@@ -1081,6 +1087,8 @@ impl Default for Network {
             custom_bursty: false,
             memory: Default::default(),
             edge_cache: Default::default(),
+            path_cache: Default::default(),
+            memo: Default::default(),
             link_down: Default::default(),
             target: -67.0,
             clock: 0.0,

@@ -83,6 +83,18 @@ impl Network {
     }
 
     pub fn stp(&self) -> Stp {
+        if let Some(t) = self.memo.borrow().stp.as_ref() {
+            return t.clone();
+        }
+        let t = self.stp_fresh();
+        let mut m = self.memo.borrow_mut();
+        if m.on {
+            m.stp = Some(t.clone());
+        }
+        t
+    }
+
+    fn stp_fresh(&self) -> Stp {
         let edges: Vec<(u32, u32, u32, u32)> = self
             .links
             .iter()

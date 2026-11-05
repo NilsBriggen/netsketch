@@ -332,10 +332,21 @@ const SPEED_TESTS: [&str; 6] = ["speedtest.net", "fast.com", "speed.cloudflare.c
 /// Downloads a real page (in a background thread). Sends only a generic client name.
 /// Fingerprint of everything a plan saves.
 fn plan_hash(net: &Network) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_vec(net).unwrap_or_default().hash(&mut h);
-    h.finish()
+    use std::hash::Hasher;
+    /// Feeds the JSON straight into the hasher: no copy of the whole plan (floor-plan pictures and all) in memory.
+    struct Feed(std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for Feed {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.write(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut f = Feed(std::collections::hash_map::DefaultHasher::new());
+    let _ = serde_json::to_writer(&mut f, net);
+    f.0.finish()
 }
 
 fn recent_path() -> PathBuf {
@@ -443,6 +454,7 @@ struct App {
     /// Wi-Fi map cells in map coordinates, with what they were computed for and when.
     /// (storey, cell size, band), the area covered in cells, the cells, when it was checked, and a fingerprint of the radios and walls.
     heat_cache: Option<((i8, i32, usize), [i32; 4], Vec<(Rect, Color32)>, f64, u64)>,
+    heat_job: Option<radio_ui::HeatJob>,
     /// Wi-Fi map: 0 = best band, 1..=3 = 2.4 / 5 / 6 GHz only.
     heat_band: usize,
     /// Outdoor areas' coverage on the shown storey, and when it was worked out.
@@ -475,6 +487,8 @@ struct App {
     /// Unsaved changes (checked about once a second), shown as • in the window title.
     dirty: bool,
     dirty_at: f64,
+    /// Input arrived since the plan was last fingerprinted (for the problem list, and for "unsaved").
+    touched: [bool; 2],
     /// Closing was asked for with unsaved changes: show "Save your changes?".
     ask_quit: bool,
     quit_ok: bool,
@@ -544,6 +558,7 @@ impl App {
             load_cache: None,
             avg_cache: None,
             heat_cache: None,
+            heat_job: None,
             heat_band: 0,
             cov_cache: None,
             outdoor_cache: None,
@@ -566,6 +581,7 @@ impl App {
             saved_hash: 0,
             dirty: false,
             dirty_at: 0.0,
+            touched: [true; 2],
             ask_quit: false,
             quit_ok: false,
             nudged: 0.0,
@@ -612,6 +628,9 @@ impl App {
 
     /// Remembers the plan before a change that removes or rewrites things (Ctrl+Z goes back).
     fn snapshot(&mut self) {
+        // An edit follows: nothing worked out earlier this frame may be reused, and the plan needs fingerprinting.
+        self.net.memo.borrow_mut().reset(true);
+        self.touched = [true; 2];
         self.redo.clear();
         // The file goes with each step, so undoing past an Open never lets Ctrl+S write over the other file.
         self.undo.push((self.net.clone(), self.file.clone()));
@@ -652,6 +671,7 @@ impl App {
         self.phone = None;
         self.issues = None;
         self.heat_cache = None;
+        self.heat_job = None;
         self.ap_hint = None;
         self.cov_cache = None;
         self.sel = Sel::None;
@@ -975,6 +995,7 @@ impl App {
                             self.net.storey_heights.retain(|s| s.0 != f);
                             self.net.storey_heights.push((f, h));
                             self.heat_cache = None;
+                            self.heat_job = None;
                         }
                     });
                     let below: Vec<crate::wifi::Wall> = self.net.walls.iter().filter(|w| w.floor == f - 1).cloned().collect();
@@ -985,6 +1006,7 @@ impl App {
                             self.net.walls.last_mut().unwrap().floor = f;
                         }
                         self.heat_cache = None;
+                        self.heat_job = None;
                         ui.close();
                     }
                 }).response.on_hover_text(tr("Storeys: each one has its own walls; floors between them cost signal"));
@@ -1664,6 +1686,7 @@ impl App {
                 self.connect_from = None;
                 self.ap_hint = None;
                 self.heat_cache = None;
+                self.heat_job = None;
                 self.issues = None;
                 self.say(ctx, tr("Undone."));
             }
@@ -1679,6 +1702,7 @@ impl App {
                 self.connect_from = None;
                 self.ap_hint = None;
                 self.heat_cache = None;
+                self.heat_job = None;
                 self.issues = None;
                 self.say(ctx, tr("Redone."));
             }
@@ -2946,6 +2970,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
+        // Within one frame the plan doesn't change: every link's signal, airtime and the spanning tree are worked
+        // out once and reused (see wifi::Memo).
+        self.net.memo.borrow_mut().reset(true);
         // A map picture the user asked for.
         if self.export_pic.is_some() {
             if let Some(img) = ctx.input(|i| i.raw.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None })) {
@@ -3081,8 +3108,13 @@ impl eframe::App for App {
                 _ => self.say(&ctx, trf("NetSketch can't use {} files.", &[&ext])),
             }
         }
-        if Self::now(&ctx) - self.dirty_at > 1.0 {
+        // Fingerprinting serialises the whole plan: only after input (every edit comes from input or a snapshot).
+        if ctx.input(|i| !i.events.is_empty() || i.pointer.any_down()) {
+            self.touched = [true; 2];
+        }
+        if Self::now(&ctx) - self.dirty_at > 1.0 && (self.touched[0] || self.issues.is_none()) {
             self.dirty_at = Self::now(&ctx);
+            self.touched[0] = false;
             self.dirty = plan_hash(&self.net) != self.saved_hash;
         }
         // Closing with unsaved changes asks first (the screenshot mode closes by itself).
@@ -3117,7 +3149,12 @@ impl eframe::App for App {
         let due = self.issues_at + 0.3 <= now || self.issues.is_none();
         // Simulate moves things that aren't saved (walks, roaming), so it always refreshes; Design only after an edit.
         let key = if due && self.mode != Mode::Simulate {
-            plan_hash(&self.net)
+            if self.touched[1] || self.issues.is_none() {
+                self.touched[1] = false;
+                plan_hash(&self.net)
+            } else {
+                self.issues_key
+            }
         } else {
             0
         };

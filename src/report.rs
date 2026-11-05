@@ -36,7 +36,7 @@ fn storey_svg(n: &Network, floor: i8) -> String {
     while y < y1 {
         let mut x = x0;
         while x < x1 {
-            let best = radios.iter().map(|r| n.best_rssi(r, [x + cell / 2.0, y + cell / 2.0], floor)).fold(-120.0, f32::max);
+            let best = n.strongest_at(&radios, [x + cell / 2.0, y + cell / 2.0], floor, None, crate::radio_ui::heat_bands(n.target)[4].0);
             if let Some(c) = crate::radio_ui::heat_color(best, n.target) {
                 let [r, g, b, _] = c.to_srgba_unmultiplied();
                 s += &format!(r#"<rect x="{x:.1}" y="{y:.1}" width="{:.1}" height="{:.1}" fill="rgb({r},{g},{b})"/>"#, cell + 0.5, cell + 0.5);

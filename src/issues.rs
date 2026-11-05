@@ -506,6 +506,8 @@ impl Network {
 
     /// Applies a one-click fix and says what changed.
     pub fn apply_fix(&mut self, f: &Fix) -> String {
+        let on = self.memo.borrow().on;
+        self.memo.borrow_mut().reset(on);
         match f {
             Fix::Priority(id, p) => {
                 let d = self.dev_mut(*id).unwrap();

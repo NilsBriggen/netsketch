@@ -118,7 +118,7 @@ impl Network {
         let mut best: Option<([f32; 2], usize)> = None;
         for c in spots.iter().step_by(4) {
             ap.pos = *c;
-            let gained = weak.iter().filter(|p| self.best_rssi(&ap, **p, floor) >= self.target).count();
+            let gained = weak.iter().filter(|p| self.best_rssi_raw(&ap, **p, floor) >= self.target).count();
             if best.is_none_or(|b| gained > b.1) {
                 best = Some((*c, gained));
             }

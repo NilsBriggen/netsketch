@@ -475,18 +475,74 @@ pub fn wall_edges(walls: &[Wall]) -> Vec<Edge> {
     out
 }
 
+/// Results the UI asks for many times in one frame (every link's signal, airtime, steadiness, spanning tree).
+/// Only used while `on`: the app turns it on and empties it at the start of every frame and after every edit,
+/// so model code and tests always compute afresh.
+#[derive(Default, Debug)]
+pub struct Memo {
+    pub on: bool,
+    signal: std::collections::HashMap<(u32, bool, bool), Option<Signal>>,
+    airtime: std::collections::HashMap<(u32, usize), f32>,
+    stability: std::collections::HashMap<u32, Option<Stability>>,
+    pub(crate) stp: Option<crate::stp::Stp>,
+}
+
+/// A copy of a plan (undo steps, tests) starts with an empty memo, switched off.
+impl Clone for Memo {
+    fn clone(&self) -> Self {
+        Memo::default()
+    }
+}
+
+impl Memo {
+    /// Forgets everything (and turns the memo on or off).
+    pub fn reset(&mut self, on: bool) {
+        *self = Memo { on, ..Default::default() };
+    }
+
+    /// Forgets what depends on the air's busy time (the traffic sharing changes it between its two passes).
+    pub fn forget_air(&mut self) {
+        self.signal.clear();
+        self.airtime.clear();
+        self.stability.clear();
+    }
+}
+
+/// Path losses already worked out, valid while the geometry stamp stays the same.
+#[derive(Default, Debug)]
+pub struct PathCache {
+    stamp: u64,
+    map: std::collections::HashMap<(u32, u32, u32, u32, u32, i8, i8), [f32; 3]>,
+}
+
+/// A copy of a plan (each undo step is one) starts with an empty cache instead of copying megabytes.
+impl Clone for PathCache {
+    fn clone(&self) -> Self {
+        PathCache::default()
+    }
+}
+
 /// The wall edges, worked out again only when the walls change.
 #[derive(Clone, Default, Debug)]
 pub struct EdgeCache {
     stamp: u64,
     edges: Vec<Edge>,
+    /// Wall loss from a spot (a transmitter, usually) to each edge: the first half of every detour from there.
+    legs: std::collections::HashMap<(u32, u32, i8), std::rc::Rc<Vec<[f32; 3]>>>,
 }
 
+/// A cheap fingerprint of the walls (FNV-1a over their numbers): checked on every path, so it must be fast.
 fn walls_stamp(walls: &[Wall]) -> u64 {
-    walls.iter().fold(walls.len() as u64, |h, w| {
-        let v = [w.a[0], w.a[1], w.b[0], w.b[1]].iter().fold(h, |h, x| crate::sim::hash(h, x.to_bits() as u64, 1));
-        crate::sim::hash(v, w.floor as u64, w.kind as u64)
-    })
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |x: u64| h = (h ^ x).wrapping_mul(0x0100_0000_01b3);
+    eat(walls.len() as u64);
+    for w in walls {
+        for v in [w.a[0], w.a[1], w.b[0], w.b[1]] {
+            eat(v.to_bits() as u64);
+        }
+        eat(((w.floor as u8 as u64) << 8) | w.kind as u64);
+    }
+    h
 }
 
 fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
@@ -658,7 +714,12 @@ impl Network {
         let mut n = 0;
         let mut seen: Vec<WallKind> = vec![];
         let p = [b[0] - a[0], b[1] - a[1]];
+        let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
         for w in self.walls.iter().filter(|w| w.floor == fa || w.floor == fb) {
+            // Quick reject: the wall's box doesn't touch the path's box.
+            if w.a[0].max(w.b[0]) < lo[0] || w.a[0].min(w.b[0]) > hi[0] || w.a[1].max(w.b[1]) < lo[1] || w.a[1].min(w.b[1]) > hi[1] {
+                continue;
+            }
             if crosses(a, b, w.a, w.b) {
                 let v = [w.b[0] - w.a[0], w.b[1] - w.a[1]];
                 // |sin| of the angle between path and wall = cos of the angle to the wall's normal.
@@ -683,9 +744,27 @@ impl Network {
     fn edges(&self) -> std::cell::Ref<'_, Vec<Edge>> {
         let stamp = walls_stamp(&self.walls);
         if self.edge_cache.borrow().stamp != stamp || (stamp == 0 && !self.walls.is_empty()) {
-            *self.edge_cache.borrow_mut() = EdgeCache { stamp, edges: wall_edges(&self.walls) };
+            *self.edge_cache.borrow_mut() = EdgeCache { stamp, edges: wall_edges(&self.walls), legs: Default::default() };
         }
         std::cell::Ref::map(self.edge_cache.borrow(), |c| &c.edges)
+    }
+
+    /// Wall losses from `a` to every edge (in `edges()` order), worked out once per spot: a transmitter stays put
+    /// while thousands of spots around it are worked out.
+    fn legs_from(&self, a: [f32; 2], fa: i8) -> std::rc::Rc<Vec<[f32; 3]>> {
+        // Brings the edges (and with them this cache) up to date with the walls first.
+        drop(self.edges());
+        let key = (a[0].to_bits(), a[1].to_bits(), fa);
+        if let Some(v) = self.edge_cache.borrow().legs.get(&key) {
+            return v.clone();
+        }
+        let v: std::rc::Rc<Vec<[f32; 3]>> = std::rc::Rc::new(self.edge_cache.borrow().edges.iter().map(|e| if e.floor == fa { self.wall_losses(a, fa, e.open, fa).0 } else { [0.0; 3] }).collect());
+        let mut c = self.edge_cache.borrow_mut();
+        if c.legs.len() > 5000 {
+            c.legs.clear();
+        }
+        c.legs.insert(key, v.clone());
+        v
     }
 
     /// Path loss (dB) between two spots, multi-wall style: near free-space loss over the real 3-D distance
@@ -699,6 +778,35 @@ impl Network {
     /// the signal also bends around the best nearby wall end or corner (a doorway, the corner of a hall);
     /// both ways add up as power.
     pub fn path_losses(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, dh: f32) -> [f32; 3] {
+        // The same pairs come up again and again (every link, every frame): remember them until the walls change.
+        let stamp = self.geometry_stamp();
+        let key = (a[0].to_bits(), a[1].to_bits(), b[0].to_bits(), b[1].to_bits(), dh.to_bits(), fa, fb);
+        {
+            let c = self.path_cache.borrow();
+            if c.stamp == stamp {
+                if let Some(v) = c.map.get(&key) {
+                    return *v;
+                }
+            }
+        }
+        let v = self.path_losses_raw(a, fa, b, fb, dh);
+        let mut c = self.path_cache.borrow_mut();
+        if c.stamp != stamp || c.map.len() > 200_000 {
+            c.map.clear();
+            c.stamp = stamp;
+        }
+        c.map.insert(key, v);
+        v
+    }
+
+    /// Everything path loss depends on besides the two ends: walls, the floor slabs and storey heights.
+    fn geometry_stamp(&self) -> u64 {
+        let h = self.storey_heights.iter().fold(walls_stamp(&self.walls), |h, (f, m)| crate::sim::hash(h, *f as u64, m.to_bits() as u64));
+        crate::sim::hash(h, self.slab as u64, 0x5_1AB)
+    }
+
+    /// `path_losses` without the cache: for the Wi-Fi map, whose thousands of spots would only crowd it out.
+    pub fn path_losses_raw(&self, a: [f32; 2], fa: i8, b: [f32; 2], fb: i8, dh: f32) -> [f32; 3] {
         let storeys = (fa as f32 - fb as f32).abs();
         let flat = dist(a, b) / PX_PER_M;
         let up = self.floor_z(fb) - self.floor_z(fa) + dh;
@@ -724,34 +832,60 @@ impl Network {
         if worst == 0.0 {
             // A clear way that passes close to a wall's end still loses some signal (up to 6 dB right at the edge):
             // the edge cuts into the zone the radio wave fills around the straight line.
-            for band in Band::ALL {
-                let lit = self.edges().iter().filter(|e| e.floor == fa && (0.02..0.98).contains(&along(e.at))).map(|e| {
-                    let (d1, d2) = ((dist(a, e.at) / PX_PER_M).max(0.5), (dist(e.at, b) / PX_PER_M).max(0.5));
-                    knife_edge(-nu(off(e.at), d1, d2, band))
-                }).fold(0.0f32, f32::max);
-                out[band.i()] += lit;
+            let mut lit = [0.0f32; 3];
+            for e in self.edges().iter().filter(|e| e.floor == fa) {
+                let t = along(e.at);
+                if !(0.02..0.98).contains(&t) {
+                    continue;
+                }
+                let (d1, d2) = ((dist(a, e.at) / PX_PER_M).max(0.5), (dist(e.at, b) / PX_PER_M).max(0.5));
+                let h = off(e.at);
+                // 2.4 GHz has the widest zone: if the edge is clear of it there, it's clear on every band.
+                if nu(h, d1, d2, Band::B24) >= 0.78 {
+                    continue;
+                }
+                for band in Band::ALL {
+                    lit[band.i()] = lit[band.i()].max(knife_edge(-nu(h, d1, d2, band)));
+                }
+            }
+            for i in 0..3 {
+                out[i] += lit[i];
             }
             return out;
         }
         if worst < 6.0 {
             return out;
         }
-        let mut bent = [f32::INFINITY; 3];
-        for e in self.edges().iter().filter(|e| e.floor == fa) {
+        // Each corner's detour costs its distance, its bend, the walls from here to the corner (known once per
+        // transmitter) and the walls from the corner on. Try the cheapest first and stop once no corner left can beat
+        // the best detour found: the same result with far less work.
+        let first = self.legs_from(a, fa);
+        let edges = self.edges();
+        let mut cands: Vec<([f32; 3], [f32; 2])> = vec![];
+        for (e, leg) in edges.iter().zip(first.iter()).filter(|(e, _)| e.floor == fa) {
             let (d1, d2) = ((dist(a, e.open) / PX_PER_M).max(0.5), (dist(e.open, b) / PX_PER_M).max(0.5));
             let len = ((d1 + d2).powi(2) + up * up).sqrt().max(1.0);
             // Even grazing an edge costs 6 dB: skip detours that can't beat the straight way.
-            let extra = 22.0 * (len / d).log10();
-            if extra + 6.0 >= worst {
+            if 22.0 * (len / d).log10() + 6.0 >= worst {
                 continue;
             }
-            let (legs, _) = self.wall_losses(a, fa, e.open, fa);
-            let (legs2, _) = self.wall_losses(e.open, fa, b, fa);
             // The deeper the shadow (how far the corner sits off the straight line), the more bending costs.
             let h = off(e.at);
+            let mut lb = [0.0; 3];
             for band in Band::ALL {
-                let l = dist_loss(band, len) + legs[band.i()] + legs2[band.i()] + knife_edge(nu(h, d1, d2, band)).min(BEND_CAP_DB);
-                bent[band.i()] = bent[band.i()].min(l);
+                lb[band.i()] = dist_loss(band, len) + knife_edge(nu(h, d1, d2, band)).min(BEND_CAP_DB) + leg[band.i()];
+            }
+            cands.push((lb, e.open));
+        }
+        cands.sort_by(|x, y| x.0[1].total_cmp(&y.0[1]));
+        let mut bent = [f32::INFINITY; 3];
+        for (lb, open) in cands {
+            if (0..3).all(|i| lb[i] >= bent[i]) {
+                continue;
+            }
+            let (rest, _) = self.wall_losses(open, fa, b, fa);
+            for i in 0..3 {
+                bent[i] = bent[i].min(lb[i] + rest[i]);
             }
         }
         for i in 0..3 {
@@ -786,7 +920,56 @@ impl Network {
         if !ap.bands.iter().any(|b| *b) {
             return -120.0;
         }
-        let loss = self.path_losses(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount);
+        self.best_of(ap, pos, self.path_losses(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount))
+    }
+
+    /// `best_rssi` without the path-loss cache, for maps and searches over thousands of one-off spots.
+    pub fn best_rssi_raw(&self, ap: &Device, pos: [f32; 2], floor: i8) -> f32 {
+        if !ap.bands.iter().any(|b| *b) {
+            return -120.0;
+        }
+        self.best_of(ap, pos, self.path_losses_raw(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount))
+    }
+
+    /// `rssi_at` without the path-loss cache.
+    pub fn rssi_at_raw(&self, ap: &Device, pos: [f32; 2], floor: i8, band: Band) -> f32 {
+        if !ap.bands[band.i()] {
+            return -120.0;
+        }
+        self.rssi_from(ap, pos, band, self.path_losses_raw(ap.pos, ap.floor, pos, floor, SPOT_M - ap.mount)[band.i()])
+    }
+
+    /// The strongest signal any of `radios` gives at a spot, on one band or (None) the best band: what the Wi-Fi
+    /// map and the report draw. A radio is only worked out in full while it could still beat the best so far: with
+    /// no walls at all it would be at most free-space distance loss less 3 dB (a bent path adds at most that).
+    /// Radios that couldn't reach `at_least` dBm even with no walls are skipped (the map draws nothing that weak).
+    pub fn strongest_at(&self, radios: &[&Device], pos: [f32; 2], floor: i8, band: Option<Band>, at_least: f32) -> f32 {
+        let ceiling = |r: &Device| -> f32 {
+            let flat = dist(r.pos, pos) / PX_PER_M;
+            let up = self.floor_z(floor) - self.floor_z(r.floor) + SPOT_M - r.mount;
+            let d = (flat * flat + up * up).sqrt().max(1.0);
+            let bands: Vec<Band> = match band {
+                Some(b) => vec![b],
+                None => Band::ALL.to_vec(),
+            };
+            bands.iter().filter(|b| r.bands[b.i()]).map(|b| self.rssi_from(r, pos, *b, dist_loss(*b, d) - 3.02) - if band.is_none() && *b == Band::B24 { 6.0 } else { 0.0 }).fold(-120.0, f32::max)
+        };
+        let mut cands: Vec<(f32, &Device)> = radios.iter().map(|r| (ceiling(r), *r)).collect();
+        cands.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut best = -120.0f32;
+        for (top, r) in cands {
+            if top <= best || top < at_least {
+                break;
+            }
+            best = best.max(match band {
+                Some(b) => self.rssi_at_raw(r, pos, floor, b),
+                None => self.best_rssi_raw(r, pos, floor),
+            });
+        }
+        best
+    }
+
+    fn best_of(&self, ap: &Device, pos: [f32; 2], loss: [f32; 3]) -> f32 {
         Band::ALL.iter().filter(|b| ap.bands[b.i()]).map(|b| self.rssi_from(ap, pos, *b, loss[b.i()]) - if *b == Band::B24 { 6.0 } else { 0.0 }).fold(-120.0, f32::max)
     }
 
@@ -833,6 +1016,20 @@ impl Network {
 
     /// How steady a Wi-Fi link is over time, from its average signal and fading (see `Stability`).
     pub fn stability(&self, l: &Link) -> Option<Stability> {
+        if self.memo.borrow().on {
+            if let Some(s) = self.memo.borrow().stability.get(&l.id) {
+                return *s;
+            }
+        }
+        let s = self.stability_fresh(l);
+        let mut m = self.memo.borrow_mut();
+        if m.on {
+            m.stability.insert(l.id, s);
+        }
+        s
+    }
+
+    fn stability_fresh(&self, l: &Link) -> Option<Stability> {
         let s = self.signal(l, false)?;
         let (ap, cl) = match l.medium {
             Medium::WiFi => self.wifi_ends(l)?,
@@ -879,6 +1076,21 @@ impl Network {
     /// Airtime your own radio needs on a band, plus ~2% for beacons: each device's apps at this hour over the rate
     /// its own signal allows, so a far, slow device takes more of the air than a near one with the same traffic.
     pub(crate) fn demand_airtime(&self, ap: &Device, band: Band) -> f32 {
+        let key = (ap.id, band.i());
+        if self.memo.borrow().on {
+            if let Some(a) = self.memo.borrow().airtime.get(&key) {
+                return *a;
+            }
+        }
+        let a = self.demand_airtime_fresh(ap, band);
+        let mut m = self.memo.borrow_mut();
+        if m.on {
+            m.airtime.insert(key, a);
+        }
+        a
+    }
+
+    fn demand_airtime_fresh(&self, ap: &Device, band: Band) -> f32 {
         // What the last sharing of the traffic really sent on this channel, once there is one.
         if let Some(a) = self.memory.borrow().air.get(&(self.chan_src(ap).id, band.i())) {
             return (0.02 + a).min(0.95);
@@ -993,6 +1205,21 @@ impl Network {
 
     /// Like `link_signal`, but `live = false` gives the long-run average (what spanning tree and plans use).
     pub fn signal(&self, l: &Link, live: bool) -> Option<Signal> {
+        let key = (l.id, live, self.live);
+        if self.memo.borrow().on {
+            if let Some(s) = self.memo.borrow().signal.get(&key) {
+                return *s;
+            }
+        }
+        let s = self.signal_fresh(l, live);
+        let mut m = self.memo.borrow_mut();
+        if m.on {
+            m.signal.insert(key, s);
+        }
+        s
+    }
+
+    fn signal_fresh(&self, l: &Link, live: bool) -> Option<Signal> {
         let (ap, cl) = match l.medium {
             Medium::WiFi => self.wifi_ends(l)?,
             Medium::Mesh => (self.dev(l.a)?, self.dev(l.b)?),
@@ -1461,6 +1688,8 @@ impl Network {
         } else {
             (l.b, l.b_if) = (to, 0);
         }
+        let on = self.memo.borrow().on;
+        self.memo.borrow_mut().reset(on);
         Some(Roam { from: ap.id, to, before: now, after: rssi, ms: if fast { 40.0 } else if lost { 2500.0 } else { 350.0 }, kicked, lost, same_lan, fast })
     }
 
@@ -2087,5 +2316,125 @@ mod tests {
         let want = sf.drops_h;
         assert!((drops as f32) > want / 4.0 && (drops as f32) < want * 4.0 + 2.0, "{drops} drops in an hour, predicted {want}");
         assert!(!n.rejoining(ln.id));
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::*;
+    use std::time::Instant;
+
+    fn ms(t: Instant) -> f64 {
+        t.elapsed().as_secs_f64() * 1000.0
+    }
+
+    #[test]
+    fn caches_never_change_a_result() {
+        let mut n = crate::net::template_seeded("campus", 7);
+        n.live = true;
+        n.clock = 30.0;
+        // The problem check shares out the traffic, which updates the airtime memory: do it first.
+        let issues: Vec<String> = n.check().into_iter().map(|i| i.text).collect();
+        let fresh: Vec<_> = n.links.iter().map(|l| (n.signal(l, true), n.signal(l, false), n.stability(l))).collect();
+        n.memo.borrow_mut().reset(true);
+        for _ in 0..2 {
+            let again: Vec<_> = n.links.iter().map(|l| (n.signal(l, true), n.signal(l, false), n.stability(l))).collect();
+            assert_eq!(format!("{fresh:?}"), format!("{again:?}"));
+        }
+        assert_eq!(issues, n.check().into_iter().map(|i| i.text).collect::<Vec<_>>());
+        let (a, b) = (n.devices[5].pos, n.devices[40].pos);
+        assert_eq!(n.path_losses(a, 0, b, 0, 0.3), n.path_losses_raw(a, 0, b, 0, 0.3));
+        // Moving a wall forgets the cached geometry.
+        let before = n.path_losses(a, 0, b, 0, 0.3);
+        n.walls.push(Wall { id: 999, a: [(a[0] + b[0]) / 2.0, -5000.0], b: [(a[0] + b[0]) / 2.0 + 1.0, 5000.0], kind: WallKind::Metal, floor: 0 });
+        assert!(n.path_losses(a, 0, b, 0, 0.3)[1] > before[1] + 20.0);
+        // A copy (an undo step) starts with empty caches.
+        assert!(n.clone().path_cache.borrow().map.is_empty() && !n.clone().memo.borrow().on);
+    }
+
+    #[test]
+    fn the_map_shortcut_finds_the_same_strongest_signal() {
+        let n = crate::net::template_seeded("campus", 7);
+        let radios: Vec<&Device> = n.devices.iter().filter(|d| d.kind.radio() && d.bands.iter().any(|b| *b)).collect();
+        for y in (0..1700).step_by(37) {
+            for x in (0..1500).step_by(41) {
+                let p = [x as f32, y as f32];
+                for band in [None, Some(Band::B24), Some(Band::B5), Some(Band::B6)] {
+                    let brute = radios.iter().map(|r| match band {
+                        Some(b) => n.rssi_at_raw(r, p, 0, b),
+                        None => n.best_rssi_raw(r, p, 0),
+                    }).fold(-120.0, f32::max);
+                    assert_eq!(n.strongest_at(&radios, p, 0, band, -200.0), brute, "{p:?} {band:?}");
+                    let floor = n.strongest_at(&radios, p, 0, band, -90.0);
+                    assert!(if brute >= -90.0 { floor == brute } else { floor < -90.0 }, "{p:?} {band:?}");
+                }
+            }
+        }
+    }
+
+    /// The work one UI frame and one refresh do on the campus, with budgets that keep it smooth (release build):
+    /// `cargo test --release campus_speed -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn campus_speed() {
+        let mut n = crate::net::template_seeded("campus", 7);
+        println!("{} devices, {} links, {} walls", n.devices.len(), n.links.len(), n.walls.len());
+        let memo = std::env::var("NO_MEMO").is_err();
+        for live in [false, true] {
+            n.live = live;
+            n.clock = 12.0;
+            for round in 0..2 {
+                n.memo.borrow_mut().reset(memo);
+                let t = Instant::now();
+                for l in &n.links {
+                    let _ = n.link_signal(l);
+                }
+                for d in &n.devices {
+                    let _ = n.wifi_link_of(d.id).and_then(|l| n.link_signal(l));
+                }
+                let f = ms(t);
+                println!("frame (live {live}, round {round}): {f:.1} ms");
+                assert!(f < 8.0, "a frame's model work must stay well under 16 ms");
+            }
+        }
+        n.live = true;
+        n.memo.borrow_mut().reset(memo);
+        let refresh = Instant::now();
+        let t = Instant::now();
+        let _ = n.check();
+        println!("check: {:.1} ms", ms(t));
+        let t = Instant::now();
+        let _ = n.loads_now();
+        println!("loads_now: {:.1} ms", ms(t));
+        n.live = false;
+        let t = Instant::now();
+        let _ = n.loads();
+        println!("loads: {:.1} ms", ms(t));
+        let t = Instant::now();
+        let stp = n.stp();
+        println!("stp: {:.1} ms", ms(t));
+        let t = Instant::now();
+        let hosts: Vec<u32> = n.devices.iter().filter(|d| d.kind.is_host() && !d.off).map(|d| d.id).collect();
+        for h in hosts {
+            let _ = n.internet_rate(h, &stp);
+        }
+        println!("internet_rate for every host: {:.1} ms", ms(t));
+        let r = ms(refresh);
+        println!("whole refresh: {r:.1} ms");
+        assert!(r < 60.0, "the refresh runs every 0.3 s on the UI thread");
+        let radios: Vec<&Device> = n.devices.iter().filter(|d| d.kind.radio() && d.bands.iter().any(|b| *b)).collect();
+        let cells: Vec<[f32; 2]> = (0..90).flat_map(|y| (0..100).map(move |x| [x as f32 * 19.0 - 200.0, y as f32 * 21.0 - 200.0])).collect();
+        let t = Instant::now();
+        let mut exact = 0;
+        for p in &cells {
+            let _ = n.strongest_at(&radios, *p, 0, None, n.target - 25.0);
+            exact += 1;
+        }
+        let m = ms(t);
+        println!("Wi-Fi map, {} cells x {} radios: {m:.1} ms (spread over frames, 6 ms each)", exact, radios.len());
+        assert!(m < 400.0, "the map should fill in within a fraction of a second");
+        let t = Instant::now();
+        n.assign_ports();
+        println!("assign_ports: {:.2} ms", ms(t));
     }
 }

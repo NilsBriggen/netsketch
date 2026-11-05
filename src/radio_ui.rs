@@ -137,6 +137,16 @@ fn walk_pos(pts: &[[f32; 2]], mut dist: f32) -> ([f32; 2], bool) {
     (*pts.last().unwrap(), true)
 }
 
+/// A Wi-Fi map being worked out a few rows per frame: (storey, cell size, band), the cell area, the plan's
+/// fingerprint, the next row, and the coloured cells so far.
+pub(crate) struct HeatJob {
+    key: (i8, i32, usize),
+    area: [i32; 4],
+    stamp: u64,
+    row: i32,
+    cells: Vec<(Rect, Color32)>,
+}
+
 impl App {
     // ---------- canvas layers ----------
 
@@ -160,41 +170,58 @@ impl App {
             h.finish()
         };
         let mut stamp = 0;
-        let fresh = match self.heat_cache.as_mut() {
-            Some(c) if inside(c) && now - c.3 < 0.5 => true,
-            Some(c) if inside(c) => {
-                stamp = fingerprint();
-                c.3 = now;
-                c.4 == stamp
-            }
-            _ => false,
-        };
+        // While a new map is being worked out, keep at it every frame; otherwise compare twice a second.
+        let fresh = self.heat_job.is_none()
+            && match self.heat_cache.as_mut() {
+                Some(c) if inside(c) && now - c.3 < 0.5 => true,
+                Some(c) if inside(c) => {
+                    stamp = fingerprint();
+                    c.3 = now;
+                    c.4 == stamp
+                }
+                _ => false,
+            };
         if !fresh {
             if stamp == 0 {
                 stamp = fingerprint();
             }
             let (mx, my) = ((view[2] - view[0]) / 4 + 1, (view[3] - view[1]) / 4 + 1);
             let area = [view[0] - mx, view[1] - my, view[2] + mx, view[3] + my];
-            let mut cells = vec![];
-            for cy in area[1]..area[3] {
-                for cx in area[0]..area[2] {
+            let current = self.heat_job.as_ref().is_some_and(|j| j.key == key && j.stamp == stamp && j.area[0] <= view[0] && j.area[1] <= view[1] && j.area[2] >= view[2] && j.area[3] >= view[3]);
+            if !current {
+                self.heat_job = Some(HeatJob { key, area, stamp, row: area[1], cells: vec![] });
+            }
+            // A few rows per frame (about 6 ms): the old map stays up meanwhile, so dragging never stalls.
+            let band = self.heat_band.checked_sub(1).map(|b| crate::wifi::Band::ALL[b]);
+            let weakest = heat_bands(self.net.target)[4].0;
+            let started = std::time::Instant::now();
+            let job = self.heat_job.as_mut().unwrap();
+            while job.row < job.area[3] && started.elapsed() < std::time::Duration::from_millis(6) {
+                let cy = job.row;
+                for cx in job.area[0]..job.area[2] {
                     let (x, y) = (cx as f32 * cell, cy as f32 * cell);
-                    let p = [x + cell / 2.0, y + cell / 2.0];
-                    let best = radios
-                        .iter()
-                        .map(|r| match self.heat_band {
-                            0 => self.net.best_rssi(r, p, self.floor),
-                            b => self.net.rssi_at(r, p, self.floor, crate::wifi::Band::ALL[b - 1]),
-                        })
-                        .fold(-120.0, f32::max);
+                    // Weaker than the last colour shows nothing, so radios that can't get there needn't be worked out.
+                    let best = self.net.strongest_at(&radios, [x + cell / 2.0, y + cell / 2.0], self.floor, band, weakest);
                     if let Some(c) = heat_color(best, self.net.target) {
-                        cells.push((Rect::from_min_size(pos2(x, y), Vec2::splat(cell)), c));
+                        job.cells.push((Rect::from_min_size(pos2(x, y), Vec2::splat(cell)), c));
                     }
                 }
+                job.row += 1;
             }
-            self.heat_cache = Some((key, area, cells, now, stamp));
+            if job.row >= job.area[3] {
+                let j = self.heat_job.take().unwrap();
+                self.heat_cache = Some((j.key, j.area, j.cells, now, j.stamp));
+            } else {
+                painter.ctx().request_repaint();
+            }
         }
-        for (r, c) in &self.heat_cache.as_ref().unwrap().2 {
+        // The finished map for this storey and band; until there is one, the part worked out so far.
+        let cells = match (&self.heat_cache, &self.heat_job) {
+            (Some(c), _) if c.0 == key => &c.2,
+            (_, Some(j)) => &j.cells,
+            _ => return,
+        };
+        for (r, c) in cells {
             let min = self.to_screen(r.min.to_vec2());
             painter.rect_filled(Rect::from_min_size(min, r.size() * self.zoom + Vec2::splat(0.6)), 0, *c);
         }

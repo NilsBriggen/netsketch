@@ -447,7 +447,15 @@ impl App {
     /// Simulate, Ports tab: every cable or radio link of a piece of network gear.
     pub(crate) fn ports_tab(&mut self, ui: &mut egui::Ui, id: u32) {
         let stp = self.net.stp();
-        let load = self.net.loads();
+        // The busy-hour traffic the refresh already worked out (a few times a second), not again every frame.
+        let owned;
+        let load = match &self.avg_cache {
+            Some(l) => l,
+            None => {
+                owned = self.net.loads();
+                &owned
+            }
+        };
         let d = self.net.dev(id).unwrap();
         let links: Vec<&net::Link> = self.net.links.iter().filter(|l| l.a == id || l.b == id).collect();
         let wired = links.iter().filter(|l| !l.medium.wireless()).count();
@@ -479,7 +487,7 @@ impl App {
             } else {
                 ("routed", pal().dim)
             };
-            let u = self.net.utilisation(&load, l.id);
+            let u = self.net.utilisation(load, l.id);
             let mut state = format!("{role} · {}", trf("{}% busy", &[&format!("{:.0}", u * 100.0)]));
             if other.poe_draw > 0.0 && d.poe_class > 0 && !l.medium.wireless() {
                 poe_total += other.poe_draw;
