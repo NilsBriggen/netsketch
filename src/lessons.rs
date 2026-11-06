@@ -22,13 +22,13 @@ pub const LESSONS: &[(&str, &str, &str, &str)] = &[
     (
         "DHCP: automatic addresses",
         "When a device joins, it shouts DISCOVER. A DHCP server (normally the home router) answers with an OFFER: an address, the prefix, the gateway and the DNS server. The device REQUESTs it and the server ACKnowledges — the four-step \"DORA\" exchange. Addresses are leased for a while and renewed automatically.\n\nPlanning tip: let phones and laptops use DHCP, and give always-on devices such as a NAS or printer a fixed address outside the DHCP pool (or a reservation in the router), so they never move. Only one DHCP server should run per network.",
-        "Start Simulate: the packet log shows DISCOVER, OFFER, REQUEST and ACK for every device.",
+        "Start Simulate: the packet log shows DISCOVER, OFFER, REQUEST and ACK for every device. Then double-click the router and open its DHCP server: it lists who got which address.",
         "",
     ),
     (
         "DNS: names to addresses",
         "People type names, computers need addresses. A DNS resolver looks names up for you, asking the root, then the .com servers, then the domain's own server, and caches the answer. Your home router usually forwards questions to the provider's resolver; many people pick a public one instead.\n\nModern resolvers can be reached encrypted with DNS over HTTPS (DoH) or DNS over TLS (DoT), which browsers and phones support out of the box. Inside a home, routers often answer for local devices; the official name for home networks is .home.arpa (RFC 8375) — so nas-1.home.arpa works.",
-        "On any device in the home template run nslookup nas-1 and then nslookup example.com.",
+        "On any device in the home template run nslookup nas-1 and then nslookup example.com. Double-click the router and open its DNS server to see its records and the questions it was asked.",
         "home",
     ),
     (
@@ -58,7 +58,7 @@ pub const LESSONS: &[(&str, &str, &str, &str)] = &[
     (
         "The web and HTTPS",
         "Almost every web page is now loaded over HTTPS: the browser and server do a TLS handshake (TLS 1.3 is current) and everything after it is encrypted and checked. Certificates are free and renewed automatically. HTTP/2 sends many requests over one connection; HTTP/3 (2022) runs over QUIC on UDP and is used by most large sites.\n\nPlain HTTP, FTP and Telnet send everything readable on the wire — use HTTPS, SFTP and SSH instead. Email is sent with SMTP (port 587 with STARTTLS or 465) and read with IMAP over TLS (993); POP3 is rarely used anymore.",
-        "Run open example.com and read the TCP, TLS and HTTP lines in the packet log.",
+        "Run open example.com and read the TCP, TLS and HTTP lines in the packet log. Then double-click a server, open its Web server and change index.html in the Text editor: the next visit shows your page.",
         "",
     ),
     (

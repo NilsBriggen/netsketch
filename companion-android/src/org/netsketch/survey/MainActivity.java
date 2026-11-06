@@ -115,6 +115,26 @@ public class MainActivity extends Activity {
 
     // The measurement in progress, and the point it replaces ("Measure again here").
     private Survey.Point current, again;
+    /** A walk: where it started, and the connection's readings since (time in ms, reading). */
+    private boolean walking;
+    private float walkX, walkY;
+    private int walkFloor;
+    private long walkStart;
+    private final List<Object[]> walkSamples = new ArrayList<>();
+    /** Android refreshes the connected network's signal about every 3 s (its RSSI poll), so a walk samples that often. */
+    private static final int WALK_MS = 3000;
+    private Button walkButton;
+    private final Runnable walkTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!walking) return;
+            Survey.Connected c = connected();
+            if (c != null) walkSamples.add(new Object[] {SystemClock.elapsedRealtime(), c});
+            measureStatus.setText(T.f("Walking · %d readings. Walk slowly and evenly; at the end, tap where you are and press Stop here.", walkSamples.size()));
+            measureStatus.setTextColor(Ui.DIM);
+            ui.postDelayed(this, WALK_MS);
+        }
+    };
     /** The point whose speed test may go on; cleared to stop it. */
     private volatile Survey.Point testing;
     private boolean quick, pinging;
@@ -475,6 +495,13 @@ public class MainActivity extends Activity {
         pingButton.setOnClickListener(v -> pingTest());
         extra.addView(pingButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 2f));
         m.addView(extra, below(dp(8)));
+        // A walk: many points along a line in one go (only your own Wi-Fi: Android rations the full scans).
+        walkButton = Ui.button(this, T.t("Walk a line (your Wi-Fi only)"), false);
+        walkButton.setOnClickListener(v -> {
+            if (walking) stopWalk();
+            else startWalk();
+        });
+        m.addView(walkButton, below(dp(8)));
         measureStatus = Ui.text(this, T.t("Stand still for about 10 seconds while it listens."), 13, Ui.DIM);
         measureStatus.setPadding(0, dp(8), 0, 0);
         m.addView(measureStatus);
@@ -776,7 +803,12 @@ public class MainActivity extends Activity {
         resultsCard.setVisibility(View.VISIBLE);
         results.removeAllViews();
         resultsTitle.setText(T.f("Networks at %s · %d", p.name, p.networks.size()).toUpperCase(Locale.getDefault()));
-        if (p.speed != null) {
+        if (p.speed != null && p.speed.lanDownMbps > 0) {
+            TextView lan = Ui.text(this, T.f("Wi-Fi to NetSketch: %.0f down, %.0f up Mbit/s", p.speed.lanDownMbps, p.speed.lanUpMbps), 13, Ui.TEXT);
+            lan.setPadding(0, 0, 0, dp(8));
+            results.addView(lan);
+        }
+        if (p.speed != null && p.speed.downMbps > 0) {
             String text = p.speed.upMbps > 0
                     ? T.f("Real speed: %.0f down, %.0f up Mbit/s · %.0f ms (±%.0f ms)", p.speed.downMbps, p.speed.upMbps, p.speed.latencyMs, p.speed.jitterMs)
                     : T.f("Real speed: %.0f Mbit/s · %.0f ms delay", p.speed.downMbps, p.speed.latencyMs);
@@ -1562,6 +1594,85 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private void startWalk() {
+        if (measuring || pinging) return;
+        if (plan.walls.isEmpty()) {
+            Toast.makeText(this, T.t("A walk needs the floor plan: link NetSketch first."), Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (plan.selX == null) {
+            Toast.makeText(this, T.t("Tap where the walk starts on the plan first."), Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (connected() == null) {
+            Toast.makeText(this, T.t("Connect to your Wi-Fi first: a walk measures the network you're on."), Toast.LENGTH_LONG).show();
+            return;
+        }
+        walking = true;
+        walkX = plan.selX;
+        walkY = plan.selY;
+        walkFloor = plan.floor;
+        walkStart = SystemClock.elapsedRealtime();
+        walkSamples.clear();
+        plan.walkFrom(walkX, walkY);
+        plan.unpick();
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        walkButton.setText(T.t("Stop here"));
+        for (Button b : new Button[] {measureButton, quickButton, pingButton}) {
+            b.setEnabled(false);
+            b.setAlpha(0.5f);
+        }
+        walkTick.run();
+    }
+
+    /** Ends the walk at the spot tapped: the readings are spread along the line by the time each was taken. */
+    private void stopWalk() {
+        if (plan.selX == null || plan.floor != walkFloor) {
+            Toast.makeText(this, T.t("Tap where you are now on the plan (same storey), then press Stop here."), Toast.LENGTH_LONG).show();
+            return;
+        }
+        walking = false;
+        ui.removeCallbacks(walkTick);
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        walkButton.setText(T.t("Walk a line (your Wi-Fi only)"));
+        for (Button b : new Button[] {measureButton, quickButton, pingButton}) {
+            b.setEnabled(true);
+            b.setAlpha(1f);
+        }
+        float ex = plan.selX, ey = plan.selY;
+        long span = Math.max(1, SystemClock.elapsedRealtime() - walkStart);
+        int walk = 1;
+        for (Survey.Point q : survey.points) if (q.name.startsWith(T.t("Walk") + " ")) walk++;
+        int k = 0;
+        for (Object[] w : walkSamples) {
+            double f = Math.min(1, ((long) w[0] - walkStart) / (double) span);
+            Survey.Connected c = (Survey.Connected) w[1];
+            Survey.Point p = new Survey.Point();
+            p.name = T.t("Walk") + " " + walk + "." + (++k);
+            p.floor = walkFloor;
+            p.x = walkX + (ex - walkX) * f;
+            p.y = walkY + (ey - walkY) * f;
+            p.time = Instant.now().toString();
+            p.connected = c;
+            Survey.Seen seen = new Survey.Seen();
+            seen.ssid = c.ssid;
+            seen.bssid = c.bssid;
+            seen.freq = c.freq;
+            seen.channel = Survey.channelOf(c.freq);
+            seen.standard = c.standard;
+            seen.rssi = c.rssi;
+            p.networks.add(seen);
+            survey.add(p, null);
+        }
+        plan.walkFrom(null, null);
+        plan.unpick();
+        save();
+        measureStatus.setText(T.f("Walk %d: %d points along the line.", walk, k));
+        measureStatus.setTextColor(Ui.ACCENT);
+        refreshPoints();
+        sendUnsent(false);
+    }
+
     private void done(Survey.Point p) {
         // The quick router ping is nearly always back by now; wait for it a moment if not.
         if (pingRunning && current == p && SystemClock.elapsedRealtime() - pingSince < 8000) {
@@ -1619,6 +1730,8 @@ public class MainActivity extends Activity {
      * a 25 MB download and a 10 MB upload, each stopped after at most 12 s.
      */
     private Survey.Speed speedTest(Network net, Survey.Point p) {
+        Survey.Speed s = new Survey.Speed();
+        boolean any = false;
         try {
             double best = Double.MAX_VALUE, jumps = 0, last = -1;
             for (int i = 0; i < 10; i++) {
@@ -1632,10 +1745,10 @@ public class MainActivity extends Activity {
             long t0 = System.nanoTime();
             long bytes = fetch(net, p, "https://speed.cloudflare.com/__down?bytes=25000000", 12_000);
             double secs = (System.nanoTime() - t0) / 1e9;
-            Survey.Speed s = new Survey.Speed();
             s.latencyMs = best;
             s.jitterMs = jumps / 9;
             s.downMbps = bytes * 8 / secs / 1e6;
+            any = true;
             ui.post(() -> {
                 if (testing == p) measureStatus.setText(T.t("Testing the upload…"));
             });
@@ -1644,10 +1757,27 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 s.upMbps = 0; // the download still counts
             }
-            return s;
         } catch (Exception e) {
-            return null;
+            // No internet: the test to the NetSketch computer below can still run.
         }
+        // Linked to NetSketch: 5 s each way to the computer, the Wi-Fi alone (that computer is usually on a cable).
+        Link l = link;
+        if (l != null && !l.code.isEmpty()) {
+            try {
+                ui.post(() -> {
+                    if (testing == p) measureStatus.setText(T.t("Testing the Wi-Fi to NetSketch…"));
+                });
+                String base = "http://" + l.host + ":" + l.port + "/speed?code=" + l.code;
+                long t0 = System.nanoTime();
+                long bytes = fetch(net, p, base + "&mb=200", 5_000);
+                s.lanDownMbps = bytes * 8 / ((System.nanoTime() - t0) / 1e9) / 1e6;
+                s.lanUpMbps = upload(net, p, base, 200_000_000L, 5_000);
+                any = true;
+            } catch (Exception e) {
+                if (s.lanDownMbps > 0) any = true;
+            }
+        }
+        return any ? s : null;
     }
 
     /** Stops a speed test once it was cancelled (or another point is being measured). */
@@ -1771,6 +1901,8 @@ public class MainActivity extends Activity {
                     p.speed.latencyMs = js.optDouble("latency_ms");
                     p.speed.upMbps = js.optDouble("up_mbps", 0);
                     p.speed.jitterMs = js.optDouble("jitter_ms", 0);
+                    p.speed.lanDownMbps = js.optDouble("lan_down_mbps", 0);
+                    p.speed.lanUpMbps = js.optDouble("lan_up_mbps", 0);
                 }
                 JSONArray nets = jp.getJSONArray("networks");
                 for (int j = 0; j < nets.length(); j++) {

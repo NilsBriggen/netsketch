@@ -16,12 +16,13 @@ pub const SCENARIOS: &[(&str, &str, &str)] = &[
     ("office", "Office with 100 VLANs", "Core router with 100 VLAN interfaces, four floors, redundant links."),
     ("classroom", "Two networks and a router (lesson)", "The classic first lesson: routing between two networks."),
     ("rip", "Three routers in a row (lesson)", "Routers that don't know the way yet: let them tell each other by RIP."),
+    ("mail", "Email at school (lesson)", "Two PCs that can't email each other yet: set up a mail server and its mailboxes."),
     ("blank", "Empty plan", "Start from scratch."),
 ];
 
 pub fn wall(n: &mut Network, a: [f32; 2], b: [f32; 2], kind: WallKind) {
     n.next_id += 1;
-    n.walls.push(Wall { id: n.next_id, a, b, kind, floor: 0 });
+    n.walls.push(Wall { id: n.next_id, a, b, kind, floor: 0, door: false });
 }
 
 fn named(n: &mut Network, kind: Kind, pos: [f32; 2], name: &str) -> u32 {
@@ -199,6 +200,7 @@ pub fn build(name: &str, n: &mut Network) {
         "nightmare" => nightmare(n),
         "campus" => campus(n),
         "rip" => rip(n),
+        "mail" => mail(n),
         _ => {}
     }
 }
@@ -216,6 +218,30 @@ fn rip(n: &mut Network) {
     n.auto_address();
     for r in rs {
         n.dev_mut(r).unwrap().routes.clear();
+    }
+}
+
+fn mail(n: &mut Network) {
+    n.title = "Email at school".into();
+    n.story = "Anna and Ben want to email each other at school.test, but nothing takes mail yet. On the school server's desktop (double-click it): install the mail server and give it mailboxes for anna and ben. In its DNS server, add the record school.test MX school-server so mail for school.test finds it. Then set up the Email program on both PCs (anna@school.test and ben@school.test) and send a mail.".into();
+    let r = named(n, Kind::Router, [460.0, 120.0], "Router");
+    let sw = named(n, Kind::Switch, [460.0, 280.0], "Switch");
+    let a = named(n, Kind::Desktop, [260.0, 420.0], "Anna's PC");
+    let b = named(n, Kind::Desktop, [660.0, 420.0], "Ben's PC");
+    let srv = named(n, Kind::Server, [460.0, 460.0], "School server");
+    for x in [r, a, b, srv] {
+        n.connect(sw, x, Medium::Cat6).unwrap();
+    }
+    {
+        let d = n.dev_mut(srv).unwrap();
+        d.install(crate::soft::Soft::DnsServer);
+    }
+    n.auto_address();
+    let ip = n.dev(srv).unwrap().first_ip().unwrap();
+    n.dev_mut(srv).unwrap().dns_records = format!("www.school.test {ip}\nschool-server {ip}");
+    // Everyone asks the school server for names.
+    for x in [a, b] {
+        n.dev_mut(x).unwrap().dns = ip.to_string();
     }
 }
 
@@ -311,9 +337,9 @@ fn office(n: &mut Network) {
             d.services.dns = true;
             d.dns = "192.168.1.1".into();
             d.dns_records = "intranet.corp.test 10.1.101.10\nfiles.corp.test 10.1.101.11".into();
-            d.web_page = "<html><body bgcolor=\"#eef2ff\"><h1>Intranet</h1><p>Welcome to the company intranet. <a href=\"vlans.html\">VLAN plan</a></p></body></html>".into();
+            d.set_file("webserver/index.html", "<html><body bgcolor=\"#eef2ff\"><h1>Intranet</h1><p>Welcome to the company intranet. <a href=\"vlans.html\">VLAN plan</a></p></body></html>");
             let plan: String = names.iter().map(|(v, s)| format!("<p><b>VLAN {v}</b> {s} — {}/24</p>", vlan_ip(*v).trim_end_matches(".1").to_string() + ".0")).collect();
-            d.web_files.push(("vlans.html".into(), format!("<html><body><h1>VLAN plan</h1>{plan}<p><a href=\"/\">Back</a></p></body></html>")));
+            d.set_file("webserver/vlans.html", &format!("<html><body><h1>VLAN plan</h1>{plan}<p><a href=\"/\">Back</a></p></body></html>"));
         }
     }
     n.dev_mut(edge).unwrap().security = Security::Wpa3;
@@ -505,8 +531,8 @@ fn campus(n: &mut Network) {
         if i == 0 {
             d.services.dns = true;
             d.dns = "192.168.1.1".into();
-            d.web_page = "<html><body bgcolor=\"#eef6ff\"><h1>Learning platform</h1><p>Welcome back. <a href=\"timetable.html\">Today's timetable</a></p></body></html>".into();
-            d.web_files.push(("timetable.html".into(), "<html><body><h1>Timetable</h1><p><b>10:00</b> Networks 101 — Lecture hall A</p><p><a href=\"/\">Back</a></p></body></html>".into()));
+            d.set_file("webserver/index.html", "<html><body bgcolor=\"#eef6ff\"><h1>Learning platform</h1><p>Welcome back. <a href=\"timetable.html\">Today's timetable</a></p></body></html>");
+            d.set_file("webserver/timetable.html", "<html><body><h1>Timetable</h1><p><b>10:00</b> Networks 101 — Lecture hall A</p><p><a href=\"/\">Back</a></p></body></html>");
         }
     }
     let lms = n.devices.iter().find(|d| d.name == "LMS server").unwrap().id;
@@ -631,6 +657,7 @@ pub const EXERCISES: &[(&str, &str)] = &[
     ("apartment", "Get your access points off the channels your neighbours crowd."),
     ("office", "Get the mislabelled PC working: it must not have any red problem."),
     ("rip", "Let PC A reach PC C without typing a single route: turn on RIP on the routers."),
+    ("mail", "Let Anna's PC send an email to ben@school.test that lands in Ben's inbox."),
 ];
 
 /// Ok with praise when the exercise for this scenario is solved, Err with what's still wrong. Every check looks
@@ -674,6 +701,26 @@ pub fn check_exercise(n: &Network) -> Result<String, String> {
                 _ => Some(crate::i18n::tr("PC A or PC C has no address.").into()),
             }
         }
+        // Tried on a copy: Anna sends, Ben's mail program finds it.
+        "mail" => {
+            let id = |name: &str| n.devices.iter().find(|d| d.name == name).map(|d| d.id);
+            match (id("Anna's PC"), id("Ben's PC")) {
+                (Some(a), Some(b)) => {
+                    let mut m = n.clone();
+                    let mut o = crate::net::Outcome::default();
+                    if m.dev(b).and_then(|d| d.mail_account.as_ref()).is_none() {
+                        Some(crate::i18n::tr("Ben's PC has no mail account yet (Email program).").into())
+                    } else if !m.send_mail(a, "ben@school.test", "Test", "Hello Ben!", &mut o) {
+                        Some(o.lines.last().cloned().unwrap_or_else(|| crate::i18n::tr("the mail didn't get through.").into()))
+                    } else if m.fetch_mail(b, "", &mut o).is_empty() {
+                        Some(crate::i18n::tr("the mail was sent, but Ben's mail program doesn't find it.").into())
+                    } else {
+                        None
+                    }
+                }
+                _ => Some(crate::i18n::tr("Anna's PC or Ben's PC is missing.").into()),
+            }
+        }
         _ => return Err("This plan has no exercise.".into()),
     };
     match still {
@@ -688,6 +735,28 @@ mod tests {
 
     fn id(n: &crate::net::Network, name: &str) -> u32 {
         n.devices.iter().find(|d| d.name == name).unwrap().id
+    }
+
+    #[test]
+    fn the_mail_exercise_is_solved_by_a_mail_server_mailboxes_an_mx_record_and_accounts() {
+        use crate::soft::{MailAccount, Soft};
+        let mut n = template("mail");
+        assert!(super::check_exercise(&n).is_err());
+        let srv = id(&n, "School server");
+        {
+            let d = n.dev_mut(srv).unwrap();
+            d.install(Soft::MailServer);
+            d.mailboxes = vec!["anna".into(), "ben".into()];
+            d.dns_records.push_str("\nschool.test MX school-server");
+        }
+        for (pc, who) in [("Anna's PC", "anna"), ("Ben's PC", "ben")] {
+            let i = id(&n, pc);
+            n.dev_mut(i).unwrap().mail_account = Some(MailAccount { address: format!("{who}@school.test"), server: "School server".into() });
+        }
+        assert_eq!(super::check_exercise(&n), Ok(crate::i18n::tr("Solved — well done!").into()));
+        // Without the mailbox for ben it bounces.
+        n.dev_mut(srv).unwrap().mailboxes.retain(|m| m != "ben");
+        assert!(super::check_exercise(&n).is_err());
     }
 
     #[test]
@@ -728,7 +797,7 @@ mod tests {
         let mut n = template_seeded("nightmare", 9);
         let texts: Vec<String> = n.check().into_iter().map(|i| i.text).collect();
         let all = texts.join("\n");
-        for needle in ["broadcast storm", "both use 192.168.1.150", "hand out addresses in the same network", "WEP", "has no PoE", "EU limit", "disturbs it", "100 Mbit/s", "doesn't make it back"] {
+        for needle in ["broadcast storm", "both use 192.168.1.150", "hand out addresses in the same network", "WEP", "has no PoE", "legal limit", "disturbs it", "100 Mbit/s", "doesn't make it back"] {
             assert!(all.contains(needle), "missing '{needle}' in:\n{all}");
         }
         // Everything stops while the loop rages...

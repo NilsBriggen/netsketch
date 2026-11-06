@@ -18,11 +18,16 @@ mod radio_ui;
 mod report;
 mod scenarios;
 mod sim;
+mod soft;
 mod stp;
 mod ui_companion;
+mod ui_desk;
 mod ui_draw;
 mod ui_extras;
+mod ui_kit;
 mod ui_more;
+mod ui_select;
+mod ui_shell;
 mod wifi;
 
 use eframe::egui::{
@@ -36,6 +41,7 @@ use net::{Issue, Kind, Level, Medium, Network, Security, WifiStd, PX_PER_M};
 const MAX_ZOOM: f32 = 12.0;
 use i18n::{tr, trf};
 use radio_ui::{issue_row, quality_color, Walk};
+use ui_shell::Space;
 use wifi::WallKind;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,9 +67,10 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
 }
 
 /// Dark (the default), light, and high contrast for low vision or bright rooms.
+/// Neutral greys with one teal accent: red, amber and green only ever mean a problem, a warning or all good.
 const PALETTES: [Palette; 3] = [
-    Palette { bg: rgb(13, 17, 23), panel: rgb(20, 26, 34), card: rgb(28, 35, 46), line: rgb(44, 54, 68), text: rgb(220, 227, 236), dim: rgb(132, 146, 164), accent: rgb(45, 212, 191), red: rgb(248, 113, 113), amber: rgb(251, 191, 36), green: rgb(74, 222, 128), hover: rgb(38, 48, 62), press: rgb(48, 60, 76) },
-    Palette { bg: rgb(246, 248, 250), panel: rgb(234, 238, 243), card: rgb(255, 255, 255), line: rgb(200, 208, 218), text: rgb(24, 31, 41), dim: rgb(84, 96, 112), accent: rgb(13, 128, 116), red: rgb(196, 38, 38), amber: rgb(161, 98, 7), green: rgb(21, 128, 61), hover: rgb(222, 228, 236), press: rgb(208, 216, 226) },
+    Palette { bg: rgb(17, 18, 21), panel: rgb(24, 25, 29), card: rgb(33, 35, 40), line: rgb(47, 50, 56), text: rgb(228, 230, 234), dim: rgb(146, 150, 159), accent: rgb(52, 196, 176), red: rgb(240, 104, 104), amber: rgb(232, 172, 58), green: rgb(86, 204, 128), hover: rgb(40, 42, 48), press: rgb(50, 53, 60) },
+    Palette { bg: rgb(244, 245, 247), panel: rgb(255, 255, 255), card: rgb(240, 241, 244), line: rgb(222, 224, 229), text: rgb(27, 29, 33), dim: rgb(98, 103, 112), accent: rgb(13, 128, 116), red: rgb(196, 40, 40), amber: rgb(163, 100, 8), green: rgb(22, 128, 62), hover: rgb(232, 234, 238), press: rgb(220, 223, 228) },
     Palette { bg: rgb(0, 0, 0), panel: rgb(10, 10, 10), card: rgb(26, 26, 26), line: rgb(160, 160, 160), text: rgb(255, 255, 255), dim: rgb(214, 214, 214), accent: rgb(0, 255, 230), red: rgb(255, 92, 92), amber: rgb(255, 214, 10), green: rgb(80, 255, 120), hover: rgb(50, 50, 50), press: rgb(70, 70, 70) },
 ];
 
@@ -75,19 +82,8 @@ fn pal() -> &'static Palette {
 }
 
 fn kind_color(k: Kind) -> Color32 {
-    use Kind::*;
-    match k {
-        Internet => Color32::from_rgb(129, 140, 248),
-        HomeRouter | Router => Color32::from_rgb(45, 212, 191),
-        Switch | AccessPoint => Color32::from_rgb(56, 189, 248),
-        Server | Nas => Color32::from_rgb(244, 114, 182),
-        Printer | Tv | SmartHome | Camera | Console => Color32::from_rgb(251, 191, 36),
-        Extender => Color32::from_rgb(251, 146, 60),
-        Speaker => Color32::from_rgb(232, 121, 249),
-        Neighbor => Color32::from_rgb(120, 134, 152),
-        Interference => Color32::from_rgb(248, 113, 113),
-        _ => Color32::from_rgb(167, 139, 250),
-    }
+    // One calm colour: the icon tells the kind, the status dot tells the health. Others' gear is dimmed.
+    if k.foreign() { pal().dim } else { pal().text }
 }
 
 fn kind_icon(k: Kind) -> &'static str {
@@ -116,17 +112,20 @@ fn kind_icon(k: Kind) -> &'static str {
 }
 
 fn medium_color(m: Medium) -> Color32 {
-    match m {
-        Medium::Cat5e => Color32::from_rgb(120, 134, 152),
-        Medium::Cat6 => Color32::from_rgb(96, 165, 250),
-        Medium::Cat6a => Color32::from_rgb(52, 211, 153),
-        Medium::Fiber => Color32::from_rgb(251, 146, 60),
-        Medium::WiFi => Color32::from_rgb(45, 212, 191),
-        Medium::Cat5 => Color32::from_rgb(220, 120, 90),
-        Medium::Powerline => Color32::from_rgb(234, 179, 8),
-        Medium::Mesh => Color32::from_rgb(232, 121, 249),
-        Medium::Cellular => Color32::from_rgb(250, 204, 21),
-    }
+    // Cable kinds stay told apart, in muted tones; Wi-Fi in the accent.
+    let c = match m {
+        Medium::Cat5e => rgb(128, 134, 146),
+        Medium::Cat6 => rgb(110, 150, 200),
+        Medium::Cat6a => rgb(96, 176, 150),
+        Medium::Fiber => rgb(236, 142, 58),
+        Medium::WiFi => return pal().accent,
+        Medium::Cat5 => rgb(214, 104, 146),
+        Medium::Powerline => rgb(196, 170, 88),
+        Medium::Mesh => rgb(176, 136, 200),
+        Medium::Cellular => rgb(200, 180, 90),
+    };
+    // Darker on the light theme so thin lines stay visible.
+    if THEME.load(std::sync::atomic::Ordering::Relaxed) == 1 { rgb((c.r() as u16 * 4 / 5) as u8, (c.g() as u16 * 4 / 5) as u8, (c.b() as u16 * 4 / 5) as u8) } else { c }
 }
 
 fn level_color(l: Level) -> Color32 {
@@ -171,12 +170,19 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("M", "Measure a distance"),
     ("F", "Fit the plan to the window"),
     ("Tab / Shift+Tab", "Pick the next or previous device"),
-    ("Arrow keys", "Nudge the picked device by 25 cm"),
-    ("Delete", "Remove what's selected"),
+    ("Arrow keys", "Nudge what's selected by 25 cm (Shift: 1 m)"),
+    ("Shift+click / Shift+drag", "Select several things (a box on empty map)"),
+    ("Delete / Backspace", "Remove what's selected"),
     ("Esc", "Deselect, end a wall"),
     ("Ctrl+Z / Ctrl+Y", "Undo, redo"),
+    ("Ctrl+Shift+Z", "Redo"),
     ("Ctrl+D", "Duplicate"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut, paste where the pointer is (also on another storey)"),
     ("Ctrl+S / Ctrl+O", "Save, open"),
+    ("Ctrl+Shift+S", "Save as a new file"),
+    ("Ctrl+N", "New blank plan"),
+    ("Mouse wheel / pinch", "Zoom the map"),
+    ("Drag empty map / middle button / Space+drag", "Move the map"),
 ];
 
 /// Look and text size, kept in the config folder next to the device library.
@@ -233,39 +239,59 @@ impl Settings {
         v.hyperlink_color = pal().accent;
         v.window_stroke = Stroke::new(1.0, pal().line);
         for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive, &mut v.widgets.open] {
-            w.corner_radius = CornerRadius::same(8);
+            w.corner_radius = CornerRadius::same(6);
         }
         v.widgets.inactive.weak_bg_fill = pal().card;
         // Checkboxes, radios and slider rails use bg_fill: the page colour keeps them visible on cards and menus.
         v.widgets.inactive.bg_fill = pal().bg;
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, pal().line);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, pal().dim.gamma_multiply(0.45));
         v.widgets.hovered.weak_bg_fill = pal().hover;
         v.widgets.active.weak_bg_fill = pal().press;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, pal().line);
-        s.spacing.item_spacing = vec2(8.0, 7.0);
-        s.spacing.button_padding = vec2(10.0, 5.0);
-        s.spacing.interact_size.y = 26.0;
+        // Buttons are quiet until hovered; hairline borders; one size of rounding.
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, pal().dim.gamma_multiply(0.6));
+        v.widgets.active.bg_stroke = Stroke::new(1.0, pal().accent);
+        v.menu_corner_radius = CornerRadius::same(10);
+        v.window_corner_radius = CornerRadius::same(12);
+        v.window_shadow = egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(60) };
+        v.popup_shadow = egui::Shadow { offset: [0, 3], blur: 12, spread: 0, color: Color32::from_black_alpha(50) };
+        s.spacing.item_spacing = vec2(8.0, 6.0);
+        s.spacing.button_padding = vec2(10.0, 4.0);
+        s.spacing.interact_size.y = 24.0;
         use egui::TextStyle as T;
-        s.text_styles.insert(T::Body, FontId::proportional(14.0));
-        s.text_styles.insert(T::Button, FontId::proportional(14.0));
-        s.text_styles.insert(T::Heading, FontId::proportional(20.0));
-        s.text_styles.insert(T::Small, FontId::proportional(12.0));
-        s.text_styles.insert(T::Monospace, FontId::monospace(13.0));
+        s.text_styles.insert(T::Body, FontId::proportional(13.5));
+        s.text_styles.insert(T::Button, FontId::proportional(13.5));
+        s.text_styles.insert(T::Heading, FontId::proportional(17.0));
+        s.text_styles.insert(T::Small, FontId::proportional(11.5));
+        s.text_styles.insert(T::Monospace, FontId::monospace(12.5));
         });
     }
 }
 
 /// What an in-place edit replaced, for its undo step (App::snapshot_before).
+/// What replaces the open plan: the file picker, a file, or a ready plan (a template, the recovered autosave: true).
+enum Swap {
+    Open,
+    Path(PathBuf),
+    Plan(Box<Network>, bool),
+}
+
 enum Before {
     Device(net::Device),
     Link(net::Link),
+    Wall(wifi::Wall),
+    Point(companion::MeasurePoint),
+    Label(net::RoomLabel),
 }
 
+/// The tabs of a device's panel in Design.
 #[derive(PartialEq, Clone, Copy)]
-enum Bottom {
-    Problems,
-    Packets,
-    Shopping,
+enum DevTab {
+    General,
+    WiFi,
+    Network,
+    Security,
+    Use,
 }
 
 struct Row {
@@ -296,8 +322,6 @@ fn step_at(anims: &[Anim], mut k: usize) -> Option<(&Anim, usize)> {
 enum SimTab {
     WiFi,
     Ports,
-    Browser,
-    Terminal,
     Traffic,
 }
 
@@ -331,6 +355,17 @@ const SPEED_TESTS: [&str; 6] = ["speedtest.net", "fast.com", "speed.cloudflare.c
 
 /// Downloads a real page (in a background thread). Sends only a generic client name.
 /// Fingerprint of everything a plan saves.
+/// The dots flowing one way along a link: the rate they show (gliding towards the real one) and where the lattice
+/// is (a share of one base spacing).
+struct Stream {
+    shown: f32,
+    phase: f32,
+}
+
+/// Widest spacing of the moving dots (map px at zoom 1): a trickle shows one dot per this; more traffic adds dots
+/// halfway between, then quarter-way, down to 5 px.
+const DOT_BASE: f32 = 128.0;
+
 fn plan_hash(net: &Network) -> u64 {
     use std::hash::Hasher;
     /// Feeds the JSON straight into the hasher: no copy of the whole plan (floor-plan pictures and all) in memory.
@@ -357,6 +392,11 @@ fn recent_path() -> PathBuf {
 fn recent_files() -> Vec<PathBuf> {
     let list: Vec<PathBuf> = std::fs::read_to_string(recent_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     list.into_iter().filter(|p| p.exists()).collect()
+}
+
+/// A file's name without its folder, for messages.
+fn file_name(p: &std::path::Path) -> String {
+    p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 fn remember_file(path: &std::path::Path) {
@@ -403,7 +443,14 @@ struct App {
     /// trying things out doesn't change the plan.
     sim_home: HashMap<u32, ([f32; 2], Option<net::Link>)>,
     canvas_rect: Rect,
-    bottom: Bottom,
+    /// The open workspace of the left rail (None: folded away).
+    space: Option<Space>,
+    /// The open tab of a device's panel, and the add-device palette with its search text.
+    dev_tab: DevTab,
+    add_open: bool,
+    add_query: String,
+    /// The packet log's big window.
+    log_window: bool,
     only_selected: bool,
     terms: HashMap<u32, Term>,
     browsers: HashMap<u32, Browser>,
@@ -430,6 +477,10 @@ struct App {
     replug: Option<u32>,
     /// A device or cable as it was before an edit rewrote it in place (new hardware, cable type, ports); next frame makes it an undo step.
     before: Option<Before>,
+    /// The last panel edit: what, when, and the undo depth after it (later edits to the same thing join that step).
+    panel_edit: Option<(Sel, f64, u64)>,
+    /// Undo steps taken so far (counts up forever; tells whether anything else happened since the last panel edit).
+    steps: u64,
     settings: Settings,
     /// Tab (+1) or Shift+Tab (−1) pressed on the map: select the next or previous device.
     tab: Option<i32>,
@@ -452,17 +503,46 @@ struct App {
     /// The same as a long-run average, for the hover tag while traffic comes and goes.
     avg_cache: Option<extras::Load>,
     /// Wi-Fi map cells in map coordinates, with what they were computed for and when.
-    /// (storey, cell size, band), the area covered in cells, the cells, when it was checked, and a fingerprint of the radios and walls.
-    heat_cache: Option<((i8, i32, usize), [i32; 4], Vec<(Rect, Color32)>, f64, u64)>,
+    heat_cache: Option<radio_ui::HeatMap>,
     heat_job: Option<radio_ui::HeatJob>,
+    /// The moving dots of each link direction, and when they last moved.
+    flow: HashMap<(u32, bool), Stream>,
+    flow_t: f64,
     /// Wi-Fi map: 0 = best band, 1..=3 = 2.4 / 5 / 6 GHz only.
     heat_band: usize,
+    /// The Wi-Fi map shows internet speed instead of signal.
+    heat_speed: bool,
+    /// The selected device whose own Wi-Fi map was closed (×): the map shows everything again.
+    heat_unfocus: Option<u32>,
+    /// More selected things besides `sel` (Shift+click, a box): moved, nudged, deleted and copied together.
+    extra: Vec<Sel>,
+    /// `sel` as it was at the end of the last frame, and whether this frame changed the selection on purpose.
+    sel_seen: Sel,
+    multi_touched: bool,
+    /// What Ctrl+C took.
+    clip: Option<ui_select::Clip>,
+    /// Where a Shift+drag selection box started (map point).
+    marquee: Option<Vec2>,
+    /// The dragged device lined up with another this frame (then it doesn't also snap to the grid).
+    guide_hit: bool,
+    /// Devices whose desktop window is open, in opening order, and what each shows.
+    desks: Vec<u32>,
+    desk: HashMap<u32, ui_desk::Desk>,
     /// Outdoor areas' coverage on the shown storey, and when it was worked out.
     outdoor_cache: Option<(f64, Vec<(u32, plan::Coverage)>)>,
     /// The day's load chart (time computed, every half hour: internet line, busiest link), refreshed once a second.
     day_cache: Option<(f64, Vec<(f32, f32)>)>,
     /// Coverage score of the shown storey (storey, when computed, score).
     cov_cache: Option<(i8, f64, Option<plan::Coverage>)>,
+    /// Search text for the measured networks, and whether their big window is open.
+    measured_filter: String,
+    measured_window: bool,
+    /// What "Learn walls" found, waiting for Apply.
+    wall_learn: Option<crate::companion::WallFit>,
+    /// The budget planner: how much, mesh or cables, and what it proposed.
+    budget: f32,
+    budget_mesh: bool,
+    proposal: Option<crate::plan::Proposal>,
     /// Suggested spot for one more access point: storey, position, good share before → after.
     ap_hint: Option<(i8, [f32; 2], f32, f32)>,
     redo: Vec<(Network, Option<PathBuf>)>,
@@ -491,6 +571,8 @@ struct App {
     touched: [bool; 2],
     /// Closing was asked for with unsaved changes: show "Save your changes?".
     ask_quit: bool,
+    /// A plan waiting to replace the open one while "Save your changes?" is asked.
+    pending: Option<Swap>,
     quit_ok: bool,
     /// When an arrow key last nudged a device: a run of nudges is one undo step.
     nudged: f64,
@@ -500,14 +582,9 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext, screenshot: Option<PathBuf>, open: Option<PathBuf>) -> Self {
-        let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-        cc.egui_ctx.set_fonts(fonts);
-        // Screenshots always look the same, whatever this computer's settings are.
-        let settings = if screenshot.is_some() { Settings::default() } else { Settings::load() };
-        settings.apply(&cc.egui_ctx);
-        let mut app = App {
+    /// The app's state before any plan is loaded.
+    fn bare(settings: Settings, screenshot: Option<PathBuf>) -> Self {
+        App {
             net: Network::default(),
             mode: Mode::Design,
             tool: Tool::Select,
@@ -525,11 +602,15 @@ impl App {
             measure_real: 3.0,
             sim_home: HashMap::new(),
             canvas_rect: Rect::NOTHING,
-            bottom: Bottom::Problems,
+            space: Some(Space::Plan),
+            dev_tab: DevTab::General,
+            add_open: false,
+            add_query: String::new(),
+            log_window: false,
             only_selected: false,
             terms: HashMap::new(),
             browsers: HashMap::new(),
-            sim_tab: SimTab::Browser,
+            sim_tab: SimTab::WiFi,
             rows: vec![],
             anims: vec![],
             pkt_view: None,
@@ -544,6 +625,8 @@ impl App {
             catalog_query: String::new(),
             replug: None,
             before: None,
+            panel_edit: None,
+            steps: 0,
             settings,
             tab: None,
             quiz_pick: None,
@@ -559,8 +642,26 @@ impl App {
             avg_cache: None,
             heat_cache: None,
             heat_job: None,
+            flow: HashMap::new(),
+            flow_t: 0.0,
             heat_band: 0,
+            heat_speed: false,
+            heat_unfocus: None,
+            extra: vec![],
+            sel_seen: Sel::None,
+            multi_touched: false,
+            clip: None,
+            marquee: None,
+            guide_hit: false,
+            desks: vec![],
+            desk: HashMap::new(),
             cov_cache: None,
+            measured_filter: String::new(),
+            measured_window: false,
+            wall_learn: None,
+            budget: 500.0,
+            budget_mesh: true,
+            proposal: None,
             outdoor_cache: None,
             day_cache: None,
             ap_hint: None,
@@ -583,12 +684,35 @@ impl App {
             dirty_at: 0.0,
             touched: [true; 2],
             ask_quit: false,
+            pending: None,
             quit_ok: false,
             nudged: 0.0,
             toast: None,
             screenshot,
             frame: 0,
-        };
+        }
+    }
+
+    /// An app with the home example loaded, for tests that drive the editor without a window.
+    #[cfg(test)]
+    fn for_tests() -> Self {
+        let mut app = Self::bare(Settings::default(), None);
+        app.load(net::template("home"));
+        app
+    }
+
+    fn new(cc: &eframe::CreationContext, screenshot: Option<PathBuf>, open: Option<PathBuf>) -> Self {
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        // The text font has no arrows (→ ↔); the built-in monospace font fills them in.
+        if let Some(f) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            f.push("Hack".to_owned());
+        }
+        cc.egui_ctx.set_fonts(fonts);
+        // Screenshots always look the same, whatever this computer's settings are.
+        let settings = if screenshot.is_some() { Settings::default() } else { Settings::load() };
+        settings.apply(&cc.egui_ctx);
+        let mut app = Self::bare(settings, screenshot);
         app.load(net::template("home"));
         let logs = app.net.run_dhcp();
         app.push_logs(logs);
@@ -631,7 +755,11 @@ impl App {
         // An edit follows: nothing worked out earlier this frame may be reused, and the plan needs fingerprinting.
         self.net.memo.borrow_mut().reset(true);
         self.touched = [true; 2];
+        // Learned and proposed results were worked out for the plan before this edit.
+        self.wall_learn = None;
+        self.proposal = None;
         self.redo.clear();
+        self.steps += 1;
         // The file goes with each step, so undoing past an Open never lets Ctrl+S write over the other file.
         self.undo.push((self.net.clone(), self.file.clone()));
         if self.undo.len() > 40 {
@@ -654,9 +782,45 @@ impl App {
                     *l = o;
                 }
             }
+            Before::Wall(o) => {
+                if let Some(w) = self.net.walls.iter_mut().find(|w| w.id == o.id) {
+                    *w = o;
+                }
+            }
+            Before::Point(o) => {
+                if let Some(p) = self.net.points.iter_mut().find(|p| p.id == o.id) {
+                    *p = o;
+                }
+            }
+            Before::Label(o) => {
+                if let Some(l) = self.net.labels.iter_mut().find(|l| l.id == o.id) {
+                    *l = o;
+                }
+            }
         }
         self.snapshot();
         self.net = now;
+    }
+
+    /// The selected thing as it is now (for undoing edits made in its panel), and its JSON to spot a change.
+    fn sel_copy(&self) -> Option<(Before, String)> {
+        let b = match self.sel {
+            Sel::Dev(id) => Before::Device(self.net.dev(id)?.clone()),
+            Sel::Link(id) => Before::Link(self.net.links.iter().find(|l| l.id == id)?.clone()),
+            Sel::Wall(id) => Before::Wall(self.net.walls.iter().find(|w| w.id == id)?.clone()),
+            Sel::Point(id) => Before::Point(self.net.points.iter().find(|p| p.id == id)?.clone()),
+            Sel::Label(id) => Before::Label(self.net.labels.iter().find(|l| l.id == id)?.clone()),
+            _ => return None,
+        };
+        let json = match &b {
+            Before::Device(x) => serde_json::to_string(x),
+            Before::Link(x) => serde_json::to_string(x),
+            Before::Wall(x) => serde_json::to_string(x),
+            Before::Point(x) => serde_json::to_string(x),
+            Before::Label(x) => serde_json::to_string(x),
+        }
+        .ok()?;
+        Some((b, json))
     }
 
     fn load(&mut self, mut n: Network) {
@@ -667,6 +831,8 @@ impl App {
         }
         self.net = n;
         self.saved_hash = plan_hash(&self.net);
+        // An untouched plan isn't worth an automatic save: the recovery copy keeps the last plan that was worked on.
+        self.autosave_last = serde_json::to_string(&self.net).unwrap_or_default();
         // The phone link belongs to the plan it was started for.
         self.phone = None;
         self.issues = None;
@@ -696,6 +862,28 @@ impl App {
         // Longer messages stay a bit longer (about 15 characters a second, 3–9 s).
         let secs = (msg.len() as f64 / 15.0).clamp(3.0, 9.0);
         self.toast = Some((msg, Self::now(ctx) + secs));
+    }
+
+    /// The latest message, at the bottom middle of the map so it never hides what's being worked on.
+    fn toast_ui(&mut self, ctx: &egui::Context) {
+        let Some((msg, until)) = self.toast.clone() else { return };
+        if Self::now(ctx) >= until {
+            self.toast = None;
+            return;
+        }
+        let c = if self.canvas_rect.is_positive() && self.mode != Mode::Learn { self.canvas_rect } else { ctx.content_rect() };
+        // Above the Wi-Fi map's card when it's up.
+        let lift = if self.heat && self.mode != Mode::Learn { if c.width() < 810.0 { 190.0 } else { 130.0 } } else { 64.0 };
+        egui::Area::new(Id::new("toast")).fixed_pos(pos2(c.center().x, c.bottom() - lift)).pivot(Align2::CENTER_BOTTOM).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::new().fill(pal().card).stroke(Stroke::new(1.0, pal().line)).corner_radius(10).inner_margin(Margin::symmetric(14, 9)).shadow(egui::Shadow { offset: [0, 3], blur: 14, spread: 0, color: Color32::from_black_alpha(70) }).show(ui, |ui| {
+                ui.set_max_width(560.0f32.min(c.width() - 60.0).max(200.0));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::INFO).color(pal().accent));
+                    ui.label(msg);
+                });
+            });
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(300));
     }
 
     fn push_logs(&mut self, logs: Vec<net::Log>) {
@@ -751,7 +939,7 @@ impl App {
         let Some(path) = path else { return false };
         match serde_json::to_string_pretty(&self.net).map_err(|e| e.to_string()).and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string())) {
             Ok(()) => {
-                self.say(ctx, trf("Saved {}", &[&(path.display())]));
+                self.say(ctx, trf("Saved {}", &[&file_name(&path)]));
                 remember_file(&path);
                 self.file = Some(path);
                 self.saved_hash = plan_hash(&self.net);
@@ -792,14 +980,43 @@ impl App {
                 let newer = n.version > net::FORMAT;
                 self.load(n);
                 remember_file(&path);
-                self.say(ctx, if newer { trf("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", &[&(path.display())]) } else { trf("Opened {}", &[&(path.display())]) });
+                self.say(ctx, if newer { trf("Opened {}. It was saved by a newer NetSketch: settings this version doesn't know are left out, and saving here drops them.", &[&file_name(&path)]) } else { trf("Opened {}", &[&file_name(&path)]) });
                 self.file = Some(path);
             }
             Err(e) => self.say(ctx, trf("Couldn't open that file: {}", &[&e])),
         }
     }
 
-    /// "Save your changes?" when the window is closed with unsaved changes.
+    /// Replaces the open plan, first asking "Save your changes?" when it has unsaved ones.
+    fn swap(&mut self, ctx: &egui::Context, s: Swap) {
+        let n = &self.net;
+        let empty = n.devices.is_empty() && n.walls.is_empty() && n.labels.is_empty() && n.points.is_empty() && n.plans.is_empty();
+        if !empty && plan_hash(&self.net) != self.saved_hash {
+            self.pending = Some(s);
+        } else {
+            self.do_swap(ctx, s);
+        }
+    }
+
+    fn do_swap(&mut self, ctx: &egui::Context, s: Swap) {
+        match s {
+            Swap::Open => self.open(ctx),
+            Swap::Path(p) => self.open_path(ctx, p),
+            Swap::Plan(n, recovered) => {
+                self.load(*n);
+                self.file = None;
+                if recovered {
+                    // A recovered copy must not overwrite whatever file was open before, and it isn't saved yet.
+                    self.saved_hash = 0;
+                }
+                if recovered || self.mode == Mode::Learn {
+                    self.mode = Mode::Design;
+                }
+            }
+        }
+    }
+
+    /// "Save your changes?" when the window is closed, or another plan opened, with unsaved changes.
     fn quit_dialog(&mut self, ctx: &egui::Context) {
         let mut quit = false;
         egui::Modal::new(Id::new("quit")).show(ctx, |ui| {
@@ -819,286 +1036,38 @@ impl App {
                 }
                 if ui.button(tr("Cancel")).clicked() {
                     self.ask_quit = false;
+                    self.pending = None;
                 }
             });
         });
         if quit {
             self.ask_quit = false;
-            self.quit_ok = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if let Some(s) = self.pending.take() {
+                self.do_swap(ctx, s);
+            } else {
+                self.quit_ok = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
     }
 
     fn export(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new().add_filter(tr("Web page (opens in any browser, prints to PDF)"), &["html"]).set_file_name("network-plan.html").save_file() else { return };
         match std::fs::write(&path, report::html(&self.net)) {
-            Ok(()) => self.say(ctx, trf("Exported {}. Open it in a browser; Print → Save as PDF makes a PDF.", &[&(path.display())])),
+            Ok(()) => self.say(ctx, trf("Exported {}. Open it in a browser; Print → Save as PDF makes a PDF.", &[&file_name(&path)])),
             Err(e) => self.say(ctx, trf("Couldn't export: {}", &[&e])),
         }
     }
 
-    // ---------- top bar ----------
-
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        // Narrow windows: icon-only buttons (names on hover) so nothing overlaps.
-        let compact = ui.available_width() < 1500.0;
-        let tiny = ui.available_width() < 1150.0;
-        let lab = |icon: &str, text: &str| if compact { icon.to_string() } else { format!("{icon}  {}", tr(text)) };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(ic::SHARE_NETWORK).size(22.0).color(pal().accent));
-            if !tiny {
-                ui.label(RichText::new(tr("NetSketch")).size(18.0).strong());
-            }
-            ui.add(TextEdit::singleline(&mut self.net.title).desired_width(if compact { 130.0 } else { 180.0 }).frame(egui::Frame::NONE).text_color(pal().dim));
-            ui.add_space(if compact { 6.0 } else { 16.0 });
-            let before = self.mode;
-            for (m, icon, label) in [(Mode::Design, ic::PENCIL_SIMPLE, tr("Design")), (Mode::Simulate, ic::PLAY, tr("Simulate")), (Mode::Learn, ic::BOOK_OPEN, tr("Learn"))] {
-                let on = self.mode == m;
-                let text = if tiny && !on { icon.to_string() } else { format!("{icon}  {}", tr(label)) };
-                let b = egui::Button::new(RichText::new(text).color(if on { pal().bg } else { pal().text }))
-                    .fill(if on { pal().accent } else { pal().card })
-                    .corner_radius(14);
-                if ui.add(b).clicked() {
-                    self.mode = m;
-                }
-            }
-            if before != self.mode && self.mode == Mode::Simulate {
-                self.start_sim(&ctx);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let was = self.settings;
-                ui.menu_button(ic::GEAR, |ui| {
-                    ui.set_min_width(240.0);
-                    ui.label(RichText::new(tr("Language")).strong());
-                    for (i, name) in i18n::LANGUAGES.into_iter().enumerate() {
-                        ui.radio_value(&mut self.settings.lang, i, name);
-                    }
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(tr("Look")).strong());
-                    for (i, name) in [tr("Dark"), tr("Light"), tr("High contrast")].into_iter().enumerate() {
-                        ui.radio_value(&mut self.settings.theme, i, tr(name));
-                    }
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(tr("Text and buttons")).strong());
-                    ui.add(egui::Slider::new(&mut self.settings.zoom, 0.8..=1.8).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                    ui.label(RichText::new(tr("Ctrl + and Ctrl − change the size too.")).small().color(pal().dim));
-                })
-                .response
-                .on_hover_text(tr("Settings: colours and text size"));
-                if self.settings != was {
-                    self.settings.apply(ui.ctx());
-                    self.settings.save();
-                }
-                ui.menu_button(ic::KEYBOARD, |ui| {
-                    ui.set_min_width(300.0);
-                    ui.label(RichText::new(tr("Keyboard shortcuts")).strong());
-                    egui::Grid::new("keys").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
-                        for (k, what) in SHORTCUTS {
-                            ui.label(RichText::new(*k).monospace().color(pal().accent));
-                            ui.label(tr(what));
-                            ui.end_row();
-                        }
-                    });
-                    ui.label(RichText::new(tr("Right-click anything on the map for more. Hold Shift while connecting to cable a laptop.")).small().color(pal().dim));
-                })
-                .response
-                .on_hover_text(tr("Keyboard shortcuts"));
-                if ui.button(lab(ic::EXPORT, tr("Export"))).on_hover_text(tr("Export a report: each storey's Wi-Fi map, the access points and channels, the shopping list, open problems and addresses (a web page that prints to PDF)")).clicked() {
-                    self.export(&ctx);
-                }
-                if ui.button(lab(ic::FLOPPY_DISK, tr("Save"))).on_hover_text(tr("Save (Ctrl+S)")).clicked() {
-                    self.save(&ctx, false);
-                }
-                if ui.button(ic::FLOPPY_DISK_BACK).on_hover_text(tr("Save as a new file (Ctrl+Shift+S)")).clicked() {
-                    self.save(&ctx, true);
-                }
-                // Right to left: the recent-plans arrow shows just right of Open.
-                ui.menu_button(ic::CARET_DOWN, |ui| {
-                    let files = recent_files();
-                    if files.is_empty() {
-                        ui.label(RichText::new(tr("No recent plans yet")).color(pal().dim));
-                    }
-                    for f in files {
-                        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        if ui.button(name).on_hover_text(f.display().to_string()).clicked() {
-                            self.open_path(&ctx, f);
-                            ui.close();
-                        }
-                    }
-                })
-                .response
-                .on_hover_text(tr("Recent plans"));
-                if ui.button(lab(ic::FOLDER_OPEN, tr("Open"))).on_hover_text(tr("Open a plan or an older .fls project (Ctrl+O). Plans, phone surveys and floor-plan pictures can also be dropped on the window.")).clicked() {
-                    self.open(&ctx);
-                }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(ic::ARROW_CLOCKWISE)).on_hover_text(tr("Redo (Ctrl+Y)")).clicked() {
-                    self.redo_once(&ctx);
-                }
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(ic::ARROW_COUNTER_CLOCKWISE)).on_hover_text(tr("Undo (Ctrl+Z)")).clicked() {
-                    self.undo_once(&ctx);
-                }
-                ui.menu_button(lab(ic::FILE_PLUS, tr("New")), |ui| {
-                    ui.set_min_width(340.0);
-                    if Self::autosave_path().exists() && ui.button(RichText::new(format!("{}  {}", ic::CLOCK_COUNTER_CLOCKWISE, tr("Recover last session"))).strong()).on_hover_text(tr("The plan as it was at the last automatic save")).clicked() {
-                        match std::fs::read_to_string(Self::autosave_path()).map_err(|e| e.to_string()).and_then(|t| Network::from_json(&t)) {
-                            Ok(n) => {
-                                self.load(n);
-                                // A recovered copy must not overwrite whatever file was open before, and it isn't saved yet.
-                                self.file = None;
-                                self.saved_hash = 0;
-                                self.mode = Mode::Design;
-                            }
-                            Err(e) => self.say(&ctx, trf("Couldn't read the automatic save: {}", &[&e])),
-                        }
-                        ui.close();
-                    }
-                    ui.separator();
-                    for (key, label, desc) in scenarios::SCENARIOS {
-                        if ui.button(RichText::new(tr(label)).strong()).on_hover_text(tr(desc)).clicked() {
-                            self.load(net::template(key));
-                            self.file = None;
-                            if self.mode == Mode::Learn {
-                                self.mode = Mode::Design;
-                            }
-                            ui.close();
-                        }
-                    }
-                });
-                let mut used = self.net.used_floors();
-                used.extend([0, self.floor]);
-                let (lo, hi) = (*used.first().unwrap(), *used.last().unwrap());
-                egui::ComboBox::from_id_salt("floor").selected_text(format!("{}  {}", ic::STACK, self.net.storey(self.floor))).width(if compact { 120.0 } else { 150.0 }).show_ui(ui, |ui| {
-                    for f in (lo..=hi).rev() {
-                        let n = self.net.devices.iter().filter(|d| d.floor == f).count();
-                        ui.selectable_value(&mut self.floor, f, format!("{}{}", self.net.storey(f), if n > 0 { format!(" ({n})") } else { String::new() }));
-                    }
-                    // A new storey is a clear choice of its own; it stays once something is placed on it.
-                    ui.separator();
-                    if hi < 20 && ui.button(trf("{}  Add a storey above ({})", &[&(ic::PLUS), &(net::floor_name(hi + 1))])).clicked() {
-                        self.floor = hi + 1;
-                    }
-                    if lo > -3 && ui.button(trf("{}  Add a basement level ({})", &[&(ic::PLUS), &(net::floor_name(lo - 1))])).clicked() {
-                        self.floor = lo - 1;
-                    }
-                    ui.separator();
-                    let f = self.floor;
-                    let mut name = self.net.storey_names.iter().find(|s| s.0 == f).map(|s| s.1.clone()).unwrap_or_default();
-                    if ui.add(TextEdit::singleline(&mut name).hint_text(trf("Name for {}", &[&(net::floor_name(f))])).desired_width(200.0)).changed() {
-                        self.net.storey_names.retain(|s| s.0 != f);
-                        self.net.storey_names.push((f, name));
-                    }
-                    let mut h = self.net.storey_h(f);
-                    ui.horizontal(|ui| {
-                        ui.label(tr("Height"));
-                        if ui.add(egui::DragValue::new(&mut h).range(2.0..=10.0).speed(0.05).max_decimals(2).suffix(" m")).on_hover_text(tr("Floor to floor, ceiling and slab included: the signal between storeys travels this far")).changed() {
-                            self.net.storey_heights.retain(|s| s.0 != f);
-                            self.net.storey_heights.push((f, h));
-                            self.heat_cache = None;
-                            self.heat_job = None;
-                        }
-                    });
-                    let below: Vec<crate::wifi::Wall> = self.net.walls.iter().filter(|w| w.floor == f - 1).cloned().collect();
-                    if !below.is_empty() && ui.button(trf("{}  Copy walls from {}", &[&(ic::COPY), &(self.net.storey(f - 1))])).on_hover_text(tr("Outer walls are usually the same on every storey")).clicked() {
-                        self.snapshot();
-                        for w in below {
-                            crate::scenarios::wall(&mut self.net, w.a, w.b, w.kind);
-                            self.net.walls.last_mut().unwrap().floor = f;
-                        }
-                        self.heat_cache = None;
-                        self.heat_job = None;
-                        ui.close();
-                    }
-                }).response.on_hover_text(tr("Storeys: each one has its own walls; floors between them cost signal"));
-                ui.toggle_value(&mut self.heat, lab(ic::WIFI_HIGH, "Wi-Fi map")).on_hover_text(tr("Colour the floor by signal strength — walls, power, bands and antennas included"));
-            });
-        });
-    }
-
-    // ---------- left: device shelf ----------
-
-    fn shelf(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.label(RichText::new(tr("TOOLS")).small().color(pal().dim));
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.tool, Tool::Select, format!("{} {}", ic::CURSOR, tr("Move")));
-            ui.selectable_value(&mut self.tool, Tool::Connect, format!("{} {}", ic::PLUGS_CONNECTED, tr("Connect")));
-            ui.selectable_value(&mut self.tool, Tool::Wall, format!("{} {}", ic::WALL, tr("Walls")));
-            ui.selectable_value(&mut self.tool, Tool::Measure, format!("{} {}", ic::RULER, tr("Measure")));
-        });
-        if self.tool == Tool::Measure {
-            self.measure_panel(ui);
-        }
-        ui.checkbox(&mut self.snap, tr("Snap to the half-metre grid"));
-        if self.tool == Tool::Wall {
-            egui::ComboBox::from_id_salt("wallkind").selected_text(self.wall_kind.label()).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
-                for k in WallKind::ALL {
-                    ui.selectable_value(&mut self.wall_kind, k, k.label());
-                }
-            });
-            ui.label(RichText::new(tr("Click to start, click again to place — each click continues the wall. Right-click, double-click or Esc to stop. Points lock onto corners (green) and walls (amber); Shift keeps it straight.")).small().color(pal().dim));
-            ui.add_space(8.0);
-        }
-        if self.tool == Tool::Connect {
-            egui::ComboBox::from_id_salt("medium")
-                .selected_text(format!("{}  {}", ic::LINK, self.medium.label()))
-                .width(ui.available_width() - 8.0)
-                .show_ui(ui, |ui| {
-                    for m in Medium::ALL {
-                        ui.selectable_value(&mut self.medium, m, m.label());
-                    }
-                });
-            ui.label(RichText::new(tr("Drag from one device to another — or click one, then the other. Laptops join by Wi-Fi; hold Shift to cable one.")).small().color(pal().dim));
-        }
-        if self.tool == Tool::Select {
-            ui.label(RichText::new(tr("Drag devices, pins and wall ends. Right-click anything for more.")).small().color(pal().dim));
-        }
-        ui.add_space(8.0);
-        ui.label(RichText::new(tr("ADD DEVICES")).small().color(pal().dim));
-        egui::Grid::new("shelf").num_columns(2).spacing(vec2(6.0, 6.0)).show(ui, |ui| {
-            for (i, k) in Kind::SHELF.iter().enumerate() {
-                // Smaller cards in narrow windows so the map keeps its room.
-                let narrow = ui.ctx().content_rect().width() < 1200.0;
-                let (rect, resp) = ui.allocate_exact_size(if narrow { vec2(78.0, 54.0) } else { vec2(96.0, 62.0) }, Sense::click_and_drag());
-                let hovered = resp.hovered();
-                let p = ui.painter();
-                p.rect_filled(rect, 10, if hovered { Color32::from_rgb(36, 45, 58) } else { pal().card });
-                if hovered {
-                    p.rect_stroke(rect, 10, Stroke::new(1.0, kind_color(*k)), StrokeKind::Inside);
-                }
-                p.text(rect.center() - vec2(0.0, 9.0), Align2::CENTER_CENTER, kind_icon(*k), FontId::proportional(22.0), kind_color(*k));
-                p.text(rect.center() + vec2(0.0, if narrow { 15.0 } else { 17.0 }), Align2::CENTER_CENTER, k.label(), FontId::proportional(if narrow { 10.0 } else { 11.5 }), pal().text);
-                let resp = resp.on_hover_text(k.blurb());
-                if resp.drag_started() {
-                    self.drag_kind = Some(*k);
-                }
-                if resp.clicked() {
-                    self.snapshot();
-                    let c = self.canvas_rect.center();
-                    let world = self.to_world(c) + vec2((self.net.devices.len() % 5) as f32 * 30.0, 0.0);
-                    let id = self.net.add_device(*k, [world.x, world.y]);
-                    self.net.dev_mut(id).unwrap().floor = self.floor;
-                    self.sel = Sel::Dev(id);
-                }
-                if i % 2 == 1 {
-                    ui.end_row();
-                }
-            }
-        });
-        ui.add_space(10.0);
-        ui.label(RichText::new(tr("PLAN")).small().color(pal().dim));
-        if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  {}", ic::MAGIC_WAND, tr("Plan addresses for me")))).on_hover_text(tr("Gives every network a sensible address range, turns on DHCP and fills in routes")).clicked() {
-            self.snapshot();
-            let logs = self.net.auto_address();
-            self.push_logs(logs);
-            let ctx = ui.ctx().clone();
-            self.say(&ctx, tr("Addresses planned. Check the problem list for anything left."));
-        }
-        if ui.add_sized([ui.available_width(), 30.0], egui::Button::new(format!("{}  {}", ic::WIFI_HIGH, tr("Pick better channels")))).on_hover_text(tr("Chooses non-overlapping channels for your access points, avoiding the neighbours")).clicked() {
-            self.snapshot();
-            let msg = self.net.auto_channels();
-            let ctx = ui.ctx().clone();
-            self.say(&ctx, msg);
+    /// The cable schedule and the shopping list as CSV files, side by side: "<name>-cables.csv", "<name>-shopping.csv".
+    fn export_csv(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name("network.csv").save_file() else { return };
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "network".into());
+        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let (a, b) = (dir.join(format!("{stem}-cables.csv")), dir.join(format!("{stem}-shopping.csv")));
+        match std::fs::write(&a, report::cables_csv(&self.net)).and_then(|_| std::fs::write(&b, report::shopping_csv(&self.net))) {
+            Ok(()) => self.say(ctx, trf("Exported {} and {}.", &[&file_name(&a), &file_name(&b)])),
+            Err(e) => self.say(ctx, trf("Couldn't export: {}", &[&e])),
         }
     }
 
@@ -1155,7 +1124,7 @@ impl App {
             while y < rect.bottom() {
                 let mut x = rect.left() + off.x;
                 while x < rect.right() {
-                    painter.circle_filled(pos2(x, y), 1.0, Color32::from_rgb(34, 42, 54));
+                    painter.circle_filled(pos2(x, y), 1.0, pal().line);
                     x += step;
                 }
                 y += step;
@@ -1206,7 +1175,16 @@ impl App {
         let stp = self.stp();
         let load = self.load_cache.take();
 
-        // Links.
+        // Time since the dots last moved (capped, so a pause doesn't make them leap).
+        let now_t = ui.input(|i| i.time);
+        let flow_dt = (now_t - self.flow_t).clamp(0.0, 0.1) as f32;
+        self.flow_t = now_t;
+        // Links. With a device selected or under the pointer its own links stand out and the rest step back;
+        // otherwise Wi-Fi links stay thin and quiet so the cables read.
+        let focus_dev = match self.sel {
+            Sel::Dev(id) => Some(id),
+            _ => pointer.and_then(|p| self.net.devices.iter().find(|d| d.floor == self.floor && Rect::from_center_size(self.dev_pos(d.id), Vec2::splat(58.0 * z)).contains(p)).map(|d| d.id)),
+        };
         let mut hovered_link = None;
         for l in &self.net.links {
             let (a, b) = (self.dev_pos(l.a), self.dev_pos(l.b));
@@ -1215,9 +1193,13 @@ impl App {
             let selected = self.sel == Sel::Link(l.id);
             // Cables entirely on other storeys are faded like their devices and can't be picked.
             let elsewhere = [l.a, l.b].iter().all(|x| self.net.dev(*x).is_some_and(|d| d.floor != self.floor));
+            let mine = focus_dev.is_some_and(|f| l.a == f || l.b == f);
             let painter = {
                 let mut p = painter.clone();
                 if elsewhere {
+                    p.multiply_opacity(0.3);
+                }
+                if focus_dev.is_some() && !mine && self.sel != Sel::Link(l.id) {
                     p.multiply_opacity(0.3);
                 }
                 p
@@ -1247,7 +1229,8 @@ impl App {
             if sig.is_some_and(|s| !s.alive()) {
                 painter.extend(Shape::dashed_line(&pts, Stroke::new(w, pal().red.gamma_multiply(0.7)), 2.0 * z, 6.0 * z));
             } else if l.medium.wireless() || standby {
-                painter.extend(Shape::dashed_line(&pts, Stroke::new(w, col.gamma_multiply(0.85)), 6.0 * z, 5.0 * z));
+                let (w, a) = if mine || selected || near { (w, 0.9) } else { (w * 0.6, 0.55) };
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(w, col.gamma_multiply(a)), 6.0 * z, 5.0 * z));
             } else {
                 painter.line(pts.clone(), Stroke::new(w, col));
             }
@@ -1259,26 +1242,45 @@ impl App {
                 let c = if w > 1.02 { pal().red } else if u > 0.8 { pal().amber } else { pal().accent };
                 let lens: Vec<f32> = pts.windows(2).map(|w| (w[1] - w[0]).length()).collect();
                 let total: f32 = lens.iter().sum();
-                let (zz, t) = (z.max(0.6), ui.input(|i| i.time) as f32);
-                for (mbps, forward) in [(*to_b, true), (*to_a, false)] {
-                    if mbps < 0.05 || total < 1.0 {
+                let zz = z.max(0.6);
+                for (now, forward) in [(*to_b, true), (*to_a, false)] {
+                    if total < 1.0 {
                         continue;
                     }
-                    let lg = (1.0 + mbps).log10();
-                    let gap = (90.0 / (1.0 + mbps).powf(0.45)).clamp(5.0, 120.0) * zz;
-                    let speed = (25.0 + 25.0 * lg) * zz;
+                    // All dots of a stream move together, and the rate behind speed, spacing and size glides to a new
+                    // value over about half a second, so a change shows along the whole line at once. Spacing comes
+                    // from a lattice: every DOT_BASE one dot, then dots halfway between, then quarter-way…; more
+                    // traffic switches on finer levels, the newest level fading in, so nothing jumps or slides back.
+                    let st = self.flow.entry((l.id, forward)).or_insert(Stream { shown: now, phase: 0.0 });
+                    st.shown += (now - st.shown) * (1.0 - (-flow_dt / 0.5).exp());
+                    let lg = (1.0 + st.shown).log10();
+                    st.phase = (st.phase + (25.0 + 25.0 * lg) * flow_dt / DOT_BASE).fract();
+                    if st.shown < 0.05 {
+                        continue;
+                    }
+                    let gap = (90.0 / (1.0 + st.shown).powf(0.45)).clamp(5.0, 120.0);
+                    let levels = (DOT_BASE / gap).log2().max(0.0);
                     let r = (1.3 + 0.7 * lg).min(3.6) * zz;
-                    let mut d = (t * speed).rem_euclid(gap);
-                    while d < total {
-                        let (mut rest, mut i) = (if forward { d } else { total - d }, 0);
-                        while i + 1 < lens.len() && rest > lens[i] {
-                            rest -= lens[i];
-                            i += 1;
+                    let base = DOT_BASE * zz;
+                    for level in 0..=levels.ceil() as u32 {
+                        let alpha = if level == 0 || (level as f32) <= levels { 1.0 } else { levels.fract() };
+                        let col = c.gamma_multiply(alpha);
+                        // Where this level's dots sit within one base spacing.
+                        let offs: Vec<f32> = if level == 0 { vec![0.0] } else { (0..1u32 << (level - 1)).map(|m| (2 * m + 1) as f32 / (1u32 << level) as f32).collect() };
+                        for off in offs {
+                            let mut d = (st.phase + off).fract() * base;
+                            while d < total {
+                                let (mut rest, mut i) = (if forward { d } else { total - d }, 0);
+                                while i + 1 < lens.len() && rest > lens[i] {
+                                    rest -= lens[i];
+                                    i += 1;
+                                }
+                                let dir = (pts[i + 1] - pts[i]) / lens[i].max(0.01);
+                                let side = if forward { 1.0 } else { -1.0 };
+                                painter.circle_filled(pts[i] + dir * rest + dir.rot90() * side * (1.0 * zz + r), r, col);
+                                d += base;
+                            }
                         }
-                        let dir = (pts[i + 1] - pts[i]) / lens[i].max(0.01);
-                        let side = if forward { 1.0 } else { -1.0 };
-                        painter.circle_filled(pts[i] + dir * rest + dir.rot90() * side * (1.0 * zz + r), r, c);
-                        d += gap;
                     }
                 }
                 ui.ctx().request_repaint();
@@ -1291,9 +1293,9 @@ impl App {
                 } else if l.unplugged {
                     (format!("{} {}", ic::PLUGS, tr("unplugged")), pal().amber)
                 } else if dead {
-                    ("no power".to_string(), pal().dim)
+                    (tr("no power").to_string(), pal().dim)
                 } else {
-                    ("standby".to_string(), pal().dim)
+                    (tr("standby").to_string(), pal().dim)
                 };
                 let g = painter.layout_no_wrap(t, FontId::proportional(10.5 * z.max(0.7)), c);
                 let r = Rect::from_center_size(m, g.size() + vec2(10.0, 4.0));
@@ -1380,9 +1382,12 @@ impl App {
         let mut released_on = None;
         let ids: Vec<u32> = self.net.devices.iter().map(|d| d.id).collect();
         let size = 58.0 * z;
+        // Network gear (what everything hangs off) is drawn a little larger.
+        let gear = |k: Kind| k.radio() || matches!(k, Kind::Router | Kind::Switch);
+        let size_of = |k: Kind| if gear(k) && !k.foreign() { size * 1.15 } else { size };
         for id in &ids {
             let c = self.dev_pos(*id);
-            let r = Rect::from_center_size(c, Vec2::splat(size));
+            let r = Rect::from_center_size(c, Vec2::splat(self.net.dev(*id).map_or(size, |d| size_of(d.kind))));
             let r_resp = ui.interact(r, Id::new(("dev", *id)), Sense::click_and_drag());
             if r_resp.clicked() {
                 clicked_dev = Some(*id);
@@ -1390,7 +1395,7 @@ impl App {
             if r_resp.drag_started() && (self.tool == Tool::Connect && self.mode == Mode::Design) {
                 self.connect_from = Some(*id);
             }
-            if r_resp.drag_stopped() && self.snap && self.connect_from.is_none() && self.mode == Mode::Design {
+            if r_resp.drag_stopped() && self.snap && !self.guide_hit && self.extra.is_empty() && self.connect_from.is_none() && self.mode == Mode::Design {
                 if let Some(d) = self.net.dev_mut(*id) {
                     d.pos = radio_ui::snap(vec2(d.pos[0], d.pos[1]));
                 }
@@ -1406,16 +1411,27 @@ impl App {
             }
             if r_resp.dragged() && here && self.connect_from.is_none() {
                 let delta = r_resp.drag_delta() / self.zoom;
-                if let Some(d) = self.net.dev_mut(*id) {
-                    d.pos[0] += delta.x;
-                    d.pos[1] += delta.y;
+                // Part of a bigger selection: everything selected moves along.
+                let group = self.mode == Mode::Design && !self.extra.is_empty() && self.selection().contains(&Sel::Dev(*id));
+                if group {
+                    self.move_selection([delta.x, delta.y]);
+                } else {
+                    if let Some(d) = self.net.dev_mut(*id) {
+                        d.pos[0] += delta.x;
+                        d.pos[1] += delta.y;
+                    }
+                    self.sel = Sel::Dev(*id);
+                    self.guide_hit = self.mode == Mode::Design && self.snap && self.align_guides(*id, &painter);
                 }
-                self.sel = Sel::Dev(*id);
                 self.walks.remove(id);
                 if self.mode == Mode::Simulate {
                     let ctx = ui.ctx().clone();
                     self.after_move(&ctx, *id);
                 }
+            }
+            // Double-click: sit down at the device (its desktop).
+            if r_resp.double_clicked() {
+                self.open_desk(*id, ui_desk::Page::Home);
             }
             let r_resp = r_resp.on_hover_ui(|ui| self.device_tooltip(ui, *id, &stp));
             r_resp.context_menu(|ui| self.device_menu(ui, *id));
@@ -1428,16 +1444,21 @@ impl App {
         }
         // Labels go where there's room: one that would cover another label or a device icon is left out
         // (hover or select the device to see it).
-        let mut taken: Vec<Rect> = self.net.devices.iter().filter(|d| d.floor == self.floor).map(|d| Rect::from_center_size(self.dev_pos(d.id), Vec2::splat(size))).collect();
+        let mut taken: Vec<Rect> = self.net.devices.iter().filter(|d| d.floor == self.floor).map(|d| Rect::from_center_size(self.dev_pos(d.id), Vec2::splat(size_of(d.kind)))).collect();
+        // Each label sits on a soft backing so walls and cables never run through the text.
         let mut place = |painter: &egui::Painter, at: Pos2, text: String, font: FontId, col: Color32, force: bool| {
             let g = painter.layout_no_wrap(text, font, col);
             let r = Rect::from_center_size(at, g.size());
             if force || !taken.iter().any(|t| t.intersects(r.shrink(1.0))) {
                 taken.push(r);
+                painter.rect_filled(r.expand2(vec2(3.0, 0.5)), 4, pal().bg.gamma_multiply(0.72));
                 painter.galley(r.min, g, col);
             }
         };
-        for d in &self.net.devices {
+        // Network gear first: when labels are short of room, theirs win.
+        let mut order: Vec<&net::Device> = self.net.devices.iter().collect();
+        order.sort_by_key(|d| !gear(d.kind));
+        for d in order {
             // Devices on other storeys stay visible but faded, like a see-through floor plan.
             let painter = {
                 let mut p = painter.clone();
@@ -1447,17 +1468,23 @@ impl App {
                 p
             };
             let c = self.dev_pos(d.id);
+            let size = size_of(d.kind);
             let r = Rect::from_center_size(c, Vec2::splat(size));
             let col = kind_color(d.kind);
+            let is_gear = gear(d.kind) && !d.kind.foreign();
             if d.floor != self.floor {
                 painter.text(r.center_top() + vec2(0.0, -2.0 * z), Align2::CENTER_BOTTOM, net::floor_name(d.floor), FontId::proportional(10.0 * z), pal().text);
             }
-            let selected = self.sel == Sel::Dev(d.id);
+            let selected = self.sel == Sel::Dev(d.id) || self.extra.contains(&Sel::Dev(d.id));
             let hovered = pointer.is_some_and(|p| r.contains(p));
             if selected {
                 painter.rect_filled(r.expand(6.0 * z), 18.0 * z, pal().accent.gamma_multiply(0.18));
             }
-            painter.rect_filled(r, 14.0 * z, if d.kind == Kind::Neighbor { pal().card.gamma_multiply(0.6) } else { pal().card });
+            let fill = if d.kind.foreign() { pal().card.gamma_multiply(0.6) } else { pal().card };
+            painter.rect_filled(r, 14.0 * z, fill);
+            if is_gear {
+                painter.rect_filled(r, 14.0 * z, pal().accent.gamma_multiply(0.07));
+            }
             let painter = {
                 let mut p = painter.clone();
                 if d.off {
@@ -1468,18 +1495,22 @@ impl App {
             if d.off {
                 painter.text(r.right_bottom() - vec2(4.0, 4.0) * z, Align2::RIGHT_BOTTOM, ic::POWER, FontId::proportional(13.0 * z.max(0.7)), pal().red);
             }
-            painter.rect_stroke(r, 14.0 * z, Stroke::new(if selected { 2.0 } else { 1.2 }, if selected || hovered { col } else { col.gamma_multiply(0.45) }), StrokeKind::Inside);
+            let edge = if selected || hovered { col } else if is_gear { pal().accent.gamma_multiply(0.55) } else { col.gamma_multiply(0.35) };
+            painter.rect_stroke(r, 14.0 * z, Stroke::new(if selected { 2.0 } else { 1.2 }, edge), StrokeKind::Inside);
             if self.walks.contains_key(&d.id) {
                 painter.text(r.left_top() + vec2(2.0, 2.0) * z, Align2::LEFT_TOP, ic::PERSON_SIMPLE_WALK, FontId::proportional(14.0 * z), pal().accent);
             }
             painter.text(c, Align2::CENTER_CENTER, kind_icon(d.kind), FontId::proportional(28.0 * z), col);
+            // A dot only when something's wrong (red: a problem, amber: a warning).
             let status = match worst.get(&d.id) {
-                Some(Level::Error) => pal().red,
-                Some(Level::Warning) => pal().amber,
-                _ => pal().green,
+                Some(Level::Error) => Some(pal().red),
+                Some(Level::Warning) => Some(pal().amber),
+                _ => None,
             };
-            if d.kind != Kind::Neighbor {
-                painter.circle_filled(r.right_top() + vec2(-6.0, 6.0) * z, 4.5 * z, status);
+            if let Some(st) = status {
+                let at = r.right_top() + vec2(-5.0, 5.0) * z;
+                painter.circle_filled(at, 5.5 * z.max(0.7), pal().bg);
+                painter.circle_filled(at, 4.0 * z.max(0.7), st);
             }
             if stp.root == Some(d.id) {
                 painter.text(r.center_top() + vec2(0.0, -2.0 * z), Align2::CENTER_BOTTOM, ic::CROWN, FontId::proportional(16.0 * z), pal().amber);
@@ -1491,9 +1522,11 @@ impl App {
                 painter.text(chip.center(), Align2::CENTER_CENTER, format!("V{v}"), FontId::proportional(9.5 * z), pal().bg);
             }
             // Zoomed out, labels would pile on top of each other: show them for the device in focus only.
+            // Network gear keeps its name further out; the second line (address, Wi-Fi name) waits until zoomed in,
+            // except in Simulate where it's the live signal and speed.
             let focus = selected || hovered;
-            let names = self.zoom >= 0.45 || focus;
-            let subs = self.zoom >= 0.65 || focus;
+            let names = self.zoom >= 0.45 || focus || (is_gear && self.zoom >= 0.18);
+            let subs = focus || if self.mode == Mode::Simulate { self.zoom >= 0.65 } else { self.zoom >= 0.9 };
             if names {
                 place(&painter, c + vec2(0.0, size * 0.5 + 9.0 * z.max(0.7)), d.name.clone(), FontId::proportional((12.5 * z).max(10.0)), pal().text, focus);
             }
@@ -1503,6 +1536,9 @@ impl App {
             let (sub, font, sub_col) = if d.kind.transmits() && (self.mode == Mode::Design || d.kind == Kind::Neighbor) {
                 let what = if d.kind == Kind::Interference { format!("{} ch {}", ic::LIGHTNING, d.ch[0]) } else { format!("{} {} · ch {}", ic::WIFI_HIGH, d.ssid, chans(d)) };
                 (what, FontId::proportional(11.0 * z), pal().dim)
+            } else if let Some(o) = d.own_net.as_ref().filter(|_| self.mode == Mode::Design) {
+                // A printer's or TV's own network (Wi-Fi Direct).
+                (format!("{} {} · ch {}", ic::WIFI_HIGH, o.ssid, o.ch), FontId::proportional(11.0 * z), pal().dim)
             } else if let (Mode::Simulate, Some(s)) = (self.mode, wifi_sig.filter(|_| !d.kind.radio())) {
                 // The speed it really gets (the whole way to the internet), not just its own Wi-Fi link.
                 let mbps = self.e2e.get(&d.id).map_or(s.mbps, |e| e.0.min(s.mbps));
@@ -1557,6 +1593,8 @@ impl App {
             }
         }
         let drawing = (self.tool == Tool::Wall || self.route.is_some()) && self.mode == Mode::Design;
+        // Shift+click adds to the selection (or takes out); a plain click selects just that.
+        let shift = ui.input(|i| i.modifiers.shift) && self.mode == Mode::Design;
         if let Some(id) = clicked_dev.filter(|_| !drawing) {
             if self.tool == Tool::Connect && self.mode == Mode::Design {
                 match self.sel {
@@ -1565,11 +1603,22 @@ impl App {
                     }
                     _ => self.sel = Sel::Dev(id),
                 }
+            } else if shift {
+                self.toggle_sel(Sel::Dev(id));
             } else {
                 self.sel = Sel::Dev(id);
+                self.extra.clear();
             }
         } else if resp.clicked() && !drawing {
-            self.sel = hovered_link.map(Sel::Link).or(hovered_wall.filter(|_| self.mode == Mode::Design).map(Sel::Wall)).unwrap_or(Sel::None);
+            let hit = hovered_link.map(Sel::Link).or(hovered_wall.filter(|_| self.mode == Mode::Design).map(Sel::Wall));
+            match (shift, hit) {
+                (true, Some(h)) => self.toggle_sel(h),
+                (true, None) => {}
+                (false, h) => {
+                    self.sel = h.unwrap_or(Sel::None);
+                    self.extra.clear();
+                }
+            }
         }
         // Right-click: a menu for the wall or cable under the pointer, or for the empty spot (the wall tool uses right-click to stop).
         if !drawing {
@@ -1579,7 +1628,24 @@ impl App {
             }
             resp.context_menu(|ui| self.map_menu(ui));
         }
-        if resp.dragged() && (!drawing || !resp.dragged_by(egui::PointerButton::Primary)) {
+        // Shift+drag on empty map draws a selection box; any other drag pans (middle button or Space+drag too,
+        // even while drawing walls).
+        if resp.drag_started_by(egui::PointerButton::Primary) && shift && !drawing && clicked_dev.is_none() {
+            self.marquee = pointer.map(|p| self.to_world(p));
+        }
+        if let Some(a) = self.marquee {
+            if let Some(p) = pointer {
+                let r = Rect::from_two_pos(self.to_screen(a), p);
+                painter.rect(r, 2, pal().accent.gamma_multiply(0.08), Stroke::new(1.0, pal().accent), StrokeKind::Inside);
+            }
+            if !ui.input(|i| i.pointer.primary_down()) {
+                if let Some(p) = pointer.or(ui.input(|i| i.pointer.latest_pos())) {
+                    let b = self.to_world(p);
+                    self.select_box(a, b, true);
+                }
+                self.marquee = None;
+            }
+        } else if resp.dragged() && (!drawing || !resp.dragged_by(egui::PointerButton::Primary) || ui.input(|i| i.key_down(egui::Key::Space))) {
             self.pan += resp.drag_delta();
         }
 
@@ -1604,45 +1670,74 @@ impl App {
         }
 
         if self.heat {
-            self.heat_legend(&painter, rect);
-            // Which band the map shows.
-            let lift = if rect.width() < 810.0 { 44.0 } else { 0.0 };
-            let r = Rect::from_min_size(rect.left_bottom() + vec2(12.0, -74.0 - lift), vec2(250.0, 28.0));
-            painter.rect_filled(r.expand(2.0), 8, pal().card.gamma_multiply(0.92));
-            ui.put(r.shrink2(vec2(6.0, 0.0)), |ui: &mut egui::Ui| {
-                ui.horizontal(|ui| {
-                    for (i, t) in [tr("Best band"), "2.4", "5", "6 GHz"].iter().enumerate() {
-                        ui.selectable_value(&mut self.heat_band, i, tr(t));
-                    }
-                })
-                .response
-            });
+            self.heat_card(ui.ctx(), rect);
         }
-        // Zoom controls.
-        let zr = Rect::from_min_size(rect.right_bottom() - vec2(312.0, 44.0), vec2(300.0, 32.0));
-        painter.rect_filled(zr.expand2(vec2(4.0, 0.0)), 8, pal().card.gamma_multiply(0.92));
-        ui.put(zr, |ui: &mut egui::Ui| {
+        // Zoom controls, bottom right.
+        ui_kit::float(ui.ctx(), "zoom", rect.right_bottom() + vec2(-12.0, -12.0), Align2::RIGHT_BOTTOM, |ui| {
             ui.horizontal(|ui| {
-                if ui.small_button(ic::MAGNIFYING_GLASS_MINUS).clicked() {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if ui.add(egui::Button::new(ic::MINUS).frame(false)).on_hover_text(tr("Zoom out")).clicked() {
                     self.zoom = (self.zoom / 1.2).max(0.1);
                 }
                 ui.label(RichText::new(format!("{:.0}%", self.zoom * 100.0)).small().color(pal().dim)).on_hover_text(tr("Zoom level"));
-                ui.label(RichText::new(trf("· dots {} m", &[&(self.grid_m())])).small().color(pal().dim)).on_hover_text(tr("Distance between two dots of the grid"));
-                if ui.small_button(ic::MAGNIFYING_GLASS_PLUS).clicked() {
+                if ui.add(egui::Button::new(ic::PLUS).frame(false)).on_hover_text(tr("Zoom in")).clicked() {
                     self.zoom = (self.zoom * 1.2).min(MAX_ZOOM);
                 }
-                if ui.small_button(ic::CORNERS_OUT).on_hover_text(tr("Fit everything")).clicked() {
+                ui.label(RichText::new(trf("· dots {} m", &[&(self.grid_m())])).small().color(pal().dim)).on_hover_text(tr("Distance between two dots of the grid"));
+                if ui.add(egui::Button::new(ic::CORNERS_OUT).frame(false)).on_hover_text(tr("Fit everything")).clicked() {
                     self.fit();
                 }
-                if ui.small_button(ic::CAMERA).on_hover_text(tr("Save the map as a picture (PNG)")).clicked() {
+                if ui.add(egui::Button::new(ic::CAMERA).frame(false)).on_hover_text(tr("Save the map as a picture (PNG)")).clicked() {
                     let ctx = ui.ctx().clone();
                     self.export_picture(&ctx);
                 }
-            })
-            .response
+            });
         });
-        self.search_overlay(ui, rect);
+        if self.mode == Mode::Design {
+            self.dock(ui.ctx(), rect);
+            // An empty storey: three ways to start, in the middle of the map.
+            let f = self.floor;
+            let blank = !self.net.devices.iter().any(|d| d.floor == f) && !self.net.walls.iter().any(|w| w.floor == f) && !self.net.plans.iter().any(|p| p.floor == f);
+            if blank && self.tool == Tool::Select && self.drag_kind.is_none() {
+                self.start_card(ui.ctx(), rect);
+            }
+        } else if self.sel == Sel::None {
+            ui_kit::float(ui.ctx(), "sim_hint", rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, |ui| {
+                egui::Frame::new().inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+                    ui.label(RichText::new(format!("{}  {}", ic::PLAY, tr("Click any device to use its apps"))).color(pal().accent));
+                });
+            });
+        }
+        self.map_top_right(ui.ctx(), rect);
         self.load_cache = load;
+    }
+
+    /// The card on an empty storey: start from a floor-plan picture, by drawing walls, or with the router.
+    fn start_card(&mut self, ctx: &egui::Context, rect: Rect) {
+        ui_kit::float(ctx, "start", rect.center(), Align2::CENTER_CENTER, |ui| {
+            egui::Frame::new().inner_margin(Margin::same(14)).show(ui, |ui| {
+                ui.set_max_width(320.0);
+                ui.label(RichText::new(trf("{} is empty", &[&self.net.storey(self.floor)])).size(16.0).strong());
+                ui.label(RichText::new(tr("Start with the walls (from a picture of the floor plan, or drawn by hand), then add the router and your devices.")).color(pal().dim));
+                ui.add_space(8.0);
+                let full = |ui: &mut egui::Ui, t: String| ui.add_sized([ui.available_width(), 30.0], egui::Button::new(t));
+                if full(ui, format!("{}  {}", ic::IMAGE, tr("Choose a floor-plan picture…"))).on_hover_text(tr("PNG or JPEG of this storey's plan, e.g. a scan or a screenshot of the architect's PDF")).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter(tr("Picture"), &["png", "jpg", "jpeg"]).pick_file() {
+                        self.add_picture(ctx, &path);
+                    }
+                }
+                if full(ui, format!("{}  {}", ic::WALL, tr("Draw the walls"))).on_hover_text(tr("Click corner after corner; right-click or Esc ends the wall")).clicked() {
+                    self.tool = Tool::Wall;
+                }
+                if full(ui, format!("{}  {}", ic::WIFI_HIGH, tr("Add the router"))).clicked() {
+                    self.snapshot();
+                    let c = self.to_world(rect.center());
+                    let id = self.net.add_device(Kind::HomeRouter, [c.x, c.y]);
+                    self.net.dev_mut(id).unwrap().floor = self.floor;
+                    self.sel = Sel::Dev(id);
+                }
+            });
+        });
     }
 
     /// Zoom and pan so the devices, walls and floor plans of the shown storey fill the map.
@@ -1679,6 +1774,7 @@ impl App {
     }
 
     fn undo_once(&mut self, ctx: &egui::Context) {
+        self.steps += 1;
         match self.undo.pop() {
             Some((n, f)) => {
                 self.redo.push((std::mem::replace(&mut self.net, n), std::mem::replace(&mut self.file, f)));
@@ -1695,6 +1791,7 @@ impl App {
     }
 
     fn redo_once(&mut self, ctx: &egui::Context) {
+        self.steps += 1;
         match self.redo.pop() {
             Some((n, f)) => {
                 self.undo.push((std::mem::replace(&mut self.net, n), std::mem::replace(&mut self.file, f)));
@@ -1762,10 +1859,14 @@ impl App {
     // ---------- right: inspector / terminal ----------
 
     fn inspector(&mut self, ui: &mut egui::Ui, issues: &[Issue]) {
+        if !self.extra.is_empty() {
+            self.multi_panel(ui);
+            return;
+        }
         match self.sel {
             Sel::Dev(id) if self.net.dev(id).is_some() => {
                 if self.mode == Mode::Simulate {
-                    self.device_sim(ui, id);
+                    self.device_sim(ui, id, issues);
                 } else {
                     self.device_editor(ui, id, issues);
                 }
@@ -1774,20 +1875,26 @@ impl App {
             Sel::Wall(id) if self.net.walls.iter().any(|w| w.id == id) => self.wall_editor(ui, id),
             Sel::Point(id) if self.net.points.iter().any(|p| p.id == id) => self.point_editor(ui, id),
             Sel::Label(id) if self.net.labels.iter().any(|l| l.id == id) => self.label_editor(ui, id),
-            _ => self.overview(ui, issues),
+            _ => {}
         }
     }
 
     fn header(ui: &mut egui::Ui, icon: &str, col: Color32, title: &str, sub: &str) {
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
-            ui.painter().rect_filled(r, 10, col.gamma_multiply(0.15));
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, FontId::proportional(22.0), col);
+            ui_kit::icon_tile(ui, icon, col, 38.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).size(16.0).strong());
+                ui.label(RichText::new(title).size(15.0).strong());
                 ui.label(RichText::new(tr(sub)).small().color(pal().dim));
             });
         });
+    }
+
+    /// The × at the top right of the side panel: closes it by deselecting.
+    fn close_button(&mut self, ui: &mut egui::Ui) {
+        let r = Rect::from_min_size(ui.max_rect().right_top() + vec2(-26.0, 0.0), vec2(26.0, 26.0));
+        if ui.put(r, egui::Button::new(RichText::new(ic::X).color(pal().dim)).frame(false)).on_hover_text(tr("Close (Esc)")).clicked() {
+            self.sel = Sel::None;
+        }
     }
 
     /// A fold-out section: a title row that opens and closes. Returns whether it's open.
@@ -1797,12 +1904,26 @@ impl App {
     }
 
     /// A section whose explanation sits behind an info icon instead of filling the panel.
+    /// In a workspace (ui_shell::FLAT) sections are plain headed groups that are always open.
     fn section_hint(ui: &mut egui::Ui, title: &str, hint: &str) -> bool {
-        // The essentials start open; details start folded away.
-        const OPEN: &[&str] = &["Measured here", "Real measurements", "Joined network", "Test load", "Addresses", "Internet plan", "Wi-Fi hardware", "Their Wi-Fi", "Speaker mesh radio", "What it is", "Bands", "Material", "Type", "Length", "Ports", "How it performs", "At a glance", "Wi-Fi coverage", "Connected devices", "Channels", "Overlaps with", "Networks in the air here", "Try it", "About this setup", "How to"];
-        let id = Id::new(("section", title));
-        let mut open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(id, OPEN.contains(&title)));
-        ui.add(egui::Separator::default().spacing(6.0));
+        if let Some(space) = ui_shell::FLAT.with(|f| f.get()) {
+            if space != title {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr(title)).strong());
+                    if !hint.is_empty() {
+                        ui.label(RichText::new(ic::INFO).color(pal().dim)).on_hover_text(tr(hint));
+                    }
+                });
+                ui.add_space(2.0);
+            }
+            return true;
+        }
+        // Inside a tab most sections are short enough to start open; rarely changed details start folded away.
+        const CLOSED: &[&str] = &["Antenna", "Behaviour", "Spanning tree", "Model", "More network names", "Routes"];
+        let id = Id::new(("fold", title));
+        let mut open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(id, !CLOSED.contains(&title)));
+        ui.add_space(4.0);
         let clicked = ui
             .horizontal(|ui| {
                 let caret = if open { ic::CARET_DOWN } else { ic::CARET_RIGHT };
@@ -1825,59 +1946,114 @@ impl App {
         open
     }
 
+    /// Which tabs a device's panel has: only those with something in them.
+    fn dev_tabs(&self, id: u32) -> Vec<(DevTab, String)> {
+        let d = self.net.dev(id).unwrap();
+        let k = d.kind;
+        let wifi = k.transmits() || k.wifi_client() || matches!(k, Kind::SmartHome | Kind::HomeRouter | Kind::Speaker);
+        let addresses = !d.ifaces.is_empty() && !k.bridges() && !d.on_802154();
+        let network = addresses || k == Kind::Router || k.serves() || k.routes() || (!k.foreign() && k != Kind::Internet) || k.bridges();
+        let mut v = vec![(DevTab::General, tr("General").to_string())];
+        if wifi {
+            v.push((DevTab::WiFi, tr("Wi-Fi").to_string()));
+        }
+        if network {
+            v.push((DevTab::Network, tr("Network").to_string()));
+        }
+        if matches!(k, Kind::HomeRouter | Kind::Router) {
+            v.push((DevTab::Security, tr("Security").to_string()));
+        }
+        if !k.foreign() && k != Kind::Internet {
+            v.push((DevTab::Use, tr("Power and use").to_string()));
+        }
+        v
+    }
+
     fn device_editor(&mut self, ui: &mut egui::Ui, id: u32, issues: &[Issue]) {
+        let mut desk_req: Option<ui_desk::Page> = None;
         let currency = self.net.currency.clone();
         let mut delete = false;
         let mut renew = false;
         let self_wired = self.net.links.iter().any(|l| (l.a == id || l.b == id) && !l.medium.wireless());
+        let tabs = self.dev_tabs(id);
+        if !tabs.iter().any(|t| t.0 == self.dev_tab) {
+            self.dev_tab = DevTab::General;
+        }
         {
-            // Header: icon, editable name, kind.
+            // Header: icon, editable name, kind and address.
+            let ip = self.net.dev(id).and_then(|d| d.first_ip().map(|i| i.to_string()));
             let d = self.net.dev_mut(id).unwrap();
             let host = (d.kind.is_host() || d.kind == Kind::HomeRouter).then(|| trf("On the network as {}.home.arpa", &[&(d.hostname())]));
             ui.horizontal(|ui| {
-                let (r, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
-                ui.painter().rect_filled(r, 10, kind_color(d.kind).gamma_multiply(0.15));
-                ui.painter().text(r.center(), Align2::CENTER_CENTER, kind_icon(d.kind), FontId::proportional(22.0), kind_color(d.kind));
-                resp.on_hover_text(d.kind.blurb());
+                ui_kit::icon_tile(ui, kind_icon(d.kind), kind_color(d.kind), 38.0).on_hover_text(d.kind.blurb());
                 ui.vertical(|ui| {
-                    let name = ui.add(TextEdit::singleline(&mut d.name).font(FontId::proportional(16.0)).desired_width(f32::INFINITY));
+                    let name = ui.add(TextEdit::singleline(&mut d.name).font(FontId::proportional(15.0)).desired_width(ui.available_width() - 30.0));
                     if let Some(h) = &host {
                         name.on_hover_text(h);
                     }
-                    ui.label(RichText::new(d.kind.label()).small().color(pal().dim));
+                    let sub = match (&ip, d.model.is_empty()) {
+                        (Some(ip), true) => format!("{} · {ip}", d.kind.label()),
+                        (Some(ip), false) => format!("{} · {ip}", d.model),
+                        (None, true) => d.kind.label().to_string(),
+                        (None, false) => format!("{} · {}", d.kind.label(), d.model),
+                    };
+                    ui.label(RichText::new(sub).small().color(pal().dim));
                 });
             });
         }
         // Actions, then this device's problems: the things you came for, before the details.
-        ui.horizontal_wrapped(|ui| {
-            if ui.small_button(format!("{}  {}", ic::PLAY, tr("Try it"))).on_hover_text(tr("See this device in Simulate mode")).clicked() {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.button(format!("{}  {}", ic::PLAY, tr("Try it"))).on_hover_text(tr("Switches to Simulate with this device picked: use its browser, command line and Wi-Fi")).clicked() {
                 self.mode = Mode::Simulate;
                 let ctx = ui.ctx().clone();
                 self.start_sim(&ctx);
             }
-            if ui.small_button(format!("{}  {}", ic::COPY, tr("Duplicate"))).on_hover_text(tr("A copy next to it, same hardware, fresh addresses (Ctrl+D)")).clicked() {
-                self.snapshot();
-                if let Some(new) = self.net.duplicate(id) {
-                    self.sel = Sel::Dev(new);
-                }
-            }
             self.power_toggle(ui, id);
-            if ui.small_button(RichText::new(format!("{}  {}", ic::TRASH, tr("Delete"))).color(pal().red)).on_hover_text(tr("Remove this device (Delete key)")).clicked() {
-                delete = true;
-            }
-        });
-        let mine: Vec<&Issue> = issues.iter().filter(|i| i.dev == Some(id)).collect();
-        if !mine.is_empty() {
-            ui.add_space(4.0);
-            for i in mine {
-                if let (_, Some(f)) = issue_row(ui, i) {
+            ui.menu_button(ic::DOTS_THREE, |ui| {
+                if ui.button(format!("{}  {}", ic::COPY, tr("Duplicate"))).on_hover_text(tr("A copy next to it, same hardware, fresh addresses (Ctrl+D)")).clicked() {
                     self.snapshot();
-                    let msg = self.net.apply_fix(&f);
-                    let ctx = ui.ctx().clone();
-                    self.say(&ctx, msg);
+                    if let Some(new) = self.net.duplicate(id) {
+                        self.sel = Sel::Dev(new);
+                    }
+                    ui.close();
                 }
+                if ui.button(RichText::new(format!("{}  {}", ic::TRASH, tr("Delete"))).color(pal().red)).on_hover_text(tr("Remove this device (Delete key)")).clicked() {
+                    delete = true;
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text(tr("More: duplicate, delete"));
+        });
+        // Problems as banners; tips folded under one line so they don't push the settings away.
+        let mine: Vec<&Issue> = issues.iter().filter(|i| i.dev == Some(id)).collect();
+        let tips = mine.iter().filter(|i| i.level == Level::Tip).count();
+        let mut fix = None;
+        for i in mine.iter().filter(|i| i.level != Level::Tip) {
+            ui.add_space(2.0);
+            if let (_, Some(f)) = ui_kit::banner(ui, level_color(i.level), |ui| issue_row(ui, i)) {
+                fix = Some(f);
             }
         }
+        if tips > 0 {
+            egui::CollapsingHeader::new(RichText::new(trf("{}  Tips for this device ({})", &[&(ic::LIGHTBULB), &tips])).color(pal().accent)).id_salt("devtips").show(ui, |ui| {
+                for i in mine.iter().filter(|i| i.level == Level::Tip) {
+                    if let (_, Some(f)) = issue_row(ui, i) {
+                        fix = Some(f);
+                    }
+                }
+            });
+        }
+        if let Some(f) = fix {
+            self.snapshot();
+            let msg = self.net.apply_fix(&f);
+            let ctx = ui.ctx().clone();
+            self.say(&ctx, msg);
+        }
+        ui.add_space(4.0);
+        ui_kit::tabs(ui, &mut self.dev_tab, &tabs);
+        let tab = self.dev_tab;
         let plugged = self.net.port_users(id);
         {
             // On the mobile line the router's own address comes from the provider's shared range.
@@ -1885,7 +2061,7 @@ impl App {
             let d = self.net.dev_mut(id).unwrap();
             let kind = d.kind;
             // Thread and Zigbee gadgets get no address from DHCP (their hub speaks for them; see Smart-home radio).
-            if !d.ifaces.is_empty() && !kind.bridges() && !d.on_802154() && Self::section(ui, "Addresses") {
+            if tab == DevTab::Network && !d.ifaces.is_empty() && !kind.bridges() && !d.on_802154() && Self::section(ui, "Addresses") {
                 if kind.is_host() || kind == Kind::HomeRouter {
                     let label = tr(if kind == Kind::HomeRouter { tr("Get internet address automatically (DHCP)") } else { tr("Get address automatically (DHCP)") });
                     if ui.checkbox(&mut d.dhcp_client, label).changed() && d.dhcp_client {
@@ -1926,10 +2102,10 @@ impl App {
                     }
                 });
             }
-            if kind == Kind::Router && d.ifaces.is_empty() && Self::section(ui, "Addresses") {
+            if tab == DevTab::Network && kind == Kind::Router && d.ifaces.is_empty() && Self::section(ui, "Addresses") {
                 ui.label(RichText::new(tr("Connect cables first: each cable uses one of the router's ports, which then gets its own address.")).small().color(pal().dim));
             }
-            if kind == Kind::Internet && Self::section(ui, "Internet plan") {
+            if tab == DevTab::General && kind == Kind::Internet && Self::section(ui, "Internet plan") {
                 ui_extras::plan_picker(ui, d, &mut self.catalog_query);
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("plan").selected_text(format!("{:.0} Mbit/s", d.plan_mbps)).width(150.0).show_ui(ui, |ui| {
@@ -1947,44 +2123,43 @@ impl App {
                     }
                 });
             }
-            if kind.serves() && Self::section(ui, "Services") {
-                if kind.offers("dhcp") {
-                    ui.checkbox(&mut d.services.dhcp, tr("DHCP server")).on_hover_text(tr("Hands out addresses"));
-                }
-                if d.services.dhcp && kind.offers("dhcp") {
-                    ui.horizontal(|ui| {
-                        let pool = ui.label(tr("Pool"));
-                        if kind == Kind::Router {
-                            pool.on_hover_text(tr("Leave the pool empty: every VLAN interface then hands out .100–.199 of its own network."));
-                        }
-                        ui.add(TextEdit::singleline(&mut d.dhcp_from).desired_width(110.0).font(egui::TextStyle::Monospace));
-                        ui.label(tr("–"));
-                        ui.add(TextEdit::singleline(&mut d.dhcp_to).desired_width(110.0).font(egui::TextStyle::Monospace));
-                    });
-                }
-                if kind.offers("dns") {
-                    ui.checkbox(&mut d.services.dns, tr("DNS server")).on_hover_text(tr("Answers name lookups"));
-                }
-                if d.services.dns && kind.offers("dns") && kind != Kind::Internet {
-                    ui.add(TextEdit::multiline(&mut d.dns_records).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("www.home.test 192.168.1.10"))).on_hover_text(tr("Name records, one per line: name address. A mail server for a domain: school.test MX mail.school.test"));
-                }
-                if kind.offers("web") {
-                    ui.checkbox(&mut d.services.web, tr("Web server (HTTPS)"));
-                    if d.services.web {
-                        ui.add(TextEdit::multiline(&mut d.web_page).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("Page text or HTML (index.html)")));
+            if tab == DevTab::Network && crate::soft::has_desktop(kind) && Self::section(ui, "Software") {
+                // What's installed; servers can be started and stopped right here, everything else is on its desktop.
+                use crate::soft::Soft;
+                ui.horizontal_wrapped(|ui| {
+                    for s in Soft::ALL.into_iter().filter(|s| d.has(*s) && !s.is_server()) {
+                        ui.label(RichText::new(format!("{}  {}", s.icon(), tr(s.label()))).small().color(pal().dim)).on_hover_text(tr(s.blurb()));
+                    }
+                });
+                let servers: Vec<Soft> = Soft::ALL.into_iter().filter(|s| d.has(*s) && s.is_server()).collect();
+                for s in servers {
+                    let mut on = d.running(s);
+                    if ui.checkbox(&mut on, format!("{}  {}", s.icon(), tr(s.label()))).on_hover_text(tr(s.blurb())).changed() {
+                        d.set_running(s, on);
+                    }
+                    if s == Soft::DhcpServer && on {
+                        ui.horizontal(|ui| {
+                            let pool = ui.label(tr("Pool"));
+                            if kind == Kind::Router {
+                                pool.on_hover_text(tr("Leave the pool empty: every VLAN interface then hands out .100–.199 of its own network."));
+                            }
+                            ui.add(TextEdit::singleline(&mut d.dhcp_from).desired_width(110.0).font(egui::TextStyle::Monospace));
+                            ui.label(tr("–"));
+                            ui.add(TextEdit::singleline(&mut d.dhcp_to).desired_width(110.0).font(egui::TextStyle::Monospace));
+                        });
+                    }
+                    if s == Soft::DnsServer && on && kind != Kind::Internet {
+                        ui.add(TextEdit::multiline(&mut d.dns_records).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("www.home.test 192.168.1.10"))).on_hover_text(tr("Name records, one per line: name address. A mail server for a domain: school.test MX mail.school.test"));
+                    }
+                    if s == Soft::WebServer && on && ui.small_button(format!("{}  {}", ic::FILE_HTML, tr("Edit pages…"))).on_hover_text(tr("The pages are files in its webserver folder: opens them on its desktop")).clicked() {
+                        desk_req = Some(ui_desk::Page::App(Soft::WebServer));
                     }
                 }
-                if kind.offers("files") {
-                    ui.checkbox(&mut d.services.files, tr("File sharing (SMB 3)"));
-                }
-                if kind.offers("print") {
-                    ui.checkbox(&mut d.services.print, tr("Printing (IPP)"));
-                }
-                if kind.offers("mail") {
-                    ui.checkbox(&mut d.services.mail, tr("Mail server (SMTP + IMAP)")).on_hover_text(tr("Takes in email for the domain whose name record points here; read it with the inbox command"));
+                if ui.button(format!("{}  {}", ic::PACKAGE, tr("Install or remove software…"))).on_hover_text(tr("Opens this device's desktop at its software list")).clicked() {
+                    desk_req = Some(ui_desk::Page::Installer);
                 }
             }
-            if kind.routes() && kind != Kind::Internet && Self::section(ui, "Routes") {
+            if tab == DevTab::Network && kind.routes() && kind != Kind::Internet && Self::section(ui, "Routes") {
                 let was = d.services.rip;
                 ui.checkbox(&mut d.services.rip, tr("RIP: share routes with neighbour routers")).on_hover_text(tr("Routers with RIP on tell each other which networks they reach and fill their routing tables themselves, up to 15 routers away"));
                 if d.services.rip && !was {
@@ -1994,52 +2169,57 @@ impl App {
                 ui.add(TextEdit::multiline(&mut d.routes).desired_rows(2).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text(tr("10.0.2.0/24 via 10.0.1.2"))).on_hover_text(tr("Extra routes, one per line: network/prefix via gateway"));
             }
             // The internet cloud is the outside world: no ports or storey to plan.
-            if kind != Kind::Internet && Self::section(ui, "Hardware") {
-            // Plain wired routers come from the catalog here (Wi-Fi gear does in "Wi-Fi hardware").
-            if kind == Kind::Router {
-                if let Some(old) = radio_ui::catalog_picker(ui, d, &mut self.catalog_query) {
-                    self.before = Some(Before::Device(old));
-                    self.replug = Some(id);
-                }
-            }
-            egui::Grid::new(("hw", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-                // Phones and gadgets have no socket; hosts have one, so just its speed.
-                if kind.is_host() && !matches!(kind, Kind::Phone | Kind::SmartHome) {
-                    ui.label(tr("Ethernet"));
-                    if d.ports.is_empty() {
-                        d.ports.push(ports::PortGroup::rj45(1, 1000));
+            if tab == DevTab::General && kind != Kind::Internet && Self::section(ui, "Hardware") {
+                // Plain wired routers come from the catalog here (Wi-Fi gear does in "Wi-Fi hardware").
+                if kind == Kind::Router {
+                    if let Some(old) = radio_ui::catalog_picker(ui, d, &mut self.catalog_query) {
+                        self.before = Some(Before::Device(old));
+                        self.replug = Some(id);
                     }
-                    d.ports.truncate(1);
-                    ui_extras::speed_combo(ui, ("pspeed", id), &mut d.ports[0].mbps);
-                    ui.end_row();
                 }
-                ui.label(tr("Storey"));
-                ui.add(egui::DragValue::new(&mut d.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
-                ui.end_row();
-                if kind.transmits() || kind.wifi_client() {
-                    ui.label(tr("Mounted at"));
-                    ui.add(egui::DragValue::new(&mut d.mount).range(0.0..=10.0).speed(0.05).max_decimals(2).suffix(tr(" m above the floor"))).on_hover_text(tr("Antenna height: desks and hands about 1 m, a ceiling access point 2.5 m"));
+                egui::Grid::new(("hw", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+                    ui.label(tr("Storey"));
+                    ui.add(egui::DragValue::new(&mut d.floor).range(-3..=20).custom_formatter(|v, _| net::floor_name(v as i8)));
                     ui.end_row();
-                }
-                if !kind.foreign() {
+                    if kind.transmits() || kind.wifi_client() {
+                        ui.label(tr("Mounted at"));
+                        ui.add(egui::DragValue::new(&mut d.mount).range(0.0..=10.0).speed(0.05).max_decimals(2).suffix(tr(" m above the floor"))).on_hover_text(tr("Antenna height: desks and hands about 1 m, a ceiling access point 2.5 m"));
+                        ui.end_row();
+                    }
+                });
+            }
+            if tab == DevTab::Use && !kind.foreign() && kind != Kind::Internet && Self::section(ui, "Power") {
+                egui::Grid::new(("pwr", id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
                     ui.label(tr("Power draw"));
                     ui.add(egui::DragValue::new(&mut d.watts).range(0.0..=2000.0).speed(0.5).suffix(tr(" W average"))).on_hover_text(tr("Average over a day, standby included. Devices powered over the cable count at their switch."));
                     ui.end_row();
                     ui.label(tr("UPS battery"));
                     ui.add(egui::DragValue::new(&mut d.ups_wh).range(0.0..=5000.0).speed(1.0).suffix(" Wh")).on_hover_text(tr("Plugged into an uninterruptible power supply with this much battery (0 = none). It also carries what this device powers over its cables."));
                     ui.end_row();
+                });
+            }
+            // Phones and gadgets have no socket; hosts have one, so just its speed.
+            let socket = kind.is_host() && !matches!(kind, Kind::Phone | Kind::SmartHome);
+            let ports = !kind.foreign() && !kind.is_host() && kind != Kind::Internet;
+            if tab == DevTab::Network && (socket || ports) && Self::section(ui, "Ports") {
+                if socket {
+                    ui.horizontal(|ui| {
+                        ui.label(tr("Ethernet"));
+                        if d.ports.is_empty() {
+                            d.ports.push(ports::PortGroup::rj45(1, 1000));
+                        }
+                        d.ports.truncate(1);
+                        ui_extras::speed_combo(ui, ("pspeed", id), &mut d.ports[0].mbps);
+                    });
                 }
-            });
-            if !kind.foreign() && !kind.is_host() {
-                ui.add_space(4.0);
-                ui.label(RichText::new(tr("Ports")).color(pal().dim));
-                let old = d.clone();
-                if ui_extras::port_editor(ui, id, &mut d.ports, &plugged) {
-                    self.before = Some(Before::Device(old));
+                if ports {
+                    let old = d.clone();
+                    if ui_extras::port_editor(ui, id, &mut d.ports, &plugged) {
+                        self.before = Some(Before::Device(old));
+                    }
                 }
             }
-            }
-            if Self::section(ui, "Price and notes") {
+            if tab == DevTab::General && Self::section(ui, "Price and notes") {
                 if !kind.foreign() && kind != Kind::Internet {
                     ui.horizontal(|ui| {
                         ui.label(tr("Price"));
@@ -2054,22 +2234,29 @@ impl App {
             }
         }
         let kind = self.net.dev(id).unwrap().kind;
-        if kind.transmits() {
-            self.radio_editor(ui, id);
-            if kind.radio() {
-                self.names_editor(ui, id);
+        if tab == DevTab::WiFi {
+            if kind.transmits() {
+                self.radio_editor(ui, id);
+                if kind.radio() {
+                    self.names_editor(ui, id);
+                }
+            } else if kind.wifi_client() {
+                self.adapter_editor(ui, id);
             }
-        } else if kind.wifi_client() {
-            self.adapter_editor(ui, id);
         }
-        if kind.bridges() || kind == Kind::HomeRouter {
-            let stp = self.stp();
-            self.stp_editor(ui, id, stp.root, stp.cost.get(&id).copied());
-        }
-        if kind == Kind::Router {
-            self.vlan_editor(ui, id);
+        if tab == DevTab::Network {
+            if kind == Kind::Router {
+                self.vlan_editor(ui, id);
+            }
+            if kind.bridges() || kind == Kind::HomeRouter {
+                let stp = self.stp();
+                self.stp_editor(ui, id, stp.root, stp.cost.get(&id).copied());
+            }
         }
         self.device_extras(ui, id);
+        if let Some(p) = desk_req {
+            self.open_desk(id, p);
+        }
         if renew {
             let mut log = vec![];
             self.net.dhcp_one(id, &mut log);
@@ -2220,103 +2407,35 @@ impl App {
         }
     }
 
-    fn overview(&mut self, ui: &mut egui::Ui, issues: &[Issue]) {
-        Self::header(ui, ic::HOUSE_LINE, pal().accent, &self.net.title.clone(), tr("Plan overview"));
-        let stp = self.stp();
-        let n = &self.net;
-        let errors = issues.iter().filter(|i| i.level == Level::Error).count();
-        let warns = issues.iter().filter(|i| i.level == Level::Warning).count();
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            stat(ui, &n.devices.len().to_string(), "devices", pal().accent);
-            stat(ui, &n.links.len().to_string(), "connections", Color32::from_rgb(96, 165, 250));
-            stat(ui, &errors.to_string(), "errors", if errors > 0 { pal().red } else { pal().green });
-            stat(ui, &warns.to_string(), "warnings", if warns > 0 { pal().amber } else { pal().green });
-        });
-        if !self.net.story.is_empty() && Self::section(ui, "About this setup") {
-            ui.label(RichText::new(&self.net.story).color(pal().dim));
-            if let Some((_, goal)) = scenarios::EXERCISES.iter().find(|e| e.0 == self.net.scenario) {
-                ui.add_space(4.0);
-                ui.label(RichText::new(format!("{}  {}", ic::TARGET, trf("Your task: {}", &[&tr(goal)]))).color(pal().accent));
-                if ui.button(format!("{}  {}", ic::CHECK_SQUARE, tr("Check my work"))).clicked() {
-                    let ctx = ui.ctx().clone();
-                    match scenarios::check_exercise(&self.net) {
-                        Ok(m) | Err(m) => self.say(&ctx, m),
-                    }
-                }
-            }
-        }
-        let n = &self.net;
-        let (_, total) = shopping(n);
-        let cable: f32 = n.links.iter().filter(|l| !l.medium.wireless() && l.medium != Medium::Powerline).map(|l| n.link_len(l)).sum();
-        let wifi = n.devices.iter().filter(|d| !d.kind.radio() && n.wifi_link_of(d.id).is_some()).count();
-        let cur = n.currency.clone();
-        let root = stp.root.map(|r| n.name(r)).unwrap_or_else(|| "—".into());
-        let vl: std::collections::BTreeSet<u16> = n.devices.iter().flat_map(|d| d.ifaces.iter().map(|f| f.vlan)).filter(|v| *v != 1).collect();
-        let vlans = if vl.is_empty() { tr("none").to_string() } else { vl.len().to_string() };
-        if Self::section(ui, "At a glance") {
-            egui::Grid::new("glance").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
-                for (k, v) in [(tr("Estimated cost"), format!("{cur}{total:.0}")), (tr("Cable to lay"), format!("{cable:.0} m")), ("Wi-Fi devices", wifi.to_string()), (tr("Spanning-tree root"), root), (tr("VLANs in use"), vlans)] {
-                    ui.label(RichText::new(tr(k)).color(pal().dim));
-                    ui.label(v);
-                    ui.end_row();
-                }
-            });
-        }
-        self.resilience_and_power(ui);
-        if Self::section(ui, "Settings") {
-            egui::Grid::new("settings").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                ui.label(RichText::new(tr("Floors made of")).color(pal().dim)).on_hover_text(tr("What the floors between storeys are built from: it decides how much Wi-Fi gets through to the next storey"));
-                egui::ComboBox::from_id_salt("slab").selected_text(self.net.slab.label()).width(170.0).show_ui(ui, |ui| {
-                    for k in WallKind::ALL {
-                        ui.selectable_value(&mut self.net.slab, k, k.label());
-                    }
-                });
-                ui.end_row();
-                ui.label(RichText::new(tr("Hardware")).color(pal().dim)).on_hover_text(tr("Real devices differ: MAC addresses, how sticky each phone is, how busy the neighbours are, how good the house wiring is. A fixed seed makes the same plan always behave the same."));
-                if ui.small_button(trf("{} Shuffle  ·  {}", &[&(ic::SHUFFLE), &format!("{:08x}", self.net.seed as u32)])).on_hover_text(tr("Same plan, other physical devices: new MAC addresses, different neighbours' habits and wiring quality")).clicked() {
-                    self.snapshot();
-                    self.net.shuffle_hardware(sim::new_seed());
-                }
-                ui.end_row();
-                ui.label(RichText::new(tr("Live variation")).color(pal().dim));
-                ui.checkbox(&mut self.live_var, tr("in Simulate")).on_hover_text(tr("Fading and changing traffic while simulating. Off: Simulate uses the same steady averages as planning."));
-                ui.end_row();
-                ui.label(RichText::new(tr("Currency")).color(pal().dim));
-                ui.add(TextEdit::singleline(&mut self.net.currency).desired_width(40.0));
-                ui.end_row();
-            });
-        }
-        self.plan_extras(ui);
-        if Self::section(ui, "How to") {
-            for (icon, t) in [
-                (ic::CURSOR, tr("Drag devices from the left onto the map, or click one to add it.")),
-                (ic::PLUGS_CONNECTED, tr("Pick Connect, then drag from one device to another.")),
-                (ic::WALL, tr("Walls: click corner after corner; right-click or Esc ends the wall.")),
-                (ic::PLAY, tr("Simulate: click a device to use its browser, command line or Wi-Fi.")),
-                (ic::MAP_PIN, tr("Measure the real air with the NetSketch Survey phone app: Real measurements → Link a phone, and every spot you measure lands here as a pin.")),
-                (ic::KEYBOARD, tr("Keyboard shortcuts: the keyboard button at the top right lists them all.")),
-            ] {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(icon).color(pal().accent));
-                    ui.label(RichText::new(tr(t)).color(pal().dim));
-                });
-            }
-        }
-    }
-
     /// A device in Simulate mode: its little desktop of apps.
-    fn device_sim(&mut self, ui: &mut egui::Ui, id: u32) {
+    fn device_sim(&mut self, ui: &mut egui::Ui, id: u32, issues: &[Issue]) {
         let d = self.net.dev(id).unwrap();
         let sub = match d.ifaces.get(d.dhcp_iface()).map(|f| f.ip.as_str()).filter(|s| !s.is_empty()) {
             Some(ip) => ip.to_string(),
             // Switches, access points, speakers and disturbers have no address of their own here.
             None if !d.kind.is_host() && !d.kind.routes() => if d.model.is_empty() { d.kind.label().to_string() } else { d.model.clone() },
-            None => "no address yet".into(),
+            None => tr("no address yet").into(),
         };
         Self::header(ui, kind_icon(d.kind), kind_color(d.kind), &d.name, &sub);
         self.power_toggle(ui, id);
-        self.apps_picker(ui, id);
+        let d = self.net.dev(id).unwrap();
+        // Can it reach the internet, how fast, and what holds it back; then its own problems.
+        if (d.kind.is_host() || d.kind == Kind::SmartHome) && !d.off && self.net.devices.iter().any(|x| x.kind == Kind::Internet) {
+            ui.add_space(4.0);
+            match self.e2e.get(&id).cloned().or_else(|| self.net.internet_rate(id, &self.stp())) {
+                Some((r, why)) => {
+                    ui.label(RichText::new(format!("{}  {}", ic::GLOBE, trf("Reaches the internet at about {} Mbit/s", &[&format!("{r:.0}")]))).color(pal().green));
+                    ui.label(RichText::new(trf("Slowest part: {}", &[&why])).small().color(pal().dim));
+                }
+                None => {
+                    ui.label(RichText::new(format!("{}  {}", ic::GLOBE_X, tr("No way to the internet from here: check its connection, the cables on the way and whether everything is switched on"))).color(pal().red));
+                }
+            }
+        }
+        for i in issues.iter().filter(|i| i.dev == Some(id) && i.level != Level::Tip) {
+            let col = if i.level == Level::Error { pal().red } else { pal().amber };
+            ui_kit::banner(ui, col, |ui| ui.label(RichText::new(&i.text).small()));
+        }
         let d = self.net.dev(id).unwrap();
         ui.add_space(4.0);
         // Only the apps this kind of device really has.
@@ -2325,29 +2444,45 @@ impl App {
         let tabs: Vec<(SimTab, &str, &str)> = [
             (SimTab::WiFi, ic::WIFI_HIGH, "Wi-Fi", wifi),
             (SimTab::Ports, ic::PLUGS_CONNECTED, tr("Ports"), k.has_ports_view()),
-            (SimTab::Browser, ic::GLOBE, tr("Browser"), k.has_browser()),
-            (SimTab::Terminal, ic::TERMINAL_WINDOW, tr("Command line"), k.has_shell()),
             (SimTab::Traffic, ic::LIST_BULLETS, tr("Traffic"), !k.foreign()),
         ]
         .into_iter()
         .filter(|t| t.3)
         .map(|t| (t.0, t.1, t.2))
         .collect();
-        if !tabs.iter().any(|t| t.0 == self.sim_tab) {
-            self.sim_tab = tabs[0].0;
+        if let Some(first) = tabs.first().filter(|_| !tabs.iter().any(|t| t.0 == self.sim_tab)) {
+            self.sim_tab = first.0;
         }
-        ui.horizontal(|ui| {
-            for (t, icon, label) in &tabs {
-                ui.selectable_value(&mut self.sim_tab, *t, format!("{icon} {}", tr(label)));
+        // The computer itself: its desktop with all its programs, or straight into the browser or command line.
+        if crate::soft::has_desktop(k) {
+            use crate::soft::Soft;
+            let mut open = None;
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(RichText::new(format!("{}  {}", ic::MONITOR, tr("Open desktop"))).strong()).on_hover_text(tr("Its screen, with every program it has (double-click a device does the same)")).clicked() {
+                    open = Some(ui_desk::Page::Home);
+                }
+                for s in [Soft::Browser, Soft::Terminal, Soft::MailClient] {
+                    if d.has(s) && ui.button(format!("{}  {}", s.icon(), tr(s.label()))).clicked() {
+                        open = Some(ui_desk::Page::App(s));
+                    }
+                }
+            });
+            if let Some(p) = open {
+                self.open_desk(id, p);
             }
-        });
-        ui.separator();
+            ui.add_space(4.0);
+        }
+        if tabs.is_empty() {
+            return;
+        }
+        let items: Vec<(SimTab, String)> = tabs.iter().map(|(t, icon, label)| (*t, format!("{icon}  {}", tr(label)))).collect();
+        ui_kit::tabs(ui, &mut self.sim_tab, &items);
         match self.sim_tab {
             SimTab::WiFi => self.wifi_tab(ui, id),
             SimTab::Ports => self.ports_tab(ui, id),
-            SimTab::Browser => self.browser(ui, id),
-            SimTab::Terminal => self.terminal(ui, id),
             SimTab::Traffic => {
+                // What it runs (apps or a test load), then everything it sent and received.
+                self.apps_picker(ui, id);
                 let d = self.net.dev(id).unwrap();
                 let ips: Vec<String> = d.ifaces.iter().filter(|f| !f.ip.is_empty()).map(|f| f.ip.clone()).collect();
                 let me = |a: &str| a == d.name || ips.iter().any(|ip| a == ip || a.strip_prefix(ip.as_str()).is_some_and(|r| r.starts_with(':')));
@@ -2361,7 +2496,8 @@ impl App {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new(format!("{:.2}s", r.t)).monospace().color(pal().dim));
                             ui.label(RichText::new(r.log.proto).strong().color(proto_color(r.log.proto)));
-                            ui.label(RichText::new(format!("{} {} {}", r.log.src, ic::ARROW_RIGHT, r.log.dst)).monospace());
+                            // Monospace has no icon font: a plain arrow (the monospace font has it).
+                            ui.label(RichText::new(format!("{} → {}", r.log.src, r.log.dst)).monospace());
                         });
                         ui.label(RichText::new(&r.log.info).small().color(pal().dim));
                         ui.add_space(2.0);
@@ -2613,103 +2749,6 @@ impl App {
         }
     }
 
-    // ---------- bottom ----------
-
-    fn bottom_panel(&mut self, ui: &mut egui::Ui, issues: &[Issue]) {
-        let errs = issues.iter().filter(|i| i.level != Level::Tip).count();
-        ui.horizontal(|ui| {
-            let tab = |ui: &mut egui::Ui, me: &mut Bottom, t: Bottom, label: String| {
-                if ui.selectable_label(*me == t, label).clicked() {
-                    *me = t;
-                }
-            };
-            // Narrow: icons and counts only, so the tabs and the log filter fit on one line.
-            let narrow = ui.available_width() < 700.0;
-            let t = |icon: &str, long: String, short: String| if narrow { format!("{icon} {short}") } else { format!("{icon}  {long}") };
-            tab(ui, &mut self.bottom, Bottom::Problems, t(ic::WARNING, trf("Problems ({})", &[&errs]), errs.to_string()));
-            // Packets only travel in Simulate: while designing, the empty log stays out of the way.
-            if self.mode == Mode::Simulate || !self.rows.is_empty() {
-                tab(ui, &mut self.bottom, Bottom::Packets, t(ic::LIST_BULLETS, trf("Packet log ({})", &[&self.rows.len()]), self.rows.len().to_string()));
-            } else if self.bottom == Bottom::Packets {
-                self.bottom = Bottom::Problems;
-            }
-            tab(ui, &mut self.bottom, Bottom::Shopping, t(ic::SHOPPING_CART, tr("Shopping list").into(), String::new()));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if self.mode == Mode::Simulate {
-                    let mut stepping = self.step.is_some();
-                    if ui.checkbox(&mut stepping, tr("Step through")).on_hover_text(tr("Packets stop at every device; Next step moves them on and shows what the packet carries there")).changed() {
-                        self.step = stepping.then_some(0);
-                        // The step window shows the layers itself; two such windows would cover the map.
-                        self.pkt_view = None;
-                    }
-                }
-                if self.bottom == Bottom::Packets {
-                    if ui.small_button(format!("{} {}", ic::BROOM, tr("Clear"))).clicked() {
-                        self.rows.clear();
-                    }
-                    ui.checkbox(&mut self.only_selected, tr("Only selected device"));
-                }
-            });
-        });
-        ui.separator();
-        egui::ScrollArea::both().auto_shrink([false, false]).stick_to_bottom(self.bottom == Bottom::Packets).show(ui, |ui| match self.bottom {
-            Bottom::Problems => {
-                if issues.is_empty() {
-                    ui.label(RichText::new(format!("{}  {}", ic::CHECK_CIRCLE, tr("Everything looks good."))).color(pal().green));
-                }
-                let fixable = issues.iter().filter(|i| i.fix.is_some()).count();
-                if fixable > 1 && ui.button(RichText::new(trf("{}  Apply all {} one-click fixes", &[&(ic::WRENCH), &fixable])).color(pal().accent)).on_hover_text(tr("Every fix below in one go (Ctrl+Z undoes it)")).clicked() {
-                    self.snapshot();
-                    let n = self.net.fix_all().len();
-                    self.issues = None;
-                    let ctx = ui.ctx().clone();
-                    self.say(&ctx, trf("{} fixes applied — see what's left in the list.", &[&n]));
-                }
-                for i in issues {
-                    let (clicked, fix) = issue_row(ui, i);
-                    if clicked {
-                        match i.dev {
-                            Some(d) => self.focus(d),
-                            None => self.sel = i.link.map(Sel::Link).unwrap_or(Sel::None),
-                        }
-                    }
-                    if let Some(f) = fix {
-                        self.snapshot();
-                        let msg = self.net.apply_fix(&f);
-                        let ctx = ui.ctx().clone();
-                        self.say(&ctx, msg);
-                    }
-                }
-            }
-            Bottom::Packets => {
-                let sel = if let Sel::Dev(d) = self.sel { Some(d) } else { None };
-                if self.rows.is_empty() {
-                    ui.label(RichText::new(tr("No traffic yet. Switch to Simulate and run a command.")).color(pal().dim));
-                }
-                let rows: Vec<&Row> = self.rows.iter().filter(|r| !self.only_selected || sel.is_none() || Some(r.log.dev) == sel).collect();
-                if let Some(l) = packet_grid(ui, "pk", &rows) {
-                    self.pkt_view = Some(l);
-                }
-            }
-            Bottom::Shopping => {
-                let (items, total) = shopping(&self.net);
-                egui::Grid::new("shop").striped(true).num_columns(3).spacing(vec2(24.0, 3.0)).show(ui, |ui| {
-                    for (what, qty, cost) in &items {
-                        ui.label(what);
-                        ui.label(format!("× {qty}"));
-                        ui.label(format!("{}{cost:.0}", self.net.currency));
-                        ui.end_row();
-                    }
-                    ui.label(RichText::new(tr("Total (estimate)")).strong());
-                    ui.label("");
-                    ui.label(RichText::new(format!("{}{total:.0}", self.net.currency)).strong().color(pal().accent));
-                    ui.end_row();
-                });
-                ui.label(RichText::new(tr("Prices are rough estimates — set your own per device. Phones, computers and TVs count as already there; tick or untick \"I already have this\" on a device to change that.")).small().color(pal().dim));
-            }
-        });
-    }
-
     // ---------- learn ----------
 
     fn learn(&mut self, ui: &mut egui::Ui) {
@@ -2721,7 +2760,7 @@ impl App {
                     let title = lessons::lesson(i).0;
                     let on = self.lesson == i;
                     let mark = if self.settings.quiz >> i & 1 == 1 { ic::CHECK_CIRCLE } else { "" };
-                    let b = egui::Button::new(RichText::new(format!("{:>2}  {title}  {mark}", i + 1)).color(if on { pal().accent } else { pal().text })).fill(if on { pal().card } else { Color32::TRANSPARENT }).min_size(vec2(ui.available_width(), 30.0));
+                    let b = egui::Button::new(RichText::new(format!("{:>2}  {title}  {mark}", i + 1)).color(if on { pal().accent } else { pal().text })).fill(if on { pal().card } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(ui.available_width(), 30.0));
                     if ui.add(b).clicked() {
                         self.lesson = i;
                     }
@@ -2730,10 +2769,8 @@ impl App {
                 ui.label(RichText::new(tr("FIND THE FAULT")).small().color(pal().dim));
                 for (key, goal) in scenarios::EXERCISES {
                     let label = scenarios::SCENARIOS.iter().find(|s| s.0 == *key).map_or(*key, |s| s.1);
-                    if ui.add(egui::Button::new(format!("{}  {}", ic::TARGET, tr(label))).fill(Color32::TRANSPARENT).min_size(vec2(ui.available_width(), 28.0))).on_hover_text(tr(goal)).clicked() {
-                        self.load(net::template(key));
-                        self.file = None;
-                        self.mode = Mode::Design;
+                    if ui.add(egui::Button::new(format!("{}  {}", ic::TARGET, tr(label))).fill(Color32::TRANSPARENT).stroke(Stroke::NONE).min_size(vec2(ui.available_width(), 28.0))).on_hover_text(tr(goal)).clicked() {
+                        self.swap(&ui.ctx().clone(), Swap::Plan(Box::new(net::template(key)), false));
                     }
                 }
             });
@@ -2794,9 +2831,7 @@ impl App {
                     // The example plan this lesson's exercise talks about, one click away.
                     if let Some((key, label, _)) = scenarios::SCENARIOS.iter().find(|s| s.0 == scenario) {
                         if ui.button(format!("{}  {}", ic::FOLDER_OPEN, trf("Open \"{}\"", &[&tr(label.split(" (").next().unwrap_or(label))]))).clicked() {
-                            self.load(net::template(key));
-                            self.file = None;
-                            self.mode = Mode::Design;
+                            self.swap(&ui.ctx().clone(), Swap::Plan(Box::new(net::template(key)), false));
                         }
                     }
                 });
@@ -2805,14 +2840,15 @@ impl App {
     }
 }
 
-fn stat(ui: &mut egui::Ui, value: &str, label: &str, col: Color32) {
+fn stat(ui: &mut egui::Ui, value: &str, label: &str, col: Color32, width: f32) -> egui::Response {
     egui::Frame::new().fill(pal().card).corner_radius(8).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
-        ui.set_min_width(54.0);
+        ui.set_width(width);
         ui.vertical(|ui| {
             ui.label(RichText::new(value).size(18.0).strong().color(col));
             ui.label(RichText::new(tr(label)).small().color(pal().dim));
         });
-    });
+    })
+    .response
 }
 
 /// The packet log as a table. Returns the line clicked, for the layer view.
@@ -2938,7 +2974,8 @@ fn shopping(n: &Network) -> (Vec<(String, usize, f32)>, f32) {
         // shortcut: a rough street price from the battery size; one UPS per device that has one set.
         items.push(("UPS".to_string(), ups.len(), ups.iter().map(|w| 60.0 + 0.5 * w).sum()));
     }
-    let total = items.iter().map(|i| i.2).sum();
+    // + 0.0: an empty sum is −0, which would print as "-0".
+    let total = items.iter().map(|i| i.2).sum::<f32>() + 0.0;
     (items, total)
 }
 
@@ -2970,6 +3007,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
+        // Channels and power limits follow the plan's country.
+        wifi::Region::set(self.net.region);
         // Within one frame the plan doesn't change: every link's signal, airtime and the spanning tree are worked
         // out once and reused (see wifi::Memo).
         self.net.memo.borrow_mut().reset(true);
@@ -3031,36 +3070,45 @@ impl eframe::App for App {
                 self.say(&ctx, trf("{} — arrow keys move it, Delete removes it.", &[&(self.net.name(id))]));
             }
         }
-        if let (false, Mode::Design, Sel::Dev(id)) = (typing, self.mode, self.sel) {
-            let step = PX_PER_M / 4.0;
+        // Arrow keys nudge what's selected by 25 cm (Shift: 1 m); a run of nudges is one undo step.
+        if !typing && self.mode == Mode::Design && !matches!(self.sel, Sel::None | Sel::Link(_)) {
+            let step = if ctx.input(|i| i.modifiers.shift) { PX_PER_M } else { PX_PER_M / 4.0 };
             let d = ctx.input(|i| [(egui::Key::ArrowLeft, [-step, 0.0]), (egui::Key::ArrowRight, [step, 0.0]), (egui::Key::ArrowUp, [0.0, -step]), (egui::Key::ArrowDown, [0.0, step])].into_iter().filter(|(k, _)| i.key_pressed(*k)).map(|x| x.1).next());
-            if let Some([dx, dy]) = d {
+            if let Some(d) = d {
                 let now = Self::now(&ctx);
                 if now - self.nudged > 1.0 {
                     self.snapshot();
                 }
                 self.nudged = now;
-                if let Some(dev) = self.net.dev_mut(id) {
-                    dev.pos = [dev.pos[0] + dx, dev.pos[1] + dy];
-                }
+                self.move_selection(d);
             }
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
-            self.open(&ctx);
+        if !typing && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+            self.swap(&ctx, Swap::Open);
         }
         if !typing && self.mode == Mode::Design && self.sel != Sel::None && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             self.snapshot();
             self.connect_from = None;
             self.say(&ctx, tr("Deleted — Ctrl+Z brings it back."));
-            match self.sel {
-                Sel::Dev(id) => self.net.remove_device(id),
-                Sel::Link(id) => self.net.remove_link(id),
-                Sel::Wall(id) => self.net.walls.retain(|w| w.id != id),
-                Sel::Point(id) => self.net.points.retain(|p| p.id != id),
-                Sel::Label(id) => self.net.labels.retain(|l| l.id != id),
-                Sel::None => {}
+            self.delete_selection();
+        }
+        // Copy, cut and paste (egui reports Ctrl+C/X/V on the map as these events).
+        if !typing && self.mode == Mode::Design {
+            let (copy, cut, paste) = ctx.input(|i| {
+                let ev = |f: fn(&egui::Event) -> bool| i.events.iter().any(f);
+                (ev(|e| matches!(e, egui::Event::Copy)), ev(|e| matches!(e, egui::Event::Cut)), ev(|e| matches!(e, egui::Event::Paste(_))) || (i.modifiers.command && i.key_pressed(egui::Key::V)))
+            });
+            if (copy || cut) && self.sel != Sel::None {
+                self.clip = self.copy_selection();
+                if cut {
+                    self.snapshot();
+                    self.delete_selection();
+                }
+                self.say(&ctx, if cut { tr("Cut — Ctrl+V puts it where the pointer is.") } else { tr("Copied — Ctrl+V puts it where the pointer is.") });
             }
-            self.sel = Sel::None;
+            if paste {
+                self.paste_clip(&ctx);
+            }
         }
         // Esc in the browser's address bar or the terminal only leaves the text field.
         if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -3079,20 +3127,11 @@ impl eframe::App for App {
             let again = ctx.input(|i| i.modifiers.shift);
             self.save(&ctx, again);
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
-            self.load(net::template("blank"));
-            self.file = None;
-            if self.mode == Mode::Learn {
-                self.mode = Mode::Design;
-            }
+        if !typing && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+            self.swap(&ctx, Swap::Plan(Box::new(net::template("blank")), false));
         }
         if !typing && self.mode == Mode::Design && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
-            if let Sel::Dev(id) = self.sel {
-                self.snapshot();
-                if let Some(new) = self.net.duplicate(id) {
-                    self.sel = Sel::Dev(new);
-                }
-            }
+            self.duplicate_selection();
         }
         self.autosave(&ctx);
         self.phone_tick(&ctx);
@@ -3103,7 +3142,7 @@ impl eframe::App for App {
             match ext.as_str() {
                 "netsurvey" | "csv" | "tsv" | "txt" => self.import_measurements(&ctx, &path),
                 "json" if survey => self.import_measurements(&ctx, &path),
-                "netplan" | "json" | "fls" => self.open_path(&ctx, path),
+                "netplan" | "json" | "fls" => self.swap(&ctx, Swap::Path(path)),
                 "png" | "jpg" | "jpeg" => self.add_picture(&ctx, &path),
                 _ => self.say(&ctx, trf("NetSketch can't use {} files.", &[&ext])),
             }
@@ -3122,7 +3161,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.ask_quit = true;
         }
-        if self.ask_quit {
+        if self.ask_quit || self.pending.is_some() {
             self.quit_dialog(&ctx);
         }
         // The window title names the plan (and its file); • means unsaved changes.
@@ -3183,54 +3222,50 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        egui::Panel::top("top").frame(egui::Frame::new().fill(pal().panel).inner_margin(Margin::symmetric(14, 9)).stroke(Stroke::new(1.0, pal().line))).show(ui, |ui| self.top_bar(ui));
-
-        if let Some((msg, until)) = self.toast.clone() {
-            if Self::now(&ctx) < until {
-                // Over the map only, so it never hides the settings panel.
-                let c = if self.canvas_rect.is_positive() { self.canvas_rect } else { ctx.content_rect() };
-                egui::Area::new(Id::new("toast")).fixed_pos(pos2(c.center().x, c.top() + 50.0)).pivot(Align2::CENTER_TOP).order(egui::Order::Foreground).show(&ctx, |ui| {
-                    egui::Frame::new().fill(pal().card).stroke(Stroke::new(1.0, pal().accent)).corner_radius(10).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
-                        ui.set_max_width(520.0f32.min(c.width() - 60.0).max(200.0));
-                        ui.label(msg);
-                    });
-                });
-                ctx.request_repaint_after(std::time::Duration::from_millis(300));
-            } else {
-                self.toast = None;
-            }
-        }
+        egui::Panel::top("top").frame(egui::Frame::new().fill(pal().panel).inner_margin(Margin::symmetric(12, 7)).stroke(Stroke::new(1.0, pal().line))).show(ui, |ui| self.top_bar(ui));
+        egui::Panel::left("rail").exact_size(64.0).frame(egui::Frame::new().fill(pal().panel).inner_margin(Margin::symmetric(4, 6)).stroke(Stroke::new(1.0, pal().line))).show(ui, |ui| self.rail(ui, &issues));
 
         if self.mode == Mode::Learn {
+            self.toast_ui(&ctx);
             self.learn(ui);
             return;
         }
 
-        let side = egui::Frame::new().fill(pal().panel).inner_margin(Margin::same(12));
+        let side = egui::Frame::new().fill(pal().panel).inner_margin(Margin::same(14)).stroke(Stroke::new(1.0, pal().line));
         let screen = ctx.content_rect();
-        if self.mode == Mode::Design {
-            egui::Panel::left("shelf").exact_size(if screen.width() < 1200.0 { 186.0 } else { 224.0 }).frame(side).show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.shelf(ui));
+        // Narrow windows: while something is selected its panel wins and the workspace folds away (it comes back on deselect).
+        let room = screen.width() >= 1250.0 || self.sel == Sel::None;
+        if let Some(space) = self.space.filter(|_| room) {
+            egui::Panel::left("space").default_size(320.0).size_range(260.0..=(screen.width() * 0.32).max(280.0)).frame(side).show(ui, |ui| self.workspace(ui, space, &issues));
+        }
+        // The side panel opens for what's selected; the map keeps at least ~60% of the window.
+        if self.sel != Sel::None {
+            egui::Panel::right("inspector").default_size((screen.width() * 0.28).clamp(320.0, 420.0)).size_range(300.0..=(screen.width() * 0.4).max(320.0)).frame(side).show(ui, |ui| {
+                self.close_button(ui);
+                // Edits made in the panel become undo steps; a burst on the same thing (typing, a slider) is one step.
+                let before = (self.mode == Mode::Design).then(|| self.sel_copy()).flatten();
+                let steps = self.steps;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.inspector(ui, &issues));
+                if let Some((old, json)) = before {
+                    // Buttons that took their own undo step (a fix, delete) are already covered.
+                    if self.before.is_none() && self.steps == steps && self.sel_copy().is_some_and(|(_, now)| now != json) {
+                        let t = Self::now(ui.ctx());
+                        let merge = self.panel_edit.is_some_and(|(s, at, n)| s == self.sel && t - at < 1.5 && n == self.steps);
+                        if !merge {
+                            self.before = Some(old);
+                        }
+                        self.panel_edit = Some((self.sel, t, self.steps + u64::from(!merge)));
+                    }
+                }
             });
         }
-        // Side panels can't squeeze the map away: the inspector stays under ~40% of the window, the log under 40% of its height.
-        egui::Panel::right("inspector").default_size((screen.width() * 0.32).clamp(320.0, 420.0)).size_range(320.0..=(screen.width() * 0.4).max(340.0)).frame(side).show(ui, |ui| {
-            if self.mode == Mode::Simulate && !matches!(self.sel, Sel::Dev(_)) {
-                Self::header(ui, ic::PLAY, pal().accent, tr("Simulation"), tr("Click any device to use its apps"));
-                ui.add_space(6.0);
-                ui.label(RichText::new(tr("Addresses were handed out by DHCP. Pick a device on the map: see its Wi-Fi, take it for a walk to watch it roam, open a web page in its browser, or run ping, speedtest, wifi and stp on its command line. Packets move along the cables and every step lands in the packet log below.")).color(pal().dim));
-                ui.add_space(6.0);
-                if ui.button(format!("{}  {}", ic::PENCIL_SIMPLE, tr("Back to design"))).clicked() {
-                    self.mode = Mode::Design;
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| self.resilience_and_power(ui));
-                return;
-            }
-            egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui, &issues));
-        });
-        egui::Panel::bottom("bottom").default_size(190.0).size_range(90.0..=(screen.height() * 0.4).max(120.0)).resizable(true).frame(side).show(ui, |ui| self.bottom_panel(ui, &issues));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().bg)).show(ui, |ui| self.canvas(ui, &issues));
+        self.toast_ui(&ctx);
         self.packet_windows(&ctx);
+        self.measured_window_ui(&ctx);
+        self.log_window_ui(&ctx);
+        self.desk_ui(&ctx);
+        self.tidy_selection();
     }
 }
 

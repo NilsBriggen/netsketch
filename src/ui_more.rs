@@ -53,10 +53,9 @@ impl App {
     }
 
     /// Overview: what breaks the most if it fails, power use and the hour traffic is looked at.
-    pub(crate) fn resilience_and_power(&mut self, ui: &mut egui::Ui) {
-        self.coverage_section(ui);
-        self.compare_section(ui);
-        if Self::section_hint(ui, "Weak spots", "Devices whose failure cuts others off. A second path (cable or mesh), a spare switch on the shelf, or a mobile backup line takes the sting out.") {
+    /// Devices whose failure cuts others off, and what has no battery for a power cut.
+    pub(crate) fn weak_spots(&mut self, ui: &mut egui::Ui) {
+        if Self::section_hint(ui, "If this fails", "Devices whose failure cuts others off. A second path (cable or mesh), a spare switch on the shelf, or a mobile backup line takes the sting out.") {
         let spots = self.net.weak_spots();
         if spots.is_empty() {
             ui.label(RichText::new(tr("No single device whose failure cuts others off.")).small().color(pal().dim));
@@ -68,7 +67,7 @@ impl App {
                 if ui.add(egui::Label::new(RichText::new(self.net.name(*id)).strong()).sense(Sense::click())).on_hover_text(tr("Select it")).clicked() {
                     pick = Some(*id);
                 }
-                ui.label(RichText::new(trf("— if it fails, {} device{} lose the network", &[&n, &(if *n == 1 { "" } else { "s" })])).color(col));
+                ui.label(RichText::new(if *n == 1 { tr("— if it fails, 1 device loses the network").to_string() } else { trf("— if it fails, {} devices lose the network", &[&n]) }).color(col));
             });
         }
         let bare: Vec<String> = self.net.no_ups().iter().map(|id| self.net.name(*id)).collect();
@@ -79,7 +78,10 @@ impl App {
             self.focus(id);
         }
         }
-        self.traffic_section(ui);
+    }
+
+    /// Power use around the clock, how long each UPS lasts, and what the electricity costs.
+    pub(crate) fn power_section(&mut self, ui: &mut egui::Ui) {
         if !Self::section(ui, "Power and UPS") {
             return;
         }
@@ -106,8 +108,8 @@ impl App {
     }
 
     /// Traffic over the day: the hour the plan looks at, how busy the household is, and the whole day as a chart.
-    fn traffic_section(&mut self, ui: &mut egui::Ui) {
-        if !Self::section_hint(ui, "Traffic", "Each device's apps (in its panel) share the cables and the air fairly. Organic: everyday apps that follow the time of day; the chart shows the whole day, click it to pick a time. Custom: you choose what each device runs, all at once at full rate. In Simulate the traffic moves along the cables and comes and goes like real apps: a page loads when clicked, a video fetches a few seconds at a time.") {
+    pub(crate) fn traffic_section(&mut self, ui: &mut egui::Ui) {
+        if !Self::section_hint(ui, "Traffic", crate::ui_shell::TRAFFIC_HINT) {
             return;
         }
         let (hour, traffic, custom) = (self.net.hour, self.net.traffic, self.net.custom_traffic);
@@ -290,12 +292,11 @@ impl App {
     }
 
     /// Search box over the map: type part of a name, pick a match, the map jumps to it.
-    pub(crate) fn search_overlay(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        let r = Rect::from_min_size(rect.left_top() + vec2(10.0, 10.0), vec2(220.0f32.min(rect.width() - 20.0), 30.0));
+    /// "Find a device…" over the map (by name or the start of an address), with its hits below.
+    pub(crate) fn search_overlay(&mut self, ui: &mut egui::Ui, width: f32) {
+        let field = ui.add(TextEdit::singleline(&mut self.search).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, tr("Find a device…"))).desired_width(width));
+        let r = field.rect;
         let mut jump = None;
-        ui.put(r, |ui: &mut egui::Ui| {
-            ui.add(TextEdit::singleline(&mut self.search).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, tr("Find a device…"))).desired_width(r.width()))
-        });
         let q = self.search.trim().to_lowercase();
         if !q.is_empty() {
             let hits: Vec<(u32, String)> = self
@@ -306,8 +307,8 @@ impl App {
                 .take(8)
                 .map(|d| (d.id, d.name.clone()))
                 .collect();
-            egui::Area::new(Id::new("search_hits")).fixed_pos(r.left_bottom() + vec2(0.0, 4.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                egui::Frame::new().fill(pal().card).corner_radius(8).inner_margin(Margin::same(6)).show(ui, |ui| {
+            egui::Area::new(Id::new("search_hits")).fixed_pos(r.left_bottom() + vec2(0.0, 6.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                crate::ui_kit::float_frame().inner_margin(Margin::same(6)).show(ui, |ui| {
                     ui.set_width(r.width() - 12.0);
                     if hits.is_empty() {
                         ui.label(RichText::new(tr("No match")).color(pal().dim));
@@ -328,7 +329,7 @@ impl App {
 
     /// Saves the visible map as a PNG: ask where, then grab the next frame.
     pub(crate) fn export_picture(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new().add_filter("Picture", &["png"]).set_file_name("network-map.png").save_file() {
+        if let Some(path) = rfd::FileDialog::new().add_filter(tr("Picture"), &["png"]).set_file_name("network-map.png").save_file() {
             self.export_pic = Some(path);
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
@@ -348,14 +349,14 @@ impl App {
             }
         }
         let msg = match image::save_buffer(&path, &bytes, w as u32, h as u32, image::ColorType::Rgba8) {
-            Ok(()) => trf("Saved the map as {}", &[&(path.display())]),
+            Ok(()) => trf("Saved the map as {}", &[&crate::file_name(&path)]),
             Err(e) => trf("Couldn't save the picture: {}", &[&e]),
         };
         self.say(ctx, msg);
     }
 
     /// Coverage score of the shown storey and a suggestion where one more access point helps most.
-    fn coverage_section(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn coverage_section(&mut self, ui: &mut egui::Ui) {
         // No walls, no rooms to score; a closed section isn't worked out at all.
         if !self.net.walls.iter().any(|w| w.floor == self.floor) || !Self::section(ui, "Wi-Fi coverage") {
             return;
@@ -374,7 +375,7 @@ impl App {
         let target = self.net.target;
         let mut pick = target;
         ui.horizontal(|ui| {
-            ui.label(tr("Good Wi-Fi means"));
+            ui.label(tr("Good Wi-Fi means")).on_hover_text(tr("The signal each spot needs to count as good. The score counts 2.4 GHz 6 dB lower (it's slower and more crowded); the Wi-Fi map shows the real signal."));
             let shown = plan::TARGETS.iter().find(|t| t.0 == target).map_or_else(|| format!("{target:.0} dBm"), |t| format!("{} · {:.0} dBm", tr(t.1), t.0));
             egui::ComboBox::from_id_salt("target").selected_text(shown).show_ui(ui, |ui| {
                 for (dbm, name) in plan::TARGETS {
@@ -416,14 +417,54 @@ impl App {
                 }
             }
         });
+        self.budget_rows(ui, good);
         self.outdoor_rows(ui);
+    }
+
+    /// "Cover my home for …": the cheapest catalog units that get every storey good Wi-Fi within a budget.
+    fn budget_rows(&mut self, ui: &mut egui::Ui, good: f32) {
+        if good >= 0.98 && self.proposal.is_none() {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tr("Cover every storey for"));
+            ui.add(egui::DragValue::new(&mut self.budget).range(50.0..=20_000.0).speed(10.0).prefix(self.net.currency.clone()));
+            ui.selectable_value(&mut self.budget_mesh, true, tr("Mesh (no cables)"));
+            ui.selectable_value(&mut self.budget_mesh, false, tr("Access points (cables)"));
+            if ui.small_button(format!("{} {}", ic::MAGIC_WAND, tr("Find"))).on_hover_text(tr("Tries the cheapest models of each Wi-Fi generation from the catalog, one to four of them, at the spots where they help most")).clicked() {
+                self.proposal = self.net.plan_budget(self.budget, self.budget_mesh);
+                if self.proposal.is_none() {
+                    self.say(&ctx, tr("Nothing within this budget improves the coverage."));
+                }
+            }
+        });
+        let Some(p) = self.proposal.clone() else { return };
+        let covered = p.good >= crate::plan::COVERED;
+        ui.label(RichText::new(trf("{}× {}: {}{} · worst storey {}% good Wi-Fi", &[&p.spots.len(), &p.product.title(), &self.net.currency, &format!("{:.0}", p.cost), &format!("{:.0}", p.good * 100.0)])).color(if covered { pal().green } else { pal().amber }))
+            .on_hover_text(if covered { tr("The cheapest set found that covers every storey.") } else { tr("Not every storey gets good Wi-Fi within this budget: this is the best set found.") });
+        ui.horizontal(|ui| {
+            if ui.small_button(format!("{} {}", ic::PLUS, tr("Put them in"))).on_hover_text(if p.kind == Kind::Extender { tr("Adds them, joined to the router over Wi-Fi") } else { tr("Adds them, each with a cable to the router") }).clicked() {
+                self.snapshot();
+                let ids = self.net.apply_proposal(&p);
+                if let Some(id) = ids.first() {
+                    self.sel = Sel::Dev(*id);
+                }
+                self.issues = None;
+                self.cov_cache = None;
+                self.heat_cache = None;
+            }
+            if ui.small_button(ic::X).on_hover_text(tr("Hide")).clicked() {
+                self.proposal = None;
+            }
+        });
     }
 }
 
 /// What two options are compared on: cost, cable, power, Wi-Fi and problems.
 pub(crate) fn summary(n: &Network) -> Vec<(&'static str, String)> {
     let (_, cost) = crate::shopping(n);
-    let cable: f32 = n.links.iter().filter(|l| !l.medium.wireless() && l.medium != Medium::Powerline).map(|l| n.link_len(l)).sum();
+    let cable: f32 = n.links.iter().filter(|l| !l.medium.wireless() && l.medium != Medium::Powerline).map(|l| n.link_len(l)).sum::<f32>() + 0.0;
     let mut floors: Vec<i8> = n.walls.iter().map(|w| w.floor).collect();
     floors.sort();
     floors.dedup();
@@ -475,13 +516,13 @@ impl App {
     }
 
     /// Side by side with another saved plan: is option B worth what it costs?
-    fn compare_section(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn compare_section(&mut self, ui: &mut egui::Ui) {
         if !Self::section_hint(ui, "Compare options", "Save each idea as its own plan (for example 'mesh' and 'cabled access points'), then compare this one with another: cost, cable, power, Wi-Fi coverage and problems.") {
             return;
         }
         let pick = ui.button(format!("{}  {}", ic::SCALES, tr("Compare with another plan…"))).clicked();
         if pick {
-            if let Some(path) = rfd::FileDialog::new().add_filter("Network plan", &["netplan", "json"]).pick_file() {
+            if let Some(path) = rfd::FileDialog::new().add_filter(tr("Network plan"), &["netplan", "json"]).pick_file() {
                 let ctx = ui.ctx().clone();
                 match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Network>(&t).map_err(|e| e.to_string())) {
                     Ok(mut other) => {

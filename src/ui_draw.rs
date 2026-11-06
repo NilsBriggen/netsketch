@@ -16,7 +16,7 @@ impl App {
         for id in ids {
             let l = self.net.labels.iter().find(|l| l.id == id).unwrap();
             let c = self.to_screen(vec2(l.pos[0], l.pos[1]));
-            let selected = self.sel == Sel::Label(id);
+            let selected = self.sel == Sel::Label(id) || self.extra.contains(&Sel::Label(id));
             let g = painter.layout_no_wrap(if l.text.is_empty() { tr("Room").into() } else { l.text.clone() }, FontId::proportional(size), if selected { pal().accent } else { pal().dim.gamma_multiply(1.3) });
             let r = Rect::from_center_size(c, g.size() + vec2(8.0, 4.0));
             if selected {
@@ -28,7 +28,12 @@ impl App {
             }
             let resp = ui.interact(r, Id::new(("label", id)), Sense::click_and_drag());
             if resp.clicked() {
-                self.sel = Sel::Label(id);
+                if ui.input(|i| i.modifiers.shift) {
+                    self.toggle_sel(Sel::Label(id));
+                } else {
+                    self.sel = Sel::Label(id);
+                    self.extra.clear();
+                }
             }
             if resp.drag_started() {
                 self.snapshot();
@@ -79,6 +84,10 @@ impl App {
             }
             ui.close();
         }
+        if crate::soft::has_desktop(self.net.dev(id).map_or(Kind::Switch, |d| d.kind)) && ui.button(format!("{}  {}", ic::MONITOR, tr("Open desktop"))).clicked() {
+            self.open_desk(id, crate::ui_desk::Page::Home);
+            ui.close();
+        }
         if design && ui.button(format!("{}  {}", ic::COPY, tr("Duplicate"))).clicked() {
             self.snapshot();
             if let Some(new) = self.net.duplicate(id) {
@@ -87,9 +96,34 @@ impl App {
             ui.close();
         }
         if ui.button(format!("{}  {}", ic::POWER, if off { tr("Switch on") } else { tr("Switch off") })).clicked() {
+            self.snapshot();
             self.net.dev_mut(id).unwrap().off = !off;
             self.issues = None;
             ui.close();
+        }
+        if design {
+            // Onto another storey: the device (with everything else selected) keeps its spot on the plan.
+            let mut floors = self.net.used_floors();
+            let here = self.net.dev(id).map_or(0, |d| d.floor);
+            floors.extend([here - 1, here + 1]);
+            ui.menu_button(format!("{}  {}", ic::STACK, tr("Move to storey")), |ui| {
+                for f in floors.into_iter().filter(|f| *f != here && (-3..=20).contains(f)) {
+                    if ui.button(self.net.storey(f)).clicked() {
+                        self.snapshot();
+                        let group = if self.selection().contains(&Sel::Dev(id)) { self.selection() } else { vec![Sel::Dev(id)] };
+                        for s in group {
+                            if let Sel::Dev(x) = s {
+                                if let Some(d) = self.net.dev_mut(x) {
+                                    d.floor = f;
+                                }
+                            }
+                        }
+                        let ctx = ui.ctx().clone();
+                        self.say(&ctx, trf("Moved to {} — pick it in the storey menu to see it.", &[&self.net.storey(f)]));
+                        ui.close();
+                    }
+                }
+            });
         }
         if design && ui.button(RichText::new(format!("{}  {}", ic::TRASH, tr("Delete"))).color(pal().red)).clicked() {
             self.snapshot();
@@ -120,7 +154,12 @@ impl App {
             for (label, kind, width) in [(tr("Put in a door"), Some(WallKind::Wood), 0.9), (tr("Put in a window"), Some(WallKind::Glass), 1.2), (tr("Leave an opening"), None, 0.9)] {
                 if ui.button(label).clicked() {
                     self.snapshot();
-                    let msg = insert_opening(&mut self.net, w, kind, width);
+                    // Centred where the wall was right-clicked.
+                    let t = self.net.walls.iter().find(|x| x.id == w).map_or(0.5, |x| {
+                        let (v, p) = ([x.b[0] - x.a[0], x.b[1] - x.a[1]], [at[0] - x.a[0], at[1] - x.a[1]]);
+                        ((p[0] * v[0] + p[1] * v[1]) / (v[0] * v[0] + v[1] * v[1]).max(1e-6)).clamp(0.0, 1.0)
+                    });
+                    let msg = insert_opening(&mut self.net, w, kind, width, t);
                     let ctx = ui.ctx().clone();
                     self.say(&ctx, msg);
                     ui.close();
@@ -137,6 +176,7 @@ impl App {
             let unplugged = self.net.links.iter().find(|x| x.id == l).is_some_and(|x| x.unplugged);
             ui.label(RichText::new(tr("Connection")).strong());
             if ui.button(if unplugged { tr("Plug it back in") } else { tr("Unplug — what if it breaks?") }).clicked() {
+                self.snapshot();
                 if let Some(x) = self.net.links.iter_mut().find(|x| x.id == l) {
                     x.unplugged = !unplugged;
                 }

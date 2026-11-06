@@ -14,18 +14,26 @@ pub struct Walk {
 }
 
 pub fn wall_color(k: WallKind) -> Color32 {
+    // Calm tones that read on both themes; a darker outline (see `draw_walls`) keeps light ones visible.
     match k {
-        WallKind::Drywall => Color32::from_rgb(170, 178, 190),
-        WallKind::Wood => Color32::from_rgb(180, 130, 80),
-        WallKind::Glass => Color32::from_rgb(140, 200, 240),
-        WallKind::LowE => Color32::from_rgb(56, 140, 200),
-        WallKind::Brick => Color32::from_rgb(190, 90, 70),
-        WallKind::InnerBrick => Color32::from_rgb(205, 125, 100),
-        WallKind::Concrete => Color32::from_rgb(120, 126, 136),
-        WallKind::Metal => Color32::from_rgb(200, 210, 225),
-        WallKind::Aerated => Color32::from_rgb(214, 196, 160),
-        WallKind::Stone => Color32::from_rgb(140, 120, 100),
+        WallKind::Drywall => Color32::from_rgb(196, 200, 207),
+        WallKind::Wood => Color32::from_rgb(190, 158, 118),
+        WallKind::Glass => Color32::from_rgb(150, 200, 235),
+        WallKind::LowE => Color32::from_rgb(92, 150, 200),
+        WallKind::Brick => Color32::from_rgb(160, 118, 104),
+        WallKind::InnerBrick => Color32::from_rgb(178, 142, 128),
+        WallKind::Concrete => Color32::from_rgb(122, 128, 137),
+        WallKind::Metal => Color32::from_rgb(158, 174, 194),
+        WallKind::Aerated => Color32::from_rgb(204, 194, 168),
+        WallKind::Stone => Color32::from_rgb(138, 126, 113),
     }
+}
+
+/// The darker edge drawn around a wall.
+fn wall_edge(k: WallKind) -> Color32 {
+    let c = wall_color(k);
+    let f = if pal().bg.r() > 128 { 0.55 } else { 0.45 };
+    Color32::from_rgb((c.r() as f32 * f) as u8, (c.g() as f32 * f) as u8, (c.b() as f32 * f) as u8)
 }
 
 /// Real wall thickness in map units (1 m = PX_PER_M), so walls keep their size when zooming in.
@@ -47,10 +55,57 @@ pub fn heat_bands(target: f32) -> [(f32, &'static str); 5] {
     [(target + 12.0, "excellent"), (target + 2.0, "good"), (target - 5.0, "fair"), (target - 13.0, "weak"), (target - 19.0, "barely")]
 }
 
-/// Colour for a signal strength on the Wi-Fi map.
+/// The map's colour ramp: excellent, good, fair, weak, barely (green → red).
+const RAMP: [(u8, u8, u8); 5] = [(34, 197, 94), (163, 230, 53), (250, 204, 21), (249, 115, 22), (239, 68, 68)];
+
+/// Colour along the ramp for a value between anchors that run from best to worst (signal: dBm edges of the five
+/// colours; speed: Mbit/s on a log scale). Below the last anchor it fades out over `fade`; None when gone.
+fn ramp(v: f32, anchors: [f32; 5], fade: f32, alpha: f32) -> Option<Color32> {
+    let c = |i: usize| RAMP[i];
+    let mix = |a: (u8, u8, u8), b: (u8, u8, u8), t: f32| {
+        let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t.clamp(0.0, 1.0)).round() as u8;
+        (l(a.0, b.0), l(a.1, b.1), l(a.2, b.2))
+    };
+    let (rgb, a) = if v >= anchors[0] {
+        (c(0), alpha)
+    } else if let Some(i) = (0..4).find(|i| v >= anchors[i + 1]) {
+        (mix(c(i), c(i + 1), (anchors[i] - v) / (anchors[i] - anchors[i + 1])), alpha)
+    } else {
+        let t = (anchors[4] - v) / fade;
+        if t >= 1.0 || v.is_nan() {
+            return None;
+        }
+        (c(4), alpha * (1.0 - t))
+    };
+    Some(Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, (a * 255.0) as u8))
+}
+
+/// Colour for a signal strength on the Wi-Fi map (continuous; nothing below "barely").
 pub fn heat_color(rssi: f32, target: f32) -> Option<Color32> {
-    let cols = [(34, 197, 94, 70), (163, 230, 53, 60), (250, 204, 21, 55), (249, 115, 22, 50), (239, 68, 68, 40)];
-    heat_bands(target).iter().zip(cols).find(|(b, _)| rssi >= b.0).map(|(_, (r, g, b, a))| Color32::from_rgba_unmultiplied(r, g, b, a))
+    ramp(rssi, heat_bands(target).map(|b| b.0), 3.0, 0.34)
+}
+
+/// Lower edges (Mbit/s) of the speed map's colours, with their names.
+pub const SPEED_BANDS: [(f32, &str); 5] = [(300.0, "very fast"), (100.0, "fast"), (25.0, "fine"), (5.0, "slow"), (1.0, "crawling")];
+
+pub fn speed_color(mbps: f32) -> Option<Color32> {
+    (mbps > 0.0).then(|| ramp(mbps.log10(), SPEED_BANDS.map(|b| b.0.log10()), 0.5, 0.34)).flatten()
+}
+
+/// How much a neighbour network or a disturber gets in the way where its signal lands: (lower edge dBm, name).
+pub const DISTURB_BANDS: [(f32, &str); 3] = [(-62.0, "disturbs"), (-82.0, "shares airtime"), (-92.0, "barely heard")];
+
+pub fn disturb_color(rssi: f32) -> Option<Color32> {
+    let (r, g, b, a) = if rssi >= -62.0 {
+        (239, 68, 68, 0.45)
+    } else if rssi >= -82.0 {
+        (250, 204, 21, 0.35)
+    } else if rssi >= -92.0 {
+        (148, 163, 184, 0.25)
+    } else {
+        return None;
+    };
+    Some(Color32::from_rgba_unmultiplied(r, g, b, (a * 255.0) as u8))
 }
 
 pub fn quality_color(rssi: f32) -> Color32 {
@@ -137,130 +192,306 @@ fn walk_pos(pts: &[[f32; 2]], mut dist: f32) -> ([f32; 2], bool) {
     (*pts.last().unwrap(), true)
 }
 
-/// A Wi-Fi map being worked out a few rows per frame: (storey, cell size, band), the cell area, the plan's
-/// fingerprint, the next row, and the coloured cells so far.
+/// What a Wi-Fi map shows: signal or speed; storey, cell size, band, speed (true) and the device in focus (0: all).
+type HeatKey = (i8, i32, usize, bool, u32);
+
+/// A Wi-Fi map being worked out a few rows per frame: what, the cell area, the plan's fingerprint, the next row,
+/// the values so far (NaN: nothing to draw), which cells are indoors, and the picture of the rows done.
 pub(crate) struct HeatJob {
-    key: (i8, i32, usize),
+    key: HeatKey,
     area: [i32; 4],
     stamp: u64,
     row: i32,
-    cells: Vec<(Rect, Color32)>,
+    vals: Vec<f32>,
+    inside: Vec<bool>,
+    /// Per column: the highest and lowest wall crossing (for the indoor test).
+    cols: Vec<(f32, f32)>,
+    tex: Option<egui::TextureHandle>,
+    /// For the speed map, per access point: its channels' busyness and its own feed (worked out once per map).
+    feeds: HashMap<u32, ([f32; 3], f32)>,
+}
+
+/// A finished Wi-Fi map: what it shows, its cells, when it was last compared with the plan, the plan's fingerprint,
+/// its picture and the outline where it turns good (map points).
+pub(crate) struct HeatMap {
+    key: HeatKey,
+    area: [i32; 4],
+    checked: f64,
+    stamp: u64,
+    tex: egui::TextureHandle,
+    contour: Vec<[Pos2; 2]>,
+}
+
+/// What each cell of the map is worked out from.
+enum HeatWhat<'a> {
+    /// Strongest signal of these radios on a band (None: the strongest band), on the bands a device has (`only`).
+    Signal(Vec<&'a Device>, Option<crate::wifi::Band>, [bool; 3]),
+    /// Internet speed for this device from these radios.
+    Speed(Vec<crate::wifi::SpeedSource<'a>>, Device),
+    /// Where a neighbour network or a disturber lands.
+    Disturb(&'a Device),
+}
+
+/// How the map's device in focus is shown.
+#[derive(PartialEq, Clone, Copy)]
+pub(crate) enum Focus {
+    Radio,
+    Client,
+    Foreign,
 }
 
 impl App {
     // ---------- canvas layers ----------
 
+    /// The device the Wi-Fi map is about: the one selected (unless its map was closed), and how it's shown.
+    pub(crate) fn heat_focus(&self) -> Option<(&Device, Focus)> {
+        let Sel::Dev(id) = self.sel else { return None };
+        if self.heat_unfocus == Some(id) {
+            return None;
+        }
+        let d = self.net.dev(id)?;
+        if d.kind.radio() {
+            Some((d, Focus::Radio))
+        } else if d.kind.foreign() {
+            Some((d, Focus::Foreign))
+        } else if d.bands.iter().any(|b| *b) && d.kind != Kind::Internet {
+            Some((d, Focus::Client))
+        } else {
+            None
+        }
+    }
+
+    /// The colour of a map value, for the map as it is set now.
+    fn heat_paint(&self, v: f32, focus: Option<Focus>) -> Option<Color32> {
+        match (focus, self.heat_speed) {
+            (Some(Focus::Foreign), _) => disturb_color(v),
+            (_, true) => speed_color(v),
+            _ => heat_color(v, self.net.target),
+        }
+    }
+
     pub(crate) fn draw_heatmap(&mut self, painter: &egui::Painter, rect: Rect, now: f64) {
         if !self.net.devices.iter().any(|d| d.kind.radio()) {
             return;
         }
-        // About 14 screen pixels per cell, never finer than 25 cm.
-        let cell = (14.0 / self.zoom).max(PX_PER_M / 4.0).round();
+        // About 12 screen pixels per cell, never finer than 25 cm; the picture is smoothed between cells.
+        let cell = (12.0 / self.zoom).max(PX_PER_M / 4.0).round();
         let (tl, br) = (self.to_world(rect.min), self.to_world(rect.max));
-        let key = (self.floor, cell as i32, self.heat_band);
+        let focus = self.heat_focus().map(|(d, f)| (d.id, f));
+        let key: HeatKey = (self.floor, cell as i32, self.heat_band, self.heat_speed, focus.map_or(0, |f| f.0));
         let view = [(tl.x / cell).floor() as i32, (tl.y / cell).floor() as i32, (br.x / cell).ceil() as i32, (br.y / cell).ceil() as i32];
         let radios: Vec<&Device> = self.net.devices.iter().filter(|d| d.kind.radio() && !d.off && d.bands.iter().any(|b| *b)).collect();
         // Panning stays inside the area already worked out (a quarter view extra each side); twice a second the
-        // radios and walls are compared, and only a change redraws.
-        let inside = |c: &((i8, i32, usize), [i32; 4], Vec<(Rect, Color32)>, f64, u64)| c.0 == key && c.1[0] <= view[0] && c.1[1] <= view[1] && c.1[2] >= view[2] && c.1[3] >= view[3];
-        let fingerprint = || {
+        // radios and walls (and for speed the cables, for a device its settings) are compared, and only a change redraws.
+        let covers = |area: [i32; 4]| area[0] <= view[0] && area[1] <= view[1] && area[2] >= view[2] && area[3] >= view[3];
+        let fingerprint = |me: &Self| {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            serde_json::to_vec(&(&radios, &self.net.walls, self.net.slab, &self.net.storey_heights, self.net.target)).unwrap_or_default().hash(&mut h);
+            serde_json::to_vec(&(&radios, &me.net.walls, me.net.slab, &me.net.storey_heights, me.net.target)).unwrap_or_default().hash(&mut h);
+            if me.heat_speed {
+                serde_json::to_vec(&me.net.links).unwrap_or_default().hash(&mut h);
+            }
+            if let Some(d) = focus.and_then(|f| me.net.dev(f.0)) {
+                serde_json::to_vec(d).unwrap_or_default().hash(&mut h);
+            }
             h.finish()
         };
         let mut stamp = 0;
         // While a new map is being worked out, keep at it every frame; otherwise compare twice a second.
         let fresh = self.heat_job.is_none()
-            && match self.heat_cache.as_mut() {
-                Some(c) if inside(c) && now - c.3 < 0.5 => true,
-                Some(c) if inside(c) => {
-                    stamp = fingerprint();
-                    c.3 = now;
-                    c.4 == stamp
+            && match &self.heat_cache {
+                Some(c) if c.key == key && covers(c.area) && now - c.checked < 0.5 => true,
+                Some(c) if c.key == key && covers(c.area) => {
+                    stamp = fingerprint(self);
+                    let same = c.stamp == stamp;
+                    self.heat_cache.as_mut().unwrap().checked = now;
+                    same
                 }
                 _ => false,
             };
         if !fresh {
             if stamp == 0 {
-                stamp = fingerprint();
+                stamp = fingerprint(self);
             }
-            let (mx, my) = ((view[2] - view[0]) / 4 + 1, (view[3] - view[1]) / 4 + 1);
-            let area = [view[0] - mx, view[1] - my, view[2] + mx, view[3] + my];
-            let current = self.heat_job.as_ref().is_some_and(|j| j.key == key && j.stamp == stamp && j.area[0] <= view[0] && j.area[1] <= view[1] && j.area[2] >= view[2] && j.area[3] >= view[3]);
+            let current = self.heat_job.as_ref().is_some_and(|j| j.key == key && j.stamp == stamp && covers(j.area));
             if !current {
-                self.heat_job = Some(HeatJob { key, area, stamp, row: area[1], cells: vec![] });
+                let (mx, my) = ((view[2] - view[0]) / 4 + 1, (view[3] - view[1]) / 4 + 1);
+                let area = [view[0] - mx, view[1] - my, view[2] + mx, view[3] + my];
+                // Per column, the walls' highest and lowest crossing: a spot is indoors with walls on all four sides.
+                let walls: Vec<&crate::wifi::Wall> = self.net.walls.iter().filter(|w| w.floor == self.floor).collect();
+                let cols = (area[0]..area[2]).map(|cx| crossings(&walls, (cx as f32 + 0.5) * cell, true)).collect();
+                let n = ((area[2] - area[0]) * (area[3] - area[1])) as usize;
+                let tex = self.heat_job.take().and_then(|j| j.tex);
+                let feeds = if self.heat_speed { self.net.speed_sources(&radios).into_iter().map(|s| (s.ap.id, (s.contention, s.cap))).collect() } else { HashMap::new() };
+                self.heat_job = Some(HeatJob { key, area, stamp, row: area[1], vals: Vec::with_capacity(n), inside: Vec::with_capacity(n), cols, tex, feeds });
             }
-            // A few rows per frame (about 6 ms): the old map stays up meanwhile, so dragging never stalls.
             let band = self.heat_band.checked_sub(1).map(|b| crate::wifi::Band::ALL[b]);
-            let weakest = heat_bands(self.net.target)[4].0;
+            let feeds = &self.heat_job.as_ref().unwrap().feeds;
+            let what = match focus.and_then(|f| Some((self.net.dev(f.0)?, f.1))) {
+                Some((d, Focus::Foreign)) => HeatWhat::Disturb(d),
+                Some((d, Focus::Radio)) if self.heat_speed => HeatWhat::Speed(with_feeds(&[d], feeds), crate::wifi::typical_phone()),
+                Some((d, Focus::Radio)) => HeatWhat::Signal(vec![d], band, [true; 3]),
+                Some((d, Focus::Client)) if self.heat_speed => HeatWhat::Speed(with_feeds(&radios, feeds), d.clone()),
+                Some((d, Focus::Client)) => HeatWhat::Signal(radios.clone(), band, d.bands),
+                None if self.heat_speed => HeatWhat::Speed(with_feeds(&radios, feeds), crate::wifi::typical_phone()),
+                None => HeatWhat::Signal(radios.clone(), band, [true; 3]),
+            };
+            let weakest = heat_bands(self.net.target)[4].0 - 3.0;
+            let walls: Vec<&crate::wifi::Wall> = self.net.walls.iter().filter(|w| w.floor == self.floor).collect();
+            let building = walls.len() >= 3;
+            let floor = self.floor;
+            // A few rows per frame (about 6 ms): the old map stays up meanwhile, so dragging never stalls.
             let started = std::time::Instant::now();
             let job = self.heat_job.as_mut().unwrap();
             while job.row < job.area[3] && started.elapsed() < std::time::Duration::from_millis(6) {
-                let cy = job.row;
+                let y = (job.row as f32 + 0.5) * cell;
+                let (left, right) = crossings(&walls, y, false);
                 for cx in job.area[0]..job.area[2] {
-                    let (x, y) = (cx as f32 * cell, cy as f32 * cell);
-                    // Weaker than the last colour shows nothing, so radios that can't get there needn't be worked out.
-                    let best = self.net.strongest_at(&radios, [x + cell / 2.0, y + cell / 2.0], self.floor, band, weakest);
-                    if let Some(c) = heat_color(best, self.net.target) {
-                        job.cells.push((Rect::from_min_size(pos2(x, y), Vec2::splat(cell)), c));
-                    }
+                    let p = [(cx as f32 + 0.5) * cell, y];
+                    let (top, bottom) = job.cols[(cx - job.area[0]) as usize];
+                    let indoor = !building || (left < p[0] && p[0] < right && top < y && y < bottom) || self.net.in_outdoor(floor, p);
+                    let v = match &what {
+                        // Weaker than the last colour shows nothing, so radios that can't get there needn't be worked out.
+                        HeatWhat::Signal(rs, Some(b), _) => self.net.strongest_at(rs, p, floor, Some(*b), weakest),
+                        HeatWhat::Signal(rs, None, only) if *only == [true; 3] => self.net.strongest_at(rs, p, floor, None, weakest),
+                        HeatWhat::Signal(rs, None, only) => crate::wifi::Band::ALL.iter().filter(|b| only[b.i()]).map(|b| self.net.strongest_at(rs, p, floor, Some(*b), weakest)).fold(-120.0, f32::max),
+                        HeatWhat::Speed(srcs, cl) => self.net.spot_speed(srcs, cl, p, floor),
+                        HeatWhat::Disturb(d) => self.net.strongest_at(&[d], p, floor, None, -95.0),
+                    };
+                    job.vals.push(v);
+                    job.inside.push(indoor);
                 }
                 job.row += 1;
             }
-            if job.row >= job.area[3] {
+            let done = job.row >= job.area[3];
+            // The picture of the rows done so far (the rest clear), or of the whole map when finished.
+            let img = self.heat_image(self.heat_job.as_ref().unwrap(), focus.map(|f| f.1));
+            let job = self.heat_job.as_mut().unwrap();
+            match &mut job.tex {
+                Some(t) if t.size() == img.size => t.set(img, egui::TextureOptions::LINEAR),
+                t => *t = Some(painter.ctx().load_texture("wifi-map", img, egui::TextureOptions::LINEAR)),
+            }
+            if done {
                 let j = self.heat_job.take().unwrap();
-                self.heat_cache = Some((j.key, j.area, j.cells, now, j.stamp));
+                let thr = match (focus.map(|f| f.1), self.heat_speed) {
+                    (Some(Focus::Foreign), _) => -82.0,
+                    (_, true) => SPEED_BANDS[2].0,
+                    _ => self.net.target,
+                };
+                let contour = contour(&j.vals, &j.inside, j.area, cell, thr);
+                self.heat_cache = Some(HeatMap { key: j.key, area: j.area, checked: now, stamp: j.stamp, tex: j.tex.unwrap(), contour });
             } else {
                 painter.ctx().request_repaint();
             }
         }
-        // The finished map for this storey and band; until there is one, the part worked out so far.
-        let cells = match (&self.heat_cache, &self.heat_job) {
-            (Some(c), _) if c.0 == key => &c.2,
-            (_, Some(j)) => &j.cells,
+        // The finished map for this view; until there is one, the part worked out so far.
+        let (tex, area, contour) = match (&self.heat_cache, &self.heat_job) {
+            (Some(c), _) if c.key == key => (c.tex.id(), c.area, Some(&c.contour)),
+            (_, Some(j)) if j.tex.is_some() => (j.tex.as_ref().unwrap().id(), j.area, None),
             _ => return,
         };
-        for (r, c) in cells {
-            let min = self.to_screen(r.min.to_vec2());
-            painter.rect_filled(Rect::from_min_size(min, r.size() * self.zoom + Vec2::splat(0.6)), 0, *c);
+        let r = Rect::from_min_max(self.to_screen(vec2(area[0] as f32, area[1] as f32) * cell), self.to_screen(vec2(area[2] as f32, area[3] as f32) * cell));
+        painter.image(tex, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        // Where it turns good: a thin line, so the edge reads without counting colours.
+        if let Some(c) = contour {
+            let stroke = Stroke::new(1.2, pal().text.gamma_multiply(0.55));
+            for [a, b] in c {
+                painter.line_segment([self.to_screen(a.to_vec2()), self.to_screen(b.to_vec2())], stroke);
+            }
         }
     }
 
-    /// The Wi-Fi map colour key, drawn on top of everything at the bottom left.
-    pub(crate) fn heat_legend(&self, painter: &egui::Painter, rect: Rect) {
-        let narrow = rect.width() < 810.0;
-        // Narrow canvas: lift the legend above the zoom buttons so they don't collide, and a short caption.
-        let lift = if narrow { 44.0 } else { 0.0 };
-        let caption = if narrow { tr("Signal:") } else { [tr("Wi-Fi map (best band):"), tr("Wi-Fi map (2.4 GHz):"), tr("Wi-Fi map (5 GHz):"), tr("Wi-Fi map (6 GHz):")][self.heat_band.min(3)] };
-        let cap = painter.layout_no_wrap(caption.into(), FontId::proportional(11.5), pal().dim);
-        // Each colour with its name and the weakest signal it stands for.
-        let items: Vec<_> = heat_bands(self.net.target)
-            .iter()
-            .map(|(v, t)| (*v, painter.layout_no_wrap(if narrow { tr(t).to_string() } else { format!("{} {v:.0}", tr(t)) }, FontId::proportional(11.0), pal().text)))
-            .collect();
-        let width = 20.0 + cap.size().x + items.iter().map(|i| 26.0 + i.1.size().x).sum::<f32>();
-        let r = Rect::from_min_size(rect.left_bottom() + vec2(12.0, -40.0 - lift), vec2(width.min(rect.width() - 24.0), 28.0));
-        painter.rect_filled(r, 8, pal().card.gamma_multiply(0.92));
-        let mut x = r.left() + 10.0;
-        let w = cap.size().x;
-        painter.galley(pos2(x, r.center().y - cap.size().y / 2.0), cap, pal().dim);
-        x += w + 12.0;
-        for (v, g) in items {
-            painter.rect_filled(Rect::from_center_size(pos2(x + 5.0, r.center().y), Vec2::splat(10.0)), 2, heat_color(v, self.net.target).unwrap().gamma_multiply(2.5));
-            let w = g.size().x;
-            painter.galley(pos2(x + 14.0, r.center().y - g.size().y / 2.0), g, pal().text);
-            x += 14.0 + w + 12.0;
+    /// The picture of a (partly) worked-out map: one pixel per cell, outdoors faded.
+    fn heat_image(&self, j: &HeatJob, focus: Option<Focus>) -> egui::ColorImage {
+        let (w, h) = ((j.area[2] - j.area[0]) as usize, (j.area[3] - j.area[1]) as usize);
+        let mut px = vec![Color32::TRANSPARENT; w * h];
+        for (i, v) in j.vals.iter().enumerate() {
+            if let Some(c) = self.heat_paint(*v, focus) {
+                px[i] = if j.inside[i] { c } else { c.gamma_multiply(0.3) };
+            }
         }
-        }
+        egui::ColorImage::new([w, h], px)
+    }
 
-    /// Draws the walls; returns the one under the pointer.
+    /// The Wi-Fi map's card at the bottom left: signal or speed, the band, which device it's about, and the colour key.
+    pub(crate) fn heat_card(&mut self, ctx: &egui::Context, rect: Rect) {
+        let focus = self.heat_focus().map(|(d, f)| (d.id, d.name.clone(), f));
+        let foreign = matches!(focus, Some((_, _, Focus::Foreign)));
+        // Narrow canvas: lift the card above the zoom buttons so they don't collide.
+        let lift = if rect.width() < 810.0 { 44.0 } else { 0.0 };
+        ui_kit::float(ctx, "heat_card", rect.left_bottom() + vec2(12.0, -12.0 - lift), Align2::LEFT_BOTTOM, |ui| {
+            egui::Frame::new().inner_margin(Margin::symmetric(6, 4)).show(ui, |ui| {
+                ui.set_max_width((rect.width() - 40.0).max(200.0));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if !foreign {
+                        for (on, t, hint) in [(false, "Signal", "How strong the Wi-Fi is (dBm)"), (true, "Speed", "Internet speed a device would get there: both directions, the shared channel and the access point's own feed (an extender far from the router stays slow)")] {
+                            if ui_kit::pill(ui, self.heat_speed == on, tr(t)).on_hover_text(tr(hint)).clicked() {
+                                self.heat_speed = on;
+                            }
+                        }
+                        ui.add_space(8.0);
+                        for (i, t) in ["Best band", "2.4", "5", "6 GHz"].iter().enumerate() {
+                            let hint = if i == 0 { tr("The strongest band at each spot") } else { tr("Only this band") };
+                            if ui_kit::pill(ui, self.heat_band == i, tr(t)).on_hover_text(hint).clicked() {
+                                self.heat_band = i;
+                            }
+                        }
+                    }
+                    if let Some((id, name, f)) = &focus {
+                        ui.add_space(8.0);
+                        let what = match f {
+                            Focus::Radio => trf("Only {}", &[name]),
+                            Focus::Client => trf("For {}", &[name]),
+                            Focus::Foreign => trf("Where {} lands", &[name]),
+                        };
+                        let hint = match f {
+                            Focus::Radio => tr("The map shows this access point alone. × shows all of them again."),
+                            Focus::Client => tr("The map shows what this device would get at each spot, with its own radio. × shows the usual map."),
+                            Focus::Foreign => tr("Where this network or disturber gets in the way of yours. × shows your own Wi-Fi again."),
+                        };
+                        if ui.add(egui::Button::new(RichText::new(format!("{what}  {}", ic::X)).color(pal().accent)).fill(pal().accent.gamma_multiply(0.14)).stroke(Stroke::NONE)).on_hover_text(hint).clicked() {
+                            self.heat_unfocus = Some(*id);
+                        }
+                    }
+                });
+                // The colour key: a gradient bar with the names under it, the numbers on hover.
+                let items: Vec<(Option<Color32>, String, String)> = match (foreign, self.heat_speed) {
+                    (true, _) => DISTURB_BANDS.iter().map(|(v, t)| (disturb_color(*v), tr(t).to_string(), format!("{v:.0} dBm"))).collect(),
+                    (_, true) => SPEED_BANDS.iter().map(|(v, t)| (speed_color(*v), tr(t).to_string(), format!("{v:.0} Mbit/s"))).collect(),
+                    _ => heat_bands(self.net.target).iter().map(|(v, t)| (heat_color(*v, self.net.target), tr(t).to_string(), format!("{v:.0} dBm"))).collect(),
+                };
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (c, name, num) in items {
+                        let g = ui.painter().layout_no_wrap(name, FontId::proportional(11.0), pal().text);
+                        let w = g.size().x.max(46.0) + 8.0;
+                        let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
+                        let bar = Rect::from_min_size(r.min, vec2(w, 5.0));
+                        ui.painter().rect_filled(bar, 0, c.map_or(pal().line, |c| c.gamma_multiply(2.2)));
+                        ui.painter().galley(pos2(r.left() + 2.0, r.top() + 7.0), g, pal().text);
+                        resp.on_hover_text(trf("from {}", &[&num]));
+                    }
+                });
+            });
+        });
+    }
+
+    /// Draws the walls; returns the one under the pointer. Two passes (a darker edge, then the fill), each wall
+    /// end rounded, so corners and T-joints close cleanly. Doors show their leaf and swing, glass a double line.
     pub(crate) fn draw_walls(&self, painter: &egui::Painter, pointer: Option<Pos2>) -> Option<u32> {
         let mut hovered = None;
-        for w in self.net.walls.iter().filter(|w| w.floor == self.floor) {
-            let (a, b) = (self.to_screen(vec2(w.a[0], w.a[1])), self.to_screen(vec2(w.b[0], w.b[1])));
-            let sel = self.sel == Sel::Wall(w.id);
-            let width = (wall_width(w.kind) * self.zoom).max(2.0);
+        let walls: Vec<(&crate::wifi::Wall, Pos2, Pos2, f32)> = self
+            .net
+            .walls
+            .iter()
+            .filter(|w| w.floor == self.floor)
+            .map(|w| (w, self.to_screen(vec2(w.a[0], w.a[1])), self.to_screen(vec2(w.b[0], w.b[1])), (wall_width(w.kind) * self.zoom).max(2.0)))
+            .collect();
+        for (w, a, b, width) in &walls {
+            let (a, b, width) = (*a, *b, *width);
+            let sel = self.sel == Sel::Wall(w.id) || self.extra.contains(&Sel::Wall(w.id));
             // Thick walls (zoomed in) can be clicked anywhere on them, thin ones a little beside.
             let near = pointer.is_some_and(|p| dist_to_segment(p, a, b) < (width / 2.0 + 2.0).max(5.0));
             if near {
@@ -269,9 +500,36 @@ impl App {
             if sel || (near && self.mode == Mode::Design) {
                 painter.line_segment([a, b], Stroke::new(width + 6.0, pal().accent.gamma_multiply(if sel { 0.4 } else { 0.18 })));
             }
-            painter.line_segment([a, b], Stroke::new(width, wall_color(w.kind)));
-            if matches!(w.kind, WallKind::Glass | WallKind::LowE) {
-                painter.line_segment([a, b], Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.5)));
+            if w.door {
+                continue;
+            }
+            let e = width / 2.0 + 1.0;
+            painter.line_segment([a, b], Stroke::new(width + 2.0, wall_edge(w.kind)));
+            painter.circle_filled(a, e, wall_edge(w.kind));
+            painter.circle_filled(b, e, wall_edge(w.kind));
+        }
+        for (w, a, b, width) in &walls {
+            let (a, b, width) = (*a, *b, *width);
+            if w.door {
+                // The doorway, the leaf standing open at a right angle from the first end, and its swing.
+                let v = b - a;
+                let len = v.length();
+                let n = vec2(-v.y, v.x).normalized() * len;
+                let col = wall_color(w.kind);
+                painter.line_segment([a, b], Stroke::new(1.0, col.gamma_multiply(0.5)));
+                painter.line_segment([a, a + n], Stroke::new(2.0, col));
+                let start = n.angle();
+                let sweep = (v.angle() - start + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                let pts: Vec<Pos2> = (0..=16).map(|i| a + Vec2::angled(start + sweep * i as f32 / 16.0) * len).collect();
+                painter.add(egui::Shape::dashed_line(&pts, Stroke::new(1.0, col.gamma_multiply(0.8)), 3.0, 2.0));
+                continue;
+            }
+            let col = wall_color(w.kind);
+            painter.line_segment([a, b], Stroke::new(width, col));
+            painter.circle_filled(a, width / 2.0, col);
+            painter.circle_filled(b, width / 2.0, col);
+            if matches!(w.kind, WallKind::Glass | WallKind::LowE) && width >= 3.0 {
+                painter.line_segment([a, b], Stroke::new((width / 3.0).max(1.0), pal().bg.gamma_multiply(0.8)));
             }
         }
         hovered
@@ -397,9 +655,9 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(tr("Put in")).color(pal().dim));
             for (label, kind, width) in [(tr("Door"), Some(WallKind::Wood), 0.9), (tr("Window"), Some(WallKind::Glass), 1.2), (tr("Opening"), None, 0.9)] {
-                if ui.small_button(label).on_hover_text(trf("A {} m {} in the middle of this wall", &[&width, &(label.to_lowercase())])).clicked() {
+                if ui.small_button(label).on_hover_text(trf("A {} m {} in the middle of this wall (right-click a wall to put one exactly there)", &[&width, &(label.to_lowercase())])).clicked() {
                     self.snapshot();
-                    let msg = insert_opening(&mut self.net, id, kind, width);
+                    let msg = insert_opening(&mut self.net, id, kind, width, 0.5);
                     let ctx = ui.ctx().clone();
                     self.say(&ctx, msg);
                 }
@@ -425,10 +683,30 @@ impl App {
         }
     }
 
-    /// Handles on the selected wall's ends (Move tool): drag one and every wall joined there follows.
+    /// Handles on the selected wall (Move tool): drag an end and every wall joined there follows; drag the middle to
+    /// move the whole wall, the walls joined at its ends stretching along.
     pub(crate) fn wall_handles(&mut self, ui: &egui::Ui, painter: &egui::Painter) {
         let Sel::Wall(id) = self.sel else { return };
         let Some(w) = self.net.walls.iter().find(|w| w.id == id).cloned() else { return };
+        if self.extra.is_empty() {
+            let c = self.to_screen(vec2((w.a[0] + w.b[0]) / 2.0, (w.a[1] + w.b[1]) / 2.0));
+            painter.rect_filled(Rect::from_center_size(c, Vec2::splat(11.0)), 2, pal().bg);
+            painter.rect_stroke(Rect::from_center_size(c, Vec2::splat(11.0)), 2, Stroke::new(2.0, pal().accent), StrokeKind::Middle);
+            let resp = ui.interact(Rect::from_center_size(c, Vec2::splat(18.0)), Id::new(("wall_mid", id)), Sense::drag()).on_hover_text(tr("Drag to move the whole wall"));
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+            }
+            if resp.drag_started() {
+                self.snapshot();
+            }
+            if resp.dragged() {
+                let d = resp.drag_delta() / self.zoom;
+                move_corner(&mut self.net.walls, w.floor, w.a, [w.a[0] + d.x, w.a[1] + d.y]);
+                move_corner(&mut self.net.walls, w.floor, w.b, [w.b[0] + d.x, w.b[1] + d.y]);
+                self.heat_cache = None;
+                return;
+            }
+        }
         for (i, end) in [w.a, w.b].into_iter().enumerate() {
             let c = self.to_screen(vec2(end[0], end[1]));
             painter.circle_filled(c, 6.0, pal().bg);
@@ -558,11 +836,11 @@ impl App {
                             }
                         });
                     });
-                    let limit = b.eirp_limit(d.ch[i]);
+                    let limit = b.eirp_limit(d.ch[i], d.width[i]);
                     let over = d.tx[i] > limit;
-                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=30.0).speed(0.2).suffix(" dBm")).on_hover_text(trf("EU limit on {} channel {}: {} dBm{}", &[&(b.label()), &(d.ch[i]), &format!("{:.0}", limit), &(if over { tr(" — above it!") } else { "" })]));
+                    ui.add(egui::DragValue::new(&mut d.tx[i]).range(0.0..=36.0).speed(0.2).suffix(" dBm")).on_hover_text(trf("Legal limit on {} channel {}: {} dBm{}", &[&(b.label()), &(d.ch[i]), &format!("{:.0}", limit), &(if over { tr(" — above it!") } else { "" })]));
                 } else {
-                    ui.label(RichText::new(if allowed == 0 { tr("not with this standard") } else { "off" }).small().color(pal().dim));
+                    ui.label(RichText::new(if allowed == 0 { tr("not with this standard") } else { tr("off") }).small().color(pal().dim));
                     ui.label("");
                     ui.label("");
                 }
@@ -647,7 +925,7 @@ impl App {
         }
         crate::wifi::normalize_radio(d);
         if Self::section_hint(ui, "Wi-Fi adapter", "Phones send weaker than routers (≈ 15 dBm vs 20–23): the router may be heard where its answer from the phone isn't.") {
-            egui::ComboBox::from_id_salt(("cpreset", id)).selected_text(if d.model.is_empty() { "Choose a typical device…".to_string() } else { d.model.clone() }).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("cpreset", id)).selected_text(if d.model.is_empty() { tr("Choose a typical device…").to_string() } else { d.model.clone() }).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
                 for p in CLIENT_PRESETS {
                     if ui.selectable_label(d.model == p.name, p.name).clicked() {
                         self.before = Some(crate::Before::Device(d.clone()));
@@ -698,7 +976,7 @@ impl App {
                 ui.label(tr("Priority"));
                 egui::ComboBox::from_id_salt(("prio", id)).selected_text(d.priority.to_string()).width(110.0).show_ui(ui, |ui| {
                     for p in (0..=61440u32).step_by(4096) {
-                        ui.selectable_value(&mut d.priority, p as u16, format!("{p}{}", if p == 32768 { " (default)" } else if p == 4096 { " (core)" } else { "" }));
+                        ui.selectable_value(&mut d.priority, p as u16, format!("{p}{}", if p == 32768 { tr(" (default)") } else if p == 4096 { tr(" (core)") } else { "" }));
                     }
                 });
             });
@@ -724,7 +1002,7 @@ impl App {
                 return;
             }
             let d = self.net.dev_mut(id).unwrap();
-            egui::CollapsingHeader::new(format!("VLAN interfaces ({})", subs.len())).id_salt(("vl", id)).default_open(subs.len() <= 8).show(ui, |ui| {
+            egui::CollapsingHeader::new(trf("VLAN interfaces ({})", &[&subs.len()])).id_salt(("vl", id)).default_open(subs.len() <= 8).show(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(240.0).id_salt(("vls", id)).show(ui, |ui| {
                     egui::Grid::new(("vg", id)).num_columns(4).spacing(vec2(6.0, 4.0)).striped(true).show(ui, |ui| {
                         for i in subs {
@@ -905,7 +1183,7 @@ impl App {
                     ui.label(v);
                     ui.end_row();
                 };
-                row(ui, "Wi-Fi link", if s.alive() { format!("≈ {:.0} Mbit/s", s.mbps) } else { "no connection".into() });
+                row(ui, tr("Wi-Fi link"), if s.alive() { format!("≈ {:.0} Mbit/s", s.mbps) } else { tr("no connection").into() });
                 if let Some((e, why)) = self.e2e.get(&id).filter(|_| s.alive()) {
                     let real = e.min(s.mbps);
                     ui.label(RichText::new(tr("To the internet")).color(pal().dim));
@@ -923,6 +1201,9 @@ impl App {
                     row(ui, tr("Steadiness"), t);
                 }
                 row(ui, tr("Airtime"), if s.contention > 1.05 { trf("shared ×{} with other networks", &[&format!("{:.1}", s.contention)]) } else { tr("channel to itself").into() });
+                if s.hit_cost >= 0.02 {
+                    row(ui, tr("Talked over"), trf("{}% of the time by networks its access point can't hear (or the channel next door): {}% slower", &[&format!("{:.0}", s.hit * 100.0), &format!("{:.0}", s.hit_cost * 100.0)]));
+                }
                 let th = crate::wifi::roam_threshold(&ap, &d);
                 row(ui, tr("Roaming"), if ap.fast_roam { trf("fast (802.11k/v/r) — looks around below {} dBm", &[&format!("{:.0}", th)]) } else { trf("basic — this device hangs on until {} dBm", &[&format!("{:.0}", th)]) });
             });
@@ -997,7 +1278,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{r:>4.0}")).monospace().color(quality_color(r)));
                 let (label, tag) = match t.kind {
-                    Kind::Neighbor => (t.ssid.clone(), " (neighbour)"),
+                    Kind::Neighbor => (t.ssid.clone(), tr(" (neighbour)")),
                     Kind::Interference => (t.name.clone(), tr(" (not Wi-Fi)")),
                     Kind::Speaker => (t.name.clone(), tr(" (speaker mesh)")),
                     _ => (t.ssid.clone(), ""),
@@ -1108,19 +1389,25 @@ pub fn joined_walls(walls: &[crate::wifi::Wall], start: u32) -> Vec<u32> {
 }
 
 /// Splits a wall around its middle and puts a door, window (or a plain gap) of `width` metres there.
-pub fn insert_opening(n: &mut crate::net::Network, id: u32, kind: Option<WallKind>, width: f32) -> String {
+/// Splits a wall around a door, window or plain opening `width` m wide, centred at `at` along the wall (0–1; it's
+/// kept inside the wall). A door is marked so it draws as one.
+pub fn insert_opening(n: &mut crate::net::Network, id: u32, kind: Option<WallKind>, width: f32, at: f32) -> String {
     let Some(w) = n.walls.iter().find(|w| w.id == id).cloned() else { return tr("No such wall.").into() };
     let len = ((w.b[0] - w.a[0]).powi(2) + (w.b[1] - w.a[1]).powi(2)).sqrt() / PX_PER_M;
     if len < width + 0.2 {
         return trf("The wall is only {} m long — too short for a {} m opening.", &[&format!("{:.1}", len), &width]);
     }
-    let at = |t: f32| [w.a[0] + (w.b[0] - w.a[0]) * t, w.a[1] + (w.b[1] - w.a[1]) * t];
-    let (t0, t1) = (0.5 - width / len / 2.0, 0.5 + width / len / 2.0);
+    let half = width / len / 2.0;
+    let mid = at.clamp(half + 0.05 / len, 1.0 - half - 0.05 / len);
+    let (t0, t1) = (mid - half, mid + half);
+    let pt = |t: f32| [w.a[0] + (w.b[0] - w.a[0]) * t, w.a[1] + (w.b[1] - w.a[1]) * t];
     n.walls.retain(|x| x.id != id);
-    for (a, b, k) in [(w.a, at(t0), Some(w.kind)), (at(t0), at(t1), kind), (at(t1), w.b, Some(w.kind))] {
+    for (i, (a, b, k)) in [(w.a, pt(t0), Some(w.kind)), (pt(t0), pt(t1), kind), (pt(t1), w.b, Some(w.kind))].into_iter().enumerate() {
         if let Some(k) = k {
             crate::scenarios::wall(n, a, b, k);
-            n.walls.last_mut().unwrap().floor = w.floor;
+            let last = n.walls.last_mut().unwrap();
+            last.floor = w.floor;
+            last.door = i == 1 && k == WallKind::Wood;
         }
     }
     match kind {
@@ -1197,14 +1484,16 @@ mod wall_edit_tests {
         assert_eq!((n.walls[0].b, n.walls[1].a), (m(5.0, 0.0), m(5.0, 0.0)));
         let first = n.walls[0].id;
         assert_eq!(joined_walls(&n.walls, first).len(), 2);
-        let msg = insert_opening(&mut n, first, Some(WallKind::Wood), 0.9);
+        let msg = insert_opening(&mut n, first, Some(WallKind::Wood), 0.9, 0.25);
         assert!(msg.contains("door") || msg.contains("wood"), "{msg}");
         assert_eq!(n.walls.len(), 5);
         let door = n.walls.iter().find(|w| w.kind == WallKind::Wood).unwrap();
         let len = ((door.b[0] - door.a[0]).powi(2) + (door.b[1] - door.a[1]).powi(2)).sqrt() / PX_PER_M;
-        assert!((len - 0.9).abs() < 0.01);
+        assert!((len - 0.9).abs() < 0.01 && door.door);
+        // Centred where asked: a quarter along the 5 m wall.
+        assert!(((door.a[0] + door.b[0]) / 2.0 - 1.25 * PX_PER_M).abs() < 1.0, "{:?}", door.a);
         let tiny = n.walls.iter().find(|w| w.a == m(9.0, 9.0)).unwrap().id;
-        assert!(insert_opening(&mut n, tiny, None, 0.9).contains("too short"));
+        assert!(insert_opening(&mut n, tiny, None, 0.9, 0.5).contains("too short"));
     }
 }
 
@@ -1214,7 +1503,7 @@ mod tests {
     use crate::wifi::{Wall, WallKind};
 
     fn w(a: [f32; 2], b: [f32; 2]) -> Wall {
-        Wall { id: 1, a, b, kind: WallKind::Brick, floor: 0 }
+        Wall { id: 1, a, b, kind: WallKind::Brick, floor: 0, door: false }
     }
 
     #[test]
@@ -1236,4 +1525,65 @@ mod tests {
         // Back at the chain's start closes the room.
         assert_eq!(snap_point(&[], 0, vec2(101.0, 98.0), 12.0, Some([100.0, 100.0]), false, true).1, Snap::Corner);
     }
+}
+
+/// The speed map's sources: these access points with their feeds as worked out when the map started.
+fn with_feeds<'a>(rs: &[&'a Device], feeds: &HashMap<u32, ([f32; 3], f32)>) -> Vec<crate::wifi::SpeedSource<'a>> {
+    rs.iter().filter_map(|ap| feeds.get(&ap.id).map(|f| crate::wifi::SpeedSource { ap, contention: f.0, cap: f.1 })).collect()
+}
+
+/// Where the walls cross a vertical line x = `at` (`vertical`) or a horizontal line y = `at`: the lowest and highest
+/// crossing (∞ and −∞ when none), for the "walls on all four sides" indoor test.
+fn crossings(walls: &[&crate::wifi::Wall], at: f32, vertical: bool) -> (f32, f32) {
+    let (i, j) = if vertical { (0, 1) } else { (1, 0) };
+    let mut out = (f32::INFINITY, f32::NEG_INFINITY);
+    for w in walls {
+        let (a, b) = (w.a[i] - at, w.b[i] - at);
+        if a == b || a * b > 0.0 {
+            continue;
+        }
+        let t = a / (a - b);
+        let c = w.a[j] + (w.b[j] - w.a[j]) * t;
+        out = (out.0.min(c), out.1.max(c));
+    }
+    out
+}
+
+/// Marching squares over the map's cells: the segments (map points) where values cross `thr`.
+/// Only indoor squares get a line: outdoors the map just fades.
+fn contour(vals: &[f32], inside: &[bool], area: [i32; 4], cell: f32, thr: f32) -> Vec<[Pos2; 2]> {
+    let w = (area[2] - area[0]) as usize;
+    let h = vals.len() / w.max(1);
+    let at = |x: usize, y: usize| vals[y * w + x];
+    let centre = |x: f32, y: f32| pos2((area[0] as f32 + x + 0.5) * cell, (area[1] as f32 + y + 0.5) * cell);
+    let mut out = vec![];
+    for y in 0..h.saturating_sub(1) {
+        for x in 0..w.saturating_sub(1) {
+            if ![y * w + x, y * w + x + 1, (y + 1) * w + x, (y + 1) * w + x + 1].iter().all(|i| inside[*i]) {
+                continue;
+            }
+            // Corners clockwise from top left; NaN (nothing there) counts as below.
+            let v = [at(x, y), at(x + 1, y), at(x + 1, y + 1), at(x, y + 1)];
+            let up = v.map(|c| c >= thr);
+            let edge = |k: usize| -> Option<Pos2> {
+                let (a, b) = (k, (k + 1) % 4);
+                if up[a] == up[b] {
+                    return None;
+                }
+                let (va, vb) = (if v[a].is_nan() { thr - 10.0 } else { v[a] }, if v[b].is_nan() { thr - 10.0 } else { v[b] });
+                let t = ((thr - va) / (vb - va)).clamp(0.0, 1.0);
+                let pts = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+                let (pa, pb) = (pts[a], pts[b]);
+                Some(centre(x as f32 + pa.0 + (pb.0 - pa.0) * t, y as f32 + pa.1 + (pb.1 - pa.1) * t))
+            };
+            let pts: Vec<Pos2> = (0..4).filter_map(edge).collect();
+            if pts.len() == 2 {
+                out.push([pts[0], pts[1]]);
+            } else if pts.len() == 4 {
+                out.push([pts[0], pts[1]]);
+                out.push([pts[2], pts[3]]);
+            }
+        }
+    }
+    out
 }

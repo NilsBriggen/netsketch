@@ -102,6 +102,8 @@ public class SurveyJsonTest {
                 sp.latencyMs = 14.2;
                 sp.upMbps = 48.5;
                 sp.jitterMs = 2.1;
+                sp.lanDownMbps = 420;
+                sp.lanUpMbps = 310;
                 p.speed = sp;
             }
             s.points.add(p);
@@ -169,6 +171,7 @@ public class SurveyJsonTest {
         check(json.contains("\"format\": \"netsketch-survey\"") && json.contains("\"utilization\": 0.42") && json.contains("Cafe \\\"Corner\\\""), "json");
         check(new Survey().toJson().contains("\"points\": []"), "empty survey");
         check(json.contains("\"up_mbps\": 48.50, \"jitter_ms\": 2.10"), "upload and jitter written");
+        check(json.contains("\"lan_down_mbps\": 420.00, \"lan_up_mbps\": 310.00"), "speed to NetSketch written");
         // The new fields, each written when known.
         for (String f : new String[] {"\"rssi_min\": -61.00, \"rssi_max\": -56.00", "\"k\": true", "\"v\": true", "\"r\": true", "\"ftm\": true", "\"wps\": true", "\"streams\": 2", "\"country\": \"CH\"", "\"distance_m\": 3.40",
                 "\"tx_mbps\": 780.00, \"rx_mbps\": 650.00, \"max_mbps\": 1201.00, \"standard\": \"Wi-Fi 6\"", "\"ping\": {\"avg_ms\": 4.50, \"jitter_ms\": 3.33, \"loss_pct\": 20.00, \"max_ms\": 9.00}",

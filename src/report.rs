@@ -63,8 +63,44 @@ fn storey_svg(n: &Network, floor: i8) -> String {
     s + "</svg>"
 }
 
+/// The room a spot is in, going by the nearest room label on its storey (within 5 m).
+fn room_of(n: &Network, p: [f32; 2], floor: i8) -> Option<String> {
+    n.labels.iter().filter(|l| l.floor == floor && !l.text.is_empty()).map(|l| ((l.pos[0] - p[0]).hypot(l.pos[1] - p[1]), l)).filter(|x| x.0 <= 5.0 * PX_PER_M).min_by(|a, b| a.0.total_cmp(&b.0)).map(|x| x.1.text.clone())
+}
+
+/// A field for a CSV file: quoted when it holds a separator, a quote or a line break.
+fn csv(s: &str) -> String {
+    if s.contains([',', '"', '\n', ';']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+}
+
+/// The cable schedule for whoever lays the cables: from, to, kind, storeys and rooms, length (estimated with the
+/// plan's slack, or as measured).
+pub fn cables_csv(n: &Network) -> String {
+    let mut out = [tr("From"), tr("To"), tr("Type"), tr("Storey"), tr("From room"), tr("To room"), tr("Length (m)")].map(csv).join(",") + "\n";
+    for l in n.links.iter().filter(|l| !l.medium.wireless()) {
+        let (a, b) = (n.dev(l.a), n.dev(l.b));
+        let storey = |d: Option<&crate::net::Device>| d.map(|d| n.storey(d.floor)).unwrap_or_default();
+        let room = |d: Option<&crate::net::Device>| d.and_then(|d| room_of(n, d.pos, d.floor)).unwrap_or_default();
+        let storeys = if storey(a) == storey(b) { storey(a) } else { format!("{} → {}", storey(a), storey(b)) };
+        out += &[n.name(l.a), n.name(l.b), l.medium.label().to_string(), storeys, room(a), room(b), format!("{:.0}", n.link_len(l))].map(|x| csv(&x)).join(",");
+        out += "\n";
+    }
+    out
+}
+
+/// The shopping list: item, quantity, price, with the total last.
+pub fn shopping_csv(n: &Network) -> String {
+    let (items, total) = crate::shopping(n);
+    let mut out = [tr("Item"), tr("Quantity"), &trf("Price ({})", &[&n.currency])].map(csv).join(",") + "\n";
+    for (what, qty, cost) in items {
+        out += &format!("{},{qty},{cost:.0}\n", csv(&what));
+    }
+    out + &format!("{},,{total:.0}\n", csv(tr("Total (estimate)")))
+}
+
 /// The whole report, in the language the app is set to.
 pub fn html(n: &Network) -> String {
+    crate::wifi::Region::set(n.region);
     let mut s = format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title><style>
 body{{font:15px/1.5 system-ui,sans-serif;color:#0f172a;background:#fff;max-width:1000px;margin:0 auto;padding:24px}}
@@ -103,14 +139,23 @@ svg{{width:100%;height:auto;border:1px solid #e2e8f0;border-radius:8px;backgroun
             s += &format!("<p>{}</p>", esc(&trf("{}% of this storey (≈ {} m²) has good Wi-Fi, {}% at least usable.", &[&format!("{:.0}", c.good * 100.0), &format!("{:.0}", c.area_m2), &format!("{:.0}", c.usable * 100.0)])));
         }
         s += &svg;
-        s += &format!(r#"<p class="key dim">{key}</p>"#);
+        s += &format!(r#"<p class="key dim">{}: {key}</p>"#, esc(tr("Wi-Fi map, strongest band at each spot")));
     }
 
-    s += &format!("<h2>{}</h2><table><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>", esc(tr("Access points and channels")), esc(tr("Device")), esc(tr("Model")), esc(tr("Network name")), esc(tr("Bands")));
+    s += &format!(
+        "<h2>{}</h2><table><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>",
+        esc(tr("Access points and channels")),
+        esc(tr("Device")),
+        esc(tr("Where")),
+        esc(tr("Model")),
+        esc(tr("Network name")),
+        esc(tr("Bands"))
+    );
     for d in n.devices.iter().filter(|d| d.kind.radio() && !d.kind.foreign()) {
         let bands: Vec<String> = crate::wifi::Band::ALL.iter().filter(|b| d.bands[b.i()]).map(|b| trf("{} ch {} / {} MHz / {} dBm", &[&(b.label()), &(n.channel(d, *b)), &(d.width[b.i()]), &format!("{:.0}", d.tx[b.i()])])).collect();
         let model = if d.model.is_empty() { tr("Custom").to_string() } else { d.model.clone() };
-        s += &format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", esc(&d.name), esc(&model), esc(&d.ssid), bands.iter().map(|b| esc(b)).collect::<Vec<_>>().join("<br>"));
+        let place = [Some(n.storey(d.floor)), room_of(n, d.pos, d.floor), Some(trf("{} m up", &[&format!("{:.1}", d.mount)]))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+        s += &format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", esc(&d.name), esc(&place), esc(&model), esc(&d.ssid), bands.iter().map(|b| esc(b)).collect::<Vec<_>>().join("<br>"));
     }
     s += "</table>";
 
@@ -165,5 +210,19 @@ mod tests {
         assert!(h.contains("A &lt;b&gt; &amp; co"), "titles are escaped");
         assert_eq!(h.matches("<svg").count(), n.used_floors().len());
         assert!(h.contains("fill=\"rgb(") && h.contains("Shopping list"));
+    }
+
+    #[test]
+    fn cable_lists_quote_what_needs_it_and_slack_makes_runs_longer() {
+        let mut n = template("home");
+        let c = super::cables_csv(&n);
+        let cables = n.links.iter().filter(|l| !l.medium.wireless()).count();
+        assert_eq!(c.lines().count(), cables + 1);
+        assert_eq!(super::csv("a, \"b\""), "\"a, \"\"b\"\"\"");
+        assert!(super::shopping_csv(&n).lines().last().unwrap().starts_with("Total"));
+        let l = n.links.iter().find(|l| l.medium.cable() && l.length_m.is_none()).unwrap().clone();
+        let before = n.link_len(&l);
+        n.cable_slack = 0.5;
+        assert!(n.link_len(&l) > before, "{before} → {}", n.link_len(&l));
     }
 }

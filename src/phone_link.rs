@@ -175,6 +175,11 @@ fn handle(mut s: TcpStream, code: &str, plan: &Mutex<String>, inbox: &Mutex<Vec<
         }
         g.wrong = 0;
     }
+    if path == "/speed" {
+        *seen.lock().unwrap() = Some(Instant::now());
+        speed(s, method, query, &buf[head_end..], len, end);
+        return;
+    }
     if len > 5 * 1024 * 1024 {
         reply(&mut s, "413 Too Large", "{\"error\":\"too large\"}");
         return;
@@ -199,6 +204,44 @@ fn handle(mut s: TcpStream, code: &str, plan: &Mutex<String>, inbox: &Mutex<Vec<
         }
         _ => reply(&mut s, "404 Not Found", "{\"error\":\"unknown\"}"),
     }
+}
+
+/// The phone's Wi-Fi speed test to this computer: GET sends `mb` megabytes of zeros (at most 200; the phone stops
+/// after 5 s), POST takes whatever the phone sends (chunked, until its last chunk) and answers once it's all in.
+fn speed(mut s: TcpStream, method: &str, query: &str, got: &[u8], len: usize, end: Instant) {
+    if method == "GET" {
+        let mb = query.split('&').find_map(|kv| kv.strip_prefix("mb=")).and_then(|v| v.parse::<usize>().ok()).unwrap_or(50).min(200);
+        let total = mb * 1024 * 1024;
+        if write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n").is_err() {
+            return;
+        }
+        let zeros = [0u8; 64 * 1024];
+        let mut sent = 0;
+        while sent < total && Instant::now() < end {
+            let n = zeros.len().min(total - sent);
+            if s.write_all(&zeros[..n]).is_err() {
+                return; // the phone has seen enough
+            }
+            sent += n;
+        }
+        return;
+    }
+    // Chunked upload of zeros: it ends with "\r\n0\r\n\r\n", which zeros and chunk sizes can't make by accident.
+    let mut tail: Vec<u8> = got.iter().rev().take(8).rev().copied().collect();
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut read = got.len();
+    // With a Content-Length instead, until that much is in.
+    while if len > 0 { read < len } else { !tail.ends_with(b"0\r\n\r\n") } {
+        let Some(n) = read_by(&mut s, &mut chunk, end) else { return };
+        if n == 0 {
+            break;
+        }
+        read += n;
+        tail.extend_from_slice(&chunk[n.saturating_sub(8)..n]);
+        let cut = tail.len().saturating_sub(8);
+        tail.drain(..cut);
+    }
+    reply(&mut s, "200 OK", "{\"ok\":true}");
 }
 
 fn reply(s: &mut TcpStream, status: &str, body: &str) {
@@ -257,6 +300,18 @@ mod tests {
         let p = n.points.last().unwrap();
         assert!(p.placed && (p.pos[0] - 6.5 * PX_PER_M).abs() < 0.01, "points the phone placed arrive in place");
         assert!(link.last_seen.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn the_phone_measures_its_wifi_speed_to_this_computer() {
+        let link = PhoneLink::start(0, 0, "4831".into(), "Test".into()).unwrap();
+        let down = http(link.port, "GET /speed?code=4831&mb=2 HTTP/1.1\r\n\r\n");
+        assert!(down.starts_with("HTTP/1.1 200") && down.len() > 2 * 1024 * 1024, "{}", down.len());
+        assert!(http(link.port, "GET /speed?code=1111&mb=2 HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 403"));
+        // A chunked upload is answered once its last chunk is in.
+        let body: String = (0..20).map(|_| format!("400\r\n{}\r\n", "x".repeat(1024))).collect();
+        let up = http(link.port, &format!("POST /speed?code=4831 HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{body}0\r\n\r\n"));
+        assert!(up.starts_with("HTTP/1.1 200"), "{up}");
     }
 
     #[test]

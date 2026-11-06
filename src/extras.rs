@@ -876,8 +876,9 @@ pub struct FloorPlan {
     pub floor: i8,
     /// Where the picture came from (shown, and read by older saves that don't carry it).
     pub path: String,
-    /// The picture itself (JPEG, base64), so a plan sent to someone else keeps its floor plan.
-    pub data: String,
+    /// The picture itself (JPEG, base64), so a plan sent to someone else keeps its floor plan. Shared, so undo
+    /// steps (copies of the whole plan) don't copy the picture each time.
+    pub data: std::sync::Arc<str>,
     /// Top-left corner on the map (px) and real width (m).
     pub pos: [f32; 2],
     pub width_m: f32,
@@ -903,7 +904,7 @@ impl FloorPlan {
         if self.data.is_empty() {
             std::fs::read(&self.path).map_err(|e| e.to_string())
         } else {
-            base64::engine::general_purpose::STANDARD.decode(&self.data).map_err(|e| e.to_string())
+            base64::engine::general_purpose::STANDARD.decode(&*self.data).map_err(|e| e.to_string())
         }
     }
 
@@ -978,7 +979,7 @@ mod tests {
     fn a_floor_plan_picture_travels_inside_the_plan() {
         let mut png = vec![];
         image::RgbImage::from_pixel(3000, 1000, image::Rgb([200, 30, 30])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        let p = FloorPlan { data: FloorPlan::embed(&png).unwrap(), path: "/gone/plan.png".into(), ..Default::default() };
+        let p = FloorPlan { data: FloorPlan::embed(&png).unwrap().into(), path: "/gone/plan.png".into(), ..Default::default() };
         let img = image::load_from_memory(&p.bytes().unwrap()).unwrap();
         assert_eq!((img.width(), img.height()), (2400, 800), "made smaller, same shape");
     }

@@ -1,5 +1,6 @@
 //! Planning help: how much of each storey (and each garden or terrace) has good Wi-Fi, where one more
-//! access point would help most, and applying every one-click fix in one go.
+//! access point would help most, what to buy to cover the home on a budget, and applying every one-click fix in one go.
+use crate::catalog::Role;
 use crate::net::{Device, Kind, Network, PX_PER_M};
 
 /// How far below the plan's target (`Network::target`) a signal still counts as usable.
@@ -7,6 +8,19 @@ pub const USABLE_BELOW: f32 = 8.0;
 
 /// What "good Wi-Fi" can mean, for the picker: (dBm, name).
 pub const TARGETS: [(f32, &str); 3] = [(-72.0, "Browsing and music"), (-67.0, "Video calls (recommended)"), (-60.0, "4K streaming and gaming")];
+
+/// Share of good Wi-Fi every storey must reach for the budget planner to call the home covered.
+pub const COVERED: f32 = 0.9;
+
+/// What the budget planner proposes: which product, how many and where, the price and the worst storey's good share.
+#[derive(Clone, Debug)]
+pub struct Proposal {
+    pub product: &'static crate::catalog::Product,
+    pub kind: Kind,
+    pub spots: Vec<(i8, [f32; 2])>,
+    pub cost: f32,
+    pub good: f32,
+}
 
 /// A rectangle outside the building (two opposite corners, map pixels) where Wi-Fi should reach.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -24,6 +38,11 @@ pub struct Coverage {
     pub good: f32,
     pub usable: f32,
     pub area_m2: f32,
+}
+
+/// Indoors, as the coverage score counts it: walls in all four directions around the spot.
+pub fn surrounded(walls: &[&crate::wifi::Wall], p: [f32; 2]) -> bool {
+    [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]].iter().all(|d| walls.iter().any(|w| ray_hits(p, *d, w.a, w.b)))
 }
 
 impl Network {
@@ -45,8 +64,7 @@ impl Network {
         while y < y1 {
             let mut x = x0 + cell / 2.0;
             while x < x1 {
-                let outside = self.outdoor.iter().any(|o| o.floor == floor && (o.a[0].min(o.b[0])..o.a[0].max(o.b[0])).contains(&x) && (o.a[1].min(o.b[1])..o.a[1].max(o.b[1])).contains(&y));
-                if !outside && [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]].iter().all(|d| walls.iter().any(|w| ray_hits([x, y], *d, w.a, w.b))) {
+                if !self.in_outdoor(floor, [x, y]) && surrounded(&walls, [x, y]) {
                     v.push([x, y]);
                 }
                 x += cell;
@@ -64,7 +82,8 @@ impl Network {
         radios.iter().map(|r| self.best_rssi(r, p, floor)).fold(-120.0, f32::max)
     }
 
-    /// Share of a storey with good and with usable Wi-Fi. None until the storey has walls.
+    /// Share of a storey with good and with usable Wi-Fi. None until the storey has walls. It scores quality, not raw
+    /// signal: 2.4 GHz counts 6 dB less (slower and more crowded), as devices weigh it when picking a band.
     pub fn coverage(&self, floor: i8) -> Option<Coverage> {
         let (spots, cell) = self.spots(floor);
         if spots.is_empty() {
@@ -74,6 +93,11 @@ impl Network {
         let s: Vec<f32> = spots.iter().map(|p| self.best_at(&radios, *p, floor)).collect();
         let share = |t: f32| s.iter().filter(|x| **x >= t).count() as f32 / s.len() as f32;
         Some(Coverage { good: share(self.target), usable: share(self.target - USABLE_BELOW), area_m2: s.len() as f32 * (cell / PX_PER_M).powi(2) })
+    }
+
+    /// Whether a spot lies in one of the storey's outdoor areas (garden, terrace).
+    pub fn in_outdoor(&self, floor: i8, p: [f32; 2]) -> bool {
+        self.outdoor.iter().any(|o| o.floor == floor && (o.a[0].min(o.b[0])..o.a[0].max(o.b[0])).contains(&p[0]) && (o.a[1].min(o.b[1])..o.a[1].max(o.b[1])).contains(&p[1]))
     }
 
     /// Good and usable share of an outdoor area, sampled about every metre (walls of the house in between count).
@@ -125,6 +149,108 @@ impl Network {
         }
         let (pos, gained) = best?;
         (gained > 0).then(|| (pos, good_now, good_now + gained as f32 / spots.len() as f32))
+    }
+
+    /// What to buy to cover the home: the cheapest 1–4 catalog units (mesh nodes without cables, or wired access
+    /// points) up to `budget` that give every storey with walls `COVERED` good Wi-Fi, else the best worst storey
+    /// within the budget. The spots follow `suggest_ap`, one at a time on the storey that needs it most; the three
+    /// cheapest products of each Wi-Fi generation are tried there. None if nothing fits the budget or helps.
+    pub fn plan_budget(&self, budget: f32, mesh: bool) -> Option<Proposal> {
+        let mut floors: Vec<i8> = self.walls.iter().map(|w| w.floor).collect();
+        floors.sort();
+        floors.dedup();
+        // A light copy with just what coverage depends on (no pictures, no cables).
+        let mut probe = Network {
+            walls: self.walls.clone(),
+            storey_heights: self.storey_heights.clone(),
+            slab: self.slab,
+            wall_fit: self.wall_fit.clone(),
+            outdoor: self.outdoor.clone(),
+            target: self.target,
+            devices: self.radios().into_iter().cloned().collect(),
+            next_id: self.next_id,
+            ..Default::default()
+        };
+        let worst = |n: &Network| floors.iter().filter_map(|f| n.coverage(*f)).map(|c| c.good).fold(1.0f32, f32::min);
+        let mut spots: Vec<(i8, [f32; 2])> = vec![];
+        for _ in 0..4 {
+            let need = floors.iter().filter_map(|f| probe.coverage(*f).map(|c| (*f, c.good))).min_by(|a, b| a.1.total_cmp(&b.1));
+            let Some((f, _)) = need.filter(|x| x.1 < COVERED) else { break };
+            let Some((pos, ..)) = probe.suggest_ap(f) else { break };
+            let id = probe.add_device(Kind::AccessPoint, pos);
+            probe.dev_mut(id).unwrap().floor = f;
+            spots.push((f, pos));
+        }
+        if spots.is_empty() {
+            return None;
+        }
+        let kind = if mesh { Kind::Extender } else { Kind::AccessPoint };
+        let fits = |p: &crate::catalog::Product| p.price > 0.0 && p.bands.iter().any(|b| *b) && if mesh { matches!(p.role, Role::Mesh | Role::Extender) } else { p.role == Role::Ap };
+        let mut picks: Vec<&'static crate::catalog::Product> = vec![];
+        for std in crate::net::WifiStd::ALL {
+            let mut of: Vec<_> = crate::catalog::all().iter().filter(|p| p.wifi == std && fits(p)).collect();
+            of.sort_by(|a, b| a.price.total_cmp(&b.price));
+            picks.extend(of.into_iter().take(3));
+        }
+        let base: Vec<Device> = self.radios().into_iter().cloned().collect();
+        // A new unit as the shelf adds it, before its product is applied.
+        let fresh = {
+            let mut n = Network::default();
+            let id = n.add_device(kind, [0.0, 0.0]);
+            n.dev(id).unwrap().clone()
+        };
+        let mut best: Option<Proposal> = None;
+        for product in picks {
+            for k in 1..=spots.len() {
+                let cost = product.price * k as f32;
+                if cost > budget {
+                    break;
+                }
+                probe.devices = base.clone();
+                for (i, (f, pos)) in spots[..k].iter().enumerate() {
+                    let mut d = fresh.clone();
+                    d.id = self.next_id + 1 + i as u32;
+                    d.pos = *pos;
+                    d.floor = *f;
+                    product.apply(&mut d);
+                    probe.devices.push(d);
+                }
+                let good = worst(&probe);
+                let p = Proposal { product, kind, spots: spots[..k].to_vec(), cost, good };
+                let better = match &best {
+                    None => true,
+                    Some(b) if (b.good >= COVERED) != (good >= COVERED) => good >= COVERED,
+                    Some(b) if good >= COVERED => cost < b.cost || (cost == b.cost && good > b.good),
+                    Some(b) => good > b.good + 0.005 || (good > b.good - 0.005 && cost < b.cost),
+                };
+                if better {
+                    best = Some(p);
+                }
+                if good >= COVERED {
+                    break;
+                }
+            }
+        }
+        best.filter(|b| b.good > worst(&Network { devices: base, ..probe }))
+    }
+
+    /// Adds what `plan_budget` proposed: mesh nodes join the router over Wi-Fi, access points get a cable to it.
+    pub fn apply_proposal(&mut self, p: &Proposal) -> Vec<u32> {
+        let router = self.devices.iter().find(|d| d.kind == Kind::HomeRouter).map(|d| d.id);
+        let mut ids = vec![];
+        for (f, pos) in &p.spots {
+            let id = self.add_device(p.kind, *pos);
+            let d = self.dev_mut(id).unwrap();
+            d.floor = *f;
+            p.product.apply(d);
+            if let Some(r) = router {
+                let medium = if p.kind == Kind::Extender { crate::net::Medium::WiFi } else { crate::net::Medium::Cat6 };
+                let _ = self.connect(r, id, medium);
+            }
+            self.replug(id);
+            ids.push(id);
+        }
+        ids
     }
 
     /// Apply every one-click fix the checks offer (fixes can reveal new ones, so a few passes), then
@@ -196,13 +322,34 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_buys_the_cheapest_cover() {
+        let mut n = template("roaming");
+        n.devices.retain(|d| !d.kind.radio() || d.kind.foreign() || d.kind == crate::net::Kind::HomeRouter);
+        let before = n.coverage(0).unwrap().good;
+        for mesh in [true, false] {
+            let p = n.plan_budget(2000.0, mesh).expect("something helps");
+            assert!(p.good > before && p.cost <= 2000.0 && !p.spots.is_empty(), "{p:?}");
+            // A tight budget never buys more than it allows.
+            if let Some(q) = n.plan_budget(p.cost - 1.0, mesh) {
+                assert!(q.cost < p.cost);
+            }
+            let mut m = n.clone();
+            let ids = m.apply_proposal(&p);
+            assert_eq!(ids.len(), p.spots.len());
+            assert!((m.coverage(0).unwrap().good - p.good).abs() < 0.02, "{} vs {}", m.coverage(0).unwrap().good, p.good);
+            assert!(ids.iter().all(|id| m.links.iter().any(|l| l.a == *id || l.b == *id)), "joined to the router");
+        }
+        assert!(n.plan_budget(1.0, true).is_none(), "nothing costs 1");
+    }
+
+    #[test]
     fn outside_the_walls_does_not_count() {
         let mut n = crate::net::Network::default();
         // Two 10 m rooms 30 m apart: the gap between them is outdoors.
         for x0 in [0.0, 800.0] {
             let (x1, y1) = (x0 + 200.0, 200.0);
             for (a, b) in [([x0, 0.0], [x1, 0.0]), ([x1, 0.0], [x1, y1]), ([x1, y1], [x0, y1]), ([x0, y1], [x0, 0.0])] {
-                n.walls.push(crate::wifi::Wall { id: n.walls.len() as u32, a, b, kind: crate::wifi::WallKind::Brick, floor: 0 });
+                n.walls.push(crate::wifi::Wall { id: n.walls.len() as u32, a, b, kind: crate::wifi::WallKind::Brick, floor: 0, door: false });
             }
         }
         let c = n.coverage(0).unwrap();

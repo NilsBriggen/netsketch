@@ -103,6 +103,8 @@ public final class Survey {
         public double downMbps, latencyMs;
         /** 0 = not measured (files from app 1.0). */
         public double upMbps, jitterMs;
+        /** Over Wi-Fi to the linked NetSketch computer and back (0 = not linked): the home network alone, no internet. */
+        public double lanDownMbps, lanUpMbps;
     }
 
     public static final class Point {
@@ -179,6 +181,7 @@ public final class Survey {
             if (p.speed != null) {
                 b.append(",\n     \"speed\": {\"down_mbps\": ").append(num(p.speed.downMbps)).append(", \"latency_ms\": ").append(num(p.speed.latencyMs));
                 if (p.speed.upMbps > 0) b.append(", \"up_mbps\": ").append(num(p.speed.upMbps)).append(", \"jitter_ms\": ").append(num(p.speed.jitterMs));
+                if (p.speed.lanDownMbps > 0) b.append(", \"lan_down_mbps\": ").append(num(p.speed.lanDownMbps)).append(", \"lan_up_mbps\": ").append(num(p.speed.lanUpMbps));
                 b.append("}");
             }
             if (p.ping != null) {

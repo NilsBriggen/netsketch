@@ -436,6 +436,8 @@ pub struct Services {
     pub mail: bool,
     /// Routers: share routes with neighbour routers by RIP.
     pub rip: bool,
+    /// A host's own firewall (its `rules`), when the Firewall software is installed.
+    pub firewall: bool,
     /// When RIP was switched on (simulation clock, s); None = it has been running long enough to settle.
     #[serde(skip)]
     pub rip_since: Option<f64>,
@@ -482,9 +484,20 @@ pub struct Device {
     pub dhcp_to: String,
     pub routes: String,
     pub dns_records: String,
+    /// Older files kept the web server's pages here; `sanitize` moves them into `files` (webserver/…).
+    #[serde(skip_serializing)]
     pub web_page: String,
-    /// Extra pages by file name; `web_page` is index.html.
+    #[serde(skip_serializing)]
     pub web_files: Vec<(String, String)>,
+    /// The software installed (desktop apps and servers).
+    pub installed: Vec<crate::soft::Soft>,
+    /// Its files, by path ("webserver/index.html", "shared/notes.txt").
+    pub files: Vec<(String, String)>,
+    /// A mail server: the user names it takes mail for (none = anyone), and the mail delivered to it.
+    pub mailboxes: Vec<String>,
+    pub inbox: Vec<crate::soft::Mail>,
+    /// The mail program's account.
+    pub mail_account: Option<crate::soft::MailAccount>,
     pub ssid: String,
     pub wifi: WifiStd,
     pub security: Security,
@@ -512,6 +525,8 @@ pub struct Device {
     pub fast_roam: bool,
     /// Picks its own channel (automatic channel selection), as almost every router does out of the box.
     pub auto_ch: bool,
+    /// A network this device sends by itself, besides being a client: a printer's Wi-Fi Direct, a setup hotspot.
+    pub own_net: Option<crate::wifi::OwnNet>,
     /// Kick clients weaker than this (dBm, 0 = off).
     pub min_rssi: i16,
     /// Neighbour networks: share of airtime they use (0–1).
@@ -611,6 +626,11 @@ impl Default for Device {
             dns_records: String::new(),
             web_page: String::new(),
             web_files: vec![],
+            installed: vec![],
+            files: vec![],
+            mailboxes: vec![],
+            inbox: vec![],
+            mail_account: None,
             ssid: String::new(),
             wifi: WifiStd::Wifi6,
             security: Security::Wpa3,
@@ -629,6 +649,7 @@ impl Default for Device {
             model: String::new(),
             fast_roam: false,
             auto_ch: true,
+            own_net: None,
             min_rssi: 0,
             busy: 0.3,
             plan_mbps: 500.0,
@@ -1003,6 +1024,8 @@ pub struct Network {
     /// Measuring points from the companion app, and which measured access point is which device.
     pub points: Vec<crate::companion::MeasurePoint>,
     pub measured: Vec<(String, u32)>,
+    /// Wall kinds whose loss was learned from the measurements: a factor on the sourced value (1 = as published).
+    pub wall_fit: Vec<(crate::wifi::WallKind, f32)>,
     /// What the phone watched over time, the problems it found and the devices it discovered.
     pub phone: crate::companion::PhoneReport,
     /// Room names written on the map, and names people gave their storeys ("Loft").
@@ -1014,6 +1037,10 @@ pub struct Network {
     pub outdoor: Vec<crate::plan::Outdoor>,
     /// Electricity price per kWh, for the yearly running cost.
     pub kwh_price: f32,
+    /// Extra cable on top of each estimated run (0.1 = 10 %): detours, a loop to spare, cutting waste.
+    pub cable_slack: f32,
+    /// Which country's Wi-Fi rules apply (channels, power).
+    pub region: crate::wifi::Region,
     /// Time of day (hours) the traffic is looked at; 20.5 = the evening busy hour.
     pub hour: f32,
     /// How busy the household is: every app's demand times this (1 = a typical day, 2 = everyone home at once).
@@ -1051,9 +1078,6 @@ pub struct Network {
     /// MAC addresses each switch learned from traffic, with the cable each came in on; not saved.
     #[serde(skip)]
     pub mac_seen: HashMap<u32, Vec<(String, u32)>>,
-    /// Emails delivered to each mail server: (from, to, text); not saved.
-    #[serde(skip)]
-    pub mail: HashMap<u32, Vec<(String, String, String)>>,
 }
 
 impl Default for Network {
@@ -1070,6 +1094,7 @@ impl Default for Network {
             scenario: String::new(),
             seed: 1,
             slab: crate::wifi::WallKind::Concrete,
+            wall_fit: vec![],
             plans: vec![],
             survey: vec![],
             models: vec![],
@@ -1081,6 +1106,8 @@ impl Default for Network {
             storey_heights: vec![],
             outdoor: vec![],
             kwh_price: 0.30,
+            cable_slack: 0.1,
+            region: crate::wifi::Region::EuCh,
             hour: 20.5,
             traffic: 1.0,
             custom_traffic: false,
@@ -1095,7 +1122,6 @@ impl Default for Network {
             live: false,
             arp_seen: HashMap::new(),
             mac_seen: HashMap::new(),
-            mail: HashMap::new(),
         }
     }
 }
@@ -1186,7 +1212,47 @@ impl Network {
     }
 
     /// Repairs a plan read from a file so nothing points at devices or ports that don't exist.
+    /// Everything a device runs (or came with) is installed: plans from before software, and templates that switch
+    /// servers on directly.
+    pub fn fit_software(&mut self) {
+        for d in &mut self.devices {
+            if d.installed.is_empty() {
+                d.installed = crate::soft::Soft::defaults(d.kind);
+            }
+            for s in crate::soft::Soft::ALL {
+                let on = match s.service() {
+                    Some("web") => d.services.web,
+                    Some("dns") => d.services.dns,
+                    Some("dhcp") => d.services.dhcp,
+                    Some("mail") => d.services.mail,
+                    Some("files") => d.services.files,
+                    Some("print") => d.services.print,
+                    _ => false,
+                };
+                if on && !d.has(s) {
+                    d.installed.push(s);
+                }
+            }
+            d.installed.sort();
+            d.installed.dedup();
+        }
+    }
+
     pub fn sanitize(&mut self) {
+        self.fit_software();
+        // Pages of older plans move into the web server's folder.
+        for d in &mut self.devices {
+            if !d.web_page.is_empty() && d.file("webserver/index.html").is_none() {
+                let page = std::mem::take(&mut d.web_page);
+                d.set_file("webserver/index.html", &page);
+            }
+            for (name, body) in std::mem::take(&mut d.web_files) {
+                if d.file(&format!("webserver/{name}")).is_none() {
+                    d.set_file(&format!("webserver/{name}"), &body);
+                }
+            }
+            d.web_page.clear();
+        }
         if !(0.1..=5.0).contains(&self.traffic) {
             self.traffic = 1.0;
         }
@@ -1199,6 +1265,10 @@ impl Network {
         self.walls.retain(|w| ok(&w.a) && ok(&w.b));
         self.labels.retain(|l| ok(&l.pos));
         self.points.retain(|p| ok(&p.pos));
+        self.wall_fit.retain(|f| f.1.is_finite());
+        for f in &mut self.wall_fit {
+            f.1 = f.1.clamp(0.5, 2.0);
+        }
         self.survey.retain(|p| ok(&p.pos) && p.rssi.is_finite());
         self.plans.retain(|p| ok(&p.pos) && p.width_m.is_finite() && p.width_m > 0.0);
         for l in self.labels.iter_mut() {
@@ -1413,17 +1483,19 @@ impl Network {
                 match kind {
                     Kind::Server => {
                         d.services.web = true;
-                        d.web_page = format!("Welcome to {}!", d.name);
+                        let page = format!("Welcome to {}!", d.name);
+                        d.set_file("webserver/index.html", &page);
                     }
                     Kind::Nas => {
                         d.services.files = true;
                         d.services.web = true;
-                        d.web_page = "Storage admin page".into();
+                        d.set_file("webserver/index.html", "Storage admin page");
+                        d.set_file("shared/readme.txt", "Files in this folder are shared with the whole network.");
                     }
                     Kind::Printer => {
                         d.services.print = true;
                         d.services.web = true;
-                        d.web_page = "Printer status: ready".into();
+                        d.set_file("webserver/index.html", "Printer status: ready");
                     }
                     _ => {}
                 }
@@ -1432,6 +1504,7 @@ impl Network {
         if let Some(p) = crate::wifi::default_preset(kind) {
             p.apply(&mut d);
         }
+        d.installed = crate::soft::Soft::defaults(kind);
         // A second home router gets its own network instead of a clash on 192.168.1.1.
         if kind == Kind::HomeRouter {
             let taken: Vec<u8> = self.devices.iter().filter(|o| o.kind == Kind::HomeRouter).filter_map(|o| o.ifaces.first()?.addr()).map(|(ip, _)| ip.octets()[2]).collect();
@@ -1549,14 +1622,19 @@ impl Network {
             (Some(a), Some(b)) => {
                 let (dx, dy) = ((a.pos[0] - b.pos[0]).abs(), (a.pos[1] - b.pos[1]).abs());
                 let storeys = (self.floor_z(a.floor) - self.floor_z(b.floor)).abs();
+                // At each end the cable comes up (or down) to the device: at least a metre, more to an access
+                // point high on a wall or the ceiling; then the plan's slack on top.
+                let ends = a.mount.max(1.0) + b.mount.max(1.0);
+                let slack = 1.0 + self.cable_slack.clamp(0.0, 1.0);
                 if l.medium.cable() && !l.path.is_empty() {
-                    // A drawn route: along its points, up through floors, plus a metre at each end.
+                    // A drawn route: along its points, up through floors.
                     let pts: Vec<[f32; 2]> = std::iter::once(a.pos).chain(l.path.iter().copied()).chain(std::iter::once(b.pos)).collect();
                     let run: f32 = pts.windows(2).map(|w| ((w[0][0] - w[1][0]).powi(2) + (w[0][1] - w[1][1]).powi(2)).sqrt()).sum();
-                    (run / PX_PER_M + storeys + 2.0).round().max(1.0)
+                    ((run / PX_PER_M + storeys + ends) * slack).round().max(1.0)
                 } else if l.medium.cable() || l.medium == Medium::Powerline {
-                    // Cables run along walls and ceilings at right angles, up through floors, plus a metre at each end.
-                    ((dx + dy) / PX_PER_M + storeys + 2.0).round().max(1.0)
+                    // Cables run along walls and ceilings at right angles, up through floors.
+                    let f = if l.medium == Medium::Powerline { 1.0 } else { slack };
+                    (((dx + dy) / PX_PER_M + storeys + ends) * f).round().max(1.0)
                 } else {
                     (((dx * dx + dy * dy).sqrt() / PX_PER_M).powi(2) + storeys * storeys).sqrt().round().max(1.0)
                 }
@@ -1783,6 +1861,16 @@ impl Network {
                         t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("{} drops unsolicited traffic from the internet (no forwarding rule for port {port})", d.name), dev: cur, ..Default::default() });
                         return t;
                     }
+                }
+            }
+            // A computer's own firewall: its rules decide on what it sends and on what arrives for it (replies to
+            // what it started always get back in).
+            if d.running(crate::soft::Soft::Firewall) && !reply && (cur == from) != d.has_ip(dst) {
+                if let Some((false, rule)) = self.rule_verdict(d, src, dst, port, proto) {
+                    let way = if cur == from { "outgoing" } else { "incoming" };
+                    t.log.push(Log { src: src.to_string(), dst: dst.to_string(), proto, layer: "Network", info: format!("Dropped by {}'s firewall ({way}): '{rule}'", d.name), dev: cur, ..Default::default() });
+                    t.error = format!("Blocked by {}'s own firewall rule '{rule}'.", d.name);
+                    return t;
                 }
             }
             if d.has_ip(dst) {
@@ -2024,6 +2112,29 @@ impl Network {
             self.dhcp_one(id, &mut log);
         }
         log
+    }
+
+    /// The devices that took an address from a DHCP server: automatic-address devices in one of its networks,
+    /// holding an address from its pool (any address in the network when no pool is set).
+    pub fn leases(&self, server: u32) -> Vec<(u32, String)> {
+        let Some(s) = self.dev(server) else { return vec![] };
+        let segs = self.segments();
+        let (from, to) = (parse_ip(&s.dhcp_from).map(u32::from), parse_ip(&s.dhcp_to).map(u32::from));
+        let mine: Vec<_> = (0..s.ifaces.len()).filter(|j| (s.kind != Kind::HomeRouter || *j != 1) && s.ifaces[*j].addr().is_some()).filter_map(|j| segs.get(&(server, j))).collect();
+        self.devices
+            .iter()
+            .filter(|d| d.id != server && d.dhcp_client)
+            .filter_map(|d| {
+                let i = d.dhcp_iface();
+                let (ip, _) = d.ifaces.get(i)?.addr()?;
+                let n = u32::from(ip);
+                let in_pool = match (from, to) {
+                    (Some(a), Some(b)) => (a..=b).contains(&n),
+                    _ => true,
+                };
+                (in_pool && !ip.is_link_local() && mine.contains(&segs.get(&(d.id, i))?)).then(|| (d.id, ip.to_string()))
+            })
+            .collect()
     }
 
     pub fn dhcp_one(&mut self, id: u32, log: &mut Vec<Log>) {
@@ -2363,6 +2474,7 @@ impl Network {
 
     /// Finds everything that will stop the network from working, or is outdated.
     pub fn check(&self) -> Vec<Issue> {
+        crate::wifi::Region::set(self.region);
         let segs = self.segments();
         let mut v = vec![];
         let mut push = |level, dev: Option<u32>, link: Option<u32>, text: String| v.push(Issue { level, dev, link, text, fix: None });
@@ -2485,6 +2597,11 @@ impl Network {
         v
     }
 
+    /// A device by its name or host name.
+    pub fn lookup_name(&self, word: &str) -> Option<&Device> {
+        self.lookup_dev(word)
+    }
+
     fn lookup_dev(&self, word: &str) -> Option<&Device> {
         let w = word.to_lowercase();
         self.devices.iter().find(|d| d.hostname() == w || d.name.to_lowercase() == w)
@@ -2561,18 +2678,24 @@ impl Network {
         } else {
             let s = &target_dev.services;
             match svc_name {
-                "web" if s.web => Some(match path.trim_end_matches('/') {
-                    "" | "index.html" | "index.htm" if target_dev.web_page.is_empty() => format!("{} web page", target_dev.name),
-                    "" | "index.html" | "index.htm" => target_dev.web_page.clone(),
-                    p => match target_dev.web_files.iter().find(|f| f.0.eq_ignore_ascii_case(p)) {
-                        Some(f) => f.1.clone(),
+                // Pages come from the webserver folder; "" and a folder mean its index.html.
+                "web" if s.web => Some({
+                    let p = path.split(['?', '#']).next().unwrap_or("").trim_end_matches('/');
+                    let file = if p.is_empty() || !p.rsplit('/').next().unwrap_or("").contains('.') { format!("webserver/{p}/index.html") } else { format!("webserver/{p}") };
+                    match target_dev.file(&file).or_else(|| target_dev.file(&format!("webserver/{p}.html"))) {
+                        Some(f) => f.to_string(),
+                        None if p.is_empty() => format!("{} web page", target_dev.name),
                         None => {
                             status = "404 Not Found";
                             format!("<h1>404 Not Found</h1><p>{} has no page called {p}.</p>", target_dev.name)
                         }
-                    },
+                    }
                 }),
-                "file sharing" if s.files => Some(format!("\\\\{}\\shared — connected with SMB 3.1.1 (encrypted)", target_dev.hostname())),
+                "file sharing" if s.files => Some({
+                    let list: Vec<String> = target_dev.files.iter().filter_map(|f| f.0.strip_prefix("shared/")).filter(|n| !n.ends_with(".keep")).map(String::from).collect();
+                    let listed = if list.is_empty() { "the shared folder is empty".to_string() } else { list.join(", ") };
+                    format!("\\\\{}\\shared — connected with SMB 3.1.1 (encrypted): {listed}", target_dev.hostname())
+                }),
                 "printing" if s.print => Some(format!("{} is ready (IPP Everywhere, no driver needed)", target_dev.name)),
                 "DNS" if s.dns || target_dev.kind.routes() => Some(format!("{} answers DNS on port 53", target_dev.name)),
                 _ => None,
@@ -2611,98 +2734,134 @@ impl Network {
         .unwrap_or_else(|| domain.to_string())
     }
 
-    /// Sends an email the way real mail travels: the device hands it to the mail server on its own network
-    /// (submission, port 587); that server looks up the recipient domain's MX record and relays it there
-    /// over SMTP (port 25). Without a mail server nearby the device submits straight to the recipient's.
-    fn send_mail(&mut self, id: u32, to: &str, text: &str, o: &mut Outcome) {
-        let Some((_, domain)) = to.split_once('@').filter(|(u, d)| !u.is_empty() && !d.is_empty() && !text.is_empty()) else {
+    /// Sends an email the way real mail travels: the device hands it to its mail server (the one its mail account
+    /// names, or else one on its own network; submission, port 587); that server looks up the recipient domain's MX
+    /// record and relays it there over SMTP (port 25). Without a mail server nearby the device submits straight to
+    /// the recipient's. A server with mailboxes refuses names it doesn't have: the mail bounces back. True when delivered.
+    pub fn send_mail(&mut self, id: u32, to: &str, subject: &str, text: &str, o: &mut Outcome) -> bool {
+        let Some((user, domain)) = to.split_once('@').filter(|(u, d)| !u.is_empty() && !d.is_empty() && !text.is_empty()) else {
             o.lines.push("usage: mail <name@domain> <text>   e.g. mail anna@school.test Hello!".into());
-            return;
+            return false;
         };
-        let mx = self.mx_of(domain);
+        let (user, domain) = (user.to_lowercase(), domain.to_lowercase());
+        let mx = self.mx_of(&domain);
         let segs = self.segments();
         let home = segs.get(&(id, 0));
-        let outgoing = self.devices.iter().find(|s| s.services.mail && s.id != id && home.is_some() && (0..s.ifaces.len()).any(|i| segs.get(&(s.id, i)) == home)).map(|s| (s.id, s.first_ip()));
+        let account = self.dev(id).and_then(|d| d.mail_account.clone()).filter(|a| !a.address.is_empty());
+        let mine = account.as_ref().and_then(|a| self.lookup_dev(&a.server)).filter(|s| s.id != id).map(|s| (s.id, s.first_ip()));
+        let outgoing = mine.or_else(|| self.devices.iter().find(|s| s.services.mail && s.id != id && home.is_some() && (0..s.ifaces.len()).any(|i| segs.get(&(s.id, i)) == home)).map(|s| (s.id, s.first_ip())));
         let me = self.dev(id).unwrap().hostname();
-        let from = format!("{me}@{domain}");
+        let from = account.as_ref().map_or_else(|| format!("{me}@{domain}"), |a| a.address.clone());
         let smtp = |k: &mut Tcp, o: &mut Outcome, last: &str| {
             k.seg(o, true, "PSH, ACK", 30, "SMTP", format!("EHLO {me}, STARTTLS — from here on it's encrypted"));
             k.seg(o, true, "PSH, ACK", (from.len() + to.len()) as u32 + 24, "SMTP", format!("MAIL FROM:<{from}>  RCPT TO:<{to}>"));
-            k.seg(o, true, "PSH, ACK", text.len() as u32, "SMTP", format!("DATA: \"{text}\""));
+            k.seg(o, true, "PSH, ACK", (subject.len() + text.len()) as u32 + 10, "SMTP", if subject.is_empty() { format!("DATA: \"{text}\"") } else { format!("DATA: Subject: {subject}") });
             k.seg(o, false, "PSH, ACK", 30, "SMTP", last.to_string());
             k.close(o);
         };
-        // 1. Submission: to the own network's mail server, or straight to the recipient's.
+        // 1. Submission: to the own mail server, or straight to the recipient's.
         let first = match outgoing {
             Some((_, Some(ip))) => ip.to_string(),
             _ => mx.clone(),
         };
-        let Some(mut k) = self.tcp_open(id, &first, 587, o) else { return };
+        let Some(mut k) = self.tcp_open(id, &first, 587, o) else { return false };
         let server = k.server.2;
         if !self.dev(server).is_some_and(|s| s.services.mail) || k.site.is_some() || k.real {
             self.refuse(&mut k, o, "email");
-            return;
+            return false;
         }
         self.accept(&mut k, o);
-        let relay = outgoing.is_some_and(|(s, _)| s == server);
-        smtp(&mut k, o, if relay { "250 OK — queued for delivery" } else { "250 OK — delivered" });
+        // Mail for its own users' domain (the sender's, or one whose MX names it) stays on this server.
+        let srv = self.dev(server).unwrap();
+        let own = account.as_ref().and_then(|a| a.address.rsplit_once('@')).is_some_and(|f| f.1.eq_ignore_ascii_case(&domain)) || [srv.hostname(), srv.name.to_lowercase()].contains(&mx.to_lowercase()) || srv.has_ip(mx.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED));
+        let relay = outgoing.is_some_and(|(s, _)| s == server) && !own;
         let mut inbox = server;
         // 2. Relay: the outgoing server asks DNS for the domain's MX and passes the mail on over port 25.
         if relay {
-            o.log.push(Log { src: self.name(server), dst: domain.into(), proto: "DNS", layer: "Application", info: format!("MX lookup for {domain}: mail goes to {mx}"), dev: server, ..Default::default() });
+            smtp(&mut k, o, "250 OK — queued for delivery");
+            o.log.push(Log { src: self.name(server), dst: domain.clone(), proto: "DNS", layer: "Application", info: format!("MX lookup for {domain}: mail goes to {mx}"), dev: server, ..Default::default() });
             let Some(mut k2) = self.tcp_open(server, &mx, 25, o) else {
                 o.lines.push(format!("{} accepted the mail but can't reach {mx}, {domain}'s mail server: it will retry for a few days.", self.name(server)));
-                return;
+                return false;
             };
             let dest = k2.server.2;
             if dest != server {
                 if !self.dev(dest).is_some_and(|s| s.services.mail) || k2.site.is_some() || k2.real {
                     self.refuse(&mut k2, o, "email");
                     o.lines.push(format!("{mx} doesn't take mail: {} would bounce it back to you.", self.name(server)));
-                    return;
+                    return false;
                 }
                 self.accept(&mut k2, o);
                 smtp(&mut k2, o, "250 OK — delivered");
                 inbox = dest;
             }
+        } else {
+            smtp(&mut k, o, "250 OK — delivered");
+        }
+        // 3. The receiving server checks the mailbox exists.
+        let dest = self.dev(inbox).unwrap();
+        let known = dest.mailboxes.is_empty() || dest.mailboxes.iter().any(|m| m.eq_ignore_ascii_case(&user) || m.eq_ignore_ascii_case(to));
+        if !known {
+            let why = format!("{} has no mailbox called '{user}': the mail bounces back to {from}.", dest.name);
+            o.log.push(Log { src: self.name(inbox), dst: from.clone(), proto: "SMTP", layer: "Application", info: format!("550 No such user {user} — {}", dest.name), dev: inbox, ..Default::default() });
+            o.lines.push(why.clone());
+            let bounce = crate::soft::Mail { from: format!("mailer-daemon@{domain}"), to: from.clone(), subject: format!("Undeliverable: {}", if subject.is_empty() { text } else { subject }), body: why, read: false };
+            if let Some(d) = self.dev_mut(server).filter(|d| d.services.mail) {
+                d.inbox.push(bounce);
+            }
+            return false;
         }
         o.lines.push(if inbox == server { format!("Mail sent to {to} via {} (SMTP, port 587).", self.name(server)) } else { format!("Mail sent to {to}: {} took it (port 587) and relayed it to {} (port 25, MX of {domain}).", self.name(server), self.name(inbox)) });
-        self.mail.entry(inbox).or_default().push((from, to.to_lowercase(), text.into()));
+        let mail = crate::soft::Mail { from, to: to.to_lowercase(), subject: subject.into(), body: text.into(), read: false };
+        self.dev_mut(inbox).unwrap().inbox.push(mail);
+        true
     }
 
-    /// Reads an inbox: on the mail server itself directly, from anywhere else over IMAP.
-    fn read_inbox(&self, id: u32, who: &str, o: &mut Outcome) {
+    /// Fetches the mail of an address (none: the device's mail account): on the mail server itself directly, from
+    /// anywhere else over IMAP to the account's server or the domain's MX. The mails as (server, index on it).
+    pub fn fetch_mail(&self, id: u32, who: &str, o: &mut Outcome) -> Vec<(u32, usize)> {
         let me = self.dev(id).unwrap();
-        let show = |o: &mut Outcome, server: u32| {
-            let mails: Vec<_> = self.mail.get(&server).into_iter().flatten().filter(|m| who.is_empty() || m.1 == who.to_lowercase()).collect();
-            if mails.is_empty() {
-                o.lines.push("No mail yet.".into());
-            }
-            for (n, (f, t, x)) in mails.iter().enumerate() {
-                o.lines.push(format!("{:>2}  from {f}  to {t}:  {x}", n + 1));
-            }
-            mails.len()
+        let account = me.mail_account.clone().filter(|a| !a.address.is_empty());
+        let who = if who.is_empty() { account.as_ref().map_or(String::new(), |a| a.address.clone()) } else { who.to_string() };
+        let pick = |server: u32| -> Vec<(u32, usize)> {
+            let w = who.to_lowercase();
+            self.dev(server).map_or(vec![], |s| s.inbox.iter().enumerate().filter(|(_, m)| w.is_empty() || m.to.eq_ignore_ascii_case(&w)).map(|(i, _)| (server, i)).collect())
         };
         if who.is_empty() && me.services.mail {
-            show(o, id);
-            return;
+            return pick(id);
         }
         let Some((user, domain)) = who.split_once('@') else {
             o.lines.push("usage: inbox <name@domain>   (on the mail server itself: inbox)".into());
-            return;
+            return vec![];
         };
-        // IMAP goes to the server the domain's MX record names, where the mail was delivered.
-        let Some(mut k) = self.tcp_open(id, &self.mx_of(domain), 993, o) else { return };
+        // IMAP goes to the account's server, or to the one the domain's MX record names.
+        let target = account.as_ref().filter(|a| a.address.eq_ignore_ascii_case(&who) && !a.server.is_empty()).and_then(|a| self.lookup_dev(&a.server)).and_then(|s| s.first_ip()).map_or_else(|| self.mx_of(domain), |ip| ip.to_string());
+        let Some(mut k) = self.tcp_open(id, &target, 993, o) else { return vec![] };
         if !self.dev(k.server.2).is_some_and(|s| s.services.mail) || k.site.is_some() || k.real {
             self.refuse(&mut k, o, "email");
-            return;
+            return vec![];
         }
         self.accept(&mut k, o);
         k.seg(o, true, "PSH, ACK", 40, "IMAP", format!("TLS, then LOGIN {user} (the password travels encrypted)"));
         k.seg(o, true, "PSH, ACK", 20, "IMAP", "SELECT INBOX".into());
-        let n = show(o, k.server.2);
+        let got = pick(k.server.2);
+        let n = got.len();
         k.seg(o, false, "PSH, ACK", 200 * n as u32 + 20, "IMAP", format!("* {n} EXISTS — {n} message(s)"));
         k.close(o);
+        got
+    }
+
+    /// Reads an inbox for the command line.
+    fn read_inbox(&self, id: u32, who: &str, o: &mut Outcome) {
+        let got = self.fetch_mail(id, who, o);
+        if got.is_empty() && !o.lines.iter().any(|l| l.starts_with("usage")) && o.traces.iter().all(|t| t.ok) {
+            o.lines.push("No mail yet.".into());
+        }
+        for (n, (s, i)) in got.iter().enumerate() {
+            let m = &self.dev(*s).unwrap().inbox[*i];
+            let text = if m.subject.is_empty() { m.body.clone() } else { format!("{} — {}", m.subject, m.body) };
+            o.lines.push(format!("{:>2}  from {}  to {}:  {text}", n + 1, m.from, m.to));
+        }
     }
 
     /// Runs one command typed into a device's terminal.
@@ -2882,7 +3041,9 @@ impl Network {
             }
             "arp" => o.lines.extend(self.arp_lines(id)),
             "mac" | "mactable" | "mac-address-table" => o.lines.extend(self.mac_lines(id)),
-            "mail" | "sendmail" => self.send_mail(id, arg, &words.get(2..).unwrap_or_default().join(" "), &mut o),
+            "mail" | "sendmail" => {
+                self.send_mail(id, arg, "", &words.get(2..).unwrap_or_default().join(" "), &mut o);
+            }
             "inbox" | "imap" => self.read_inbox(id, arg, &mut o),
             "route" | "netstat" => {
                 o.lines.push("Destination        Gateway          Interface".into());
@@ -3044,7 +3205,7 @@ pub fn template_seeded(name: &str, seed: u64) -> Network {
             n.story = "A two-storey house: the router sits in the hall, a switch feeds the office and an access point upstairs. Brick outer walls, a concrete stairwell and coated windows shape the Wi-Fi — turn on the Wi-Fi map to see it.".into();
             n.auto_address();
         }
-        "flat" | "roaming" | "extender" | "apartment" | "speakers" | "office" | "nightmare" | "campus" | "rip" => crate::scenarios::build(name, &mut n),
+        "flat" | "roaming" | "extender" | "apartment" | "speakers" | "office" | "nightmare" | "campus" | "rip" | "mail" => crate::scenarios::build(name, &mut n),
         "classroom" => {
             n.title = "Two networks and a router".into();
             let s1 = n.add_device(Kind::Switch, [260.0, 260.0]);
@@ -3089,6 +3250,7 @@ pub fn template_seeded(name: &str, seed: u64) -> Network {
         }
     }
     n.scenario = name.into();
+    n.fit_software();
     // A template is new text: it starts in the interface's language.
     n.title = crate::i18n::tr(&n.title).to_string();
     n.story = crate::i18n::tr(&n.story).to_string();
@@ -3262,6 +3424,67 @@ mod tests {
         let wan = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().ifaces[1].ip.clone();
         let inet = n.devices.iter().find(|d| d.kind == Kind::Internet).unwrap().id;
         assert!(n.exec(inet, &format!("open {wan}")).lines.join(" ").contains("forwarding"));
+    }
+
+    #[test]
+    fn software_files_mailboxes_and_a_host_firewall() {
+        // An old plan: the page in web_page, services switched on, nothing installed.
+        let mut n = template("home");
+        let srv = n.add_device(Kind::Server, [400.0, 400.0]);
+        let sw = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().id;
+        n.connect(srv, sw, Medium::Cat6).unwrap();
+        n.auto_address();
+        {
+            let d = n.dev_mut(srv).unwrap();
+            d.installed.clear();
+            d.files.clear();
+            d.web_page = "<h1>OLD PAGE</h1>".into();
+            d.services.mail = true;
+        }
+        n.sanitize();
+        let d = n.dev(srv).unwrap();
+        assert!(d.has(crate::soft::Soft::WebServer) && d.has(crate::soft::Soft::MailServer) && d.web_page.is_empty());
+        let host = d.hostname();
+        let pc = n.lookup_dev("office-pc").unwrap().id;
+        assert!(n.exec(pc, &format!("open {host}")).lines.join(" ").contains("OLD PAGE"));
+        // Uninstalled, the web server is gone.
+        n.dev_mut(srv).unwrap().uninstall(crate::soft::Soft::WebServer);
+        assert!(!n.exec(pc, &format!("open {host}")).lines.join(" ").contains("OLD PAGE"));
+        // Mail with an account goes to the account's server and is kept with the plan; unknown names bounce.
+        {
+            let d = n.dev_mut(srv).unwrap();
+            d.mailboxes = vec!["anna".into(), "ben".into()];
+        }
+        let sname = n.dev(srv).unwrap().name.clone();
+        n.dev_mut(pc).unwrap().mail_account = Some(crate::soft::MailAccount { address: "ben@home.test".into(), server: sname.clone() });
+        let mut o = Outcome::default();
+        assert!(n.send_mail(pc, "anna@home.test", "Hi", "See you at 8", &mut o), "{:?}", o.lines);
+        assert!(!n.send_mail(pc, "zoe@home.test", "Hi", "anyone?", &mut o));
+        let saved: Network = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        let inbox = &saved.dev(srv).unwrap().inbox;
+        assert!(inbox.iter().any(|m| m.to == "anna@home.test" && m.subject == "Hi"));
+        assert!(inbox.iter().any(|m| m.to == "ben@home.test" && m.subject.starts_with("Undeliverable")));
+        let mut o = Outcome::default();
+        assert_eq!(n.fetch_mail(pc, "", &mut o).len(), 1, "ben gets the bounce");
+        // File sharing lists the shared folder.
+        {
+            let d = n.dev_mut(srv).unwrap();
+            d.install(crate::soft::Soft::FileShare);
+            d.set_file("shared/plan.txt", "x");
+        }
+        assert!(n.exec(pc, &format!("test {host} files")).lines.join(" ").contains("plan.txt"));
+        // The server's own firewall turns pings away and says so.
+        assert!(n.exec(pc, &format!("ping {host}")).lines.join(" ").contains(", 4 received"));
+        {
+            let d = n.dev_mut(srv).unwrap();
+            d.install(crate::soft::Soft::Firewall);
+            d.rules.push_str("deny any any\n");
+        }
+        let out = n.exec(pc, &format!("ping {host}"));
+        assert!(out.lines.join(" ").contains("firewall") || out.traces.iter().any(|t| t.error.contains("firewall")), "{:?}", out.lines);
+        // The router's DHCP server lists who took an address from it.
+        let r = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().id;
+        assert!(n.leases(r).iter().any(|l| l.0 == pc));
     }
 
     #[test]

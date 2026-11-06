@@ -65,6 +65,8 @@ final class PlanView extends View {
     int floor;
     /** The spot picked for the next measurement (metres), or null. */
     Float selX, selY;
+    /** Where a walk started, drawn as a line to the spot picked (or null). */
+    private Float walkX, walkY;
     OnSpot onSpot;
     OnPin onPin;
 
@@ -121,6 +123,12 @@ final class PlanView extends View {
         labels.clear();
         devices.clear();
         pins.clear();
+    }
+
+    void walkFrom(Float x, Float y) {
+        walkX = x;
+        walkY = y;
+        invalidate();
     }
 
     void unpick() {
@@ -221,6 +229,16 @@ final class PlanView extends View {
                     p.setColor(Ui.TEXT);
                     cv.drawText(String.format(Locale.ROOT, "%.0f", q.rssi), sx(q.x), sy(q.y) - r * 1.6f, p);
                 }
+            }
+        }
+        if (walkX != null) {
+            p.setColor(Ui.ACCENT);
+            cv.drawCircle(sx(walkX), sy(walkY), r, p);
+            if (selX != null) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(Ui.dp(c, 2));
+                cv.drawLine(sx(walkX), sy(walkY), sx(selX), sy(selY), p);
+                p.setStyle(Paint.Style.FILL);
             }
         }
         if (selX != null && selY != null) {

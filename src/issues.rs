@@ -64,6 +64,43 @@ fn issue(level: Level, dev: Option<u32>, link: Option<u32>, text: String, fix: O
 }
 
 impl Network {
+    /// A channel where beacons alone (yours and every network heard there, one per Wi-Fi name) take over 10 % of the air.
+    fn beacon_checks(&self, v: &mut Vec<Issue>) {
+        use crate::wifi::{beacon_share, Band};
+        let mut told: Vec<(Band, u16)> = vec![];
+        for r in self.devices.iter().filter(|d| d.kind.radio() && !d.off) {
+            for band in Band::ALL.into_iter().filter(|b| r.bands[b.i()]) {
+                let ch = self.chan(r, band);
+                if told.contains(&(band, ch.0)) {
+                    continue;
+                }
+                let heard: Vec<&crate::net::Device> = self
+                    .devices
+                    .iter()
+                    .filter(|t| t.id != r.id && !t.off && t.kind.transmits() && t.kind != Kind::Interference && t.bands[band.i()] && self.chan(t, band).0 == ch.0)
+                    .filter(|t| self.rssi_at(t, r.pos, r.floor, band) >= -82.0)
+                    .collect();
+                let names = self.names_sent(r) + heard.iter().map(|t| self.names_sent(t)).sum::<usize>();
+                let share = beacon_share(band) * names as f32;
+                if share < 0.10 {
+                    continue;
+                }
+                told.push((band, ch.0));
+                let mine = self.names_sent(r) + heard.iter().filter(|t| !t.kind.foreign()).map(|t| self.names_sent(t)).sum::<usize>();
+                v.push(issue(
+                    Level::Warning,
+                    Some(r.id),
+                    None,
+                    crate::i18n::trf(
+                        "On {} channel {}, {} Wi-Fi names are heard ({} of them yours): their beacons alone take {}% of the air, sent at the slowest rate. Switch off guest or extra networks you don't use, or raise the lowest data rate in the router's settings.",
+                        &[&band.label(), &ch.0, &names, &mine, &format!("{:.0}", share * 100.0)],
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
     /// The busiest switch (or home router): the natural spanning-tree root.
     fn main_bridge(&self) -> Option<u32> {
         // The central switch connects the most other switches; ties go to the one with more cables.
@@ -81,6 +118,7 @@ impl Network {
     }
 
     pub fn check_more(&self, v: &mut Vec<Issue>) {
+        self.beacon_checks(v);
         // --- Spanning tree ---
         let stp = self.stp();
         for id in &stp.storm {
@@ -217,8 +255,8 @@ impl Network {
         for r in self.devices.iter().filter(|d| d.kind.radio()).filter(on) {
             for b in Band::ALL.into_iter().filter(|b| r.bands[b.i()]) {
                 let (ch, w) = (r.ch[b.i()], r.width[b.i()]);
-                if r.tx[b.i()] > b.eirp_limit(ch) + 0.01 {
-                    v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{}: {} dBm on {} is above the EU limit of {} dBm. It also doesn't help phones answer back.", &[&r.name, &format!("{:.0}", r.tx[b.i()]), &(b.label()), &format!("{:.0}", b.eirp_limit(ch))]), None));
+                if r.tx[b.i()] > b.eirp_limit(ch, w) + 0.01 {
+                    v.push(issue(Level::Tip, Some(r.id), None, crate::i18n::trf("{}: {} dBm on {} is above the legal limit of {} dBm. It also doesn't help phones answer back.", &[&r.name, &format!("{:.0}", r.tx[b.i()]), &(b.label()), &format!("{:.0}", b.eirp_limit(ch, w))]), None));
                 }
                 if w > r.wifi.max_width(b.i()) {
                     v.push(issue(Level::Warning, Some(r.id), None, crate::i18n::trf("{}: {} can't use {} MHz on {} (max {} MHz).", &[&r.name, &(r.wifi.label()), &w, &(b.label()), &(r.wifi.max_width(b.i()))]), None));
@@ -283,6 +321,18 @@ impl Network {
                 }
                 v.push(issue(if jumped > 0 { Level::Warning } else { Level::Tip }, Some(r.id), None, text, Some(Fix::FixChannels)));
             }
+        }
+        // Printers and TVs that send their own network (Wi-Fi Direct, a setup hotspot) take airtime nobody uses.
+        for d in self.devices.iter().filter(|d| !d.kind.transmits() && !d.off) {
+            let Some(o) = &d.own_net else { continue };
+            let band = Band::ALL[(o.band as usize).min(2)];
+            let mut text = crate::i18n::trf("{} sends its own Wi-Fi '{}' on {} channel {} (Wi-Fi Direct, for printing or casting straight from a phone). If nobody does that, switch it off in its settings: one network fewer taking turns in the air.", &[&d.name, &o.ssid, &(band.label()), &o.ch]);
+            let shared: Vec<String> = radios.iter().filter(|r| r.bands[band.i()] && self.heard_on_own(r, d, band)).map(|r| r.name.clone()).collect();
+            if !shared.is_empty() {
+                text += " ";
+                text += &crate::i18n::trf("It shares the channel with {}.", &[&shared.join(", ")]);
+            }
+            v.push(issue(Level::Tip, Some(d.id), None, text, None));
         }
         self.measured_checks(v);
         if radios.len() > 1 && radios.iter().any(|r| !r.fast_roam) && self.devices.iter().any(|d| matches!(d.kind, Kind::Phone | Kind::Laptop)) {

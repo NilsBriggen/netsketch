@@ -112,6 +112,18 @@ public final class T {
         de("Networks at %s · %d", "Netzwerke bei %s · %d");
         de("Real speed: %.0f down, %.0f up Mbit/s · %.0f ms (±%.0f ms)", "Echte Geschwindigkeit: %.0f runter, %.0f hoch Mbit/s · %.0f ms (±%.0f ms)");
         de("Real speed: %.0f Mbit/s · %.0f ms delay", "Echte Geschwindigkeit: %.0f Mbit/s · %.0f ms Verzögerung");
+        de("Testing the Wi-Fi to NetSketch…", "Teste das WLAN zu NetSketch…");
+        de("Wi-Fi to NetSketch: %.0f down, %.0f up Mbit/s", "WLAN zu NetSketch: %.0f runter, %.0f hoch Mbit/s");
+        // Walk survey
+        de("Walk a line (your Wi-Fi only)", "Eine Strecke abgehen (nur Ihr WLAN)");
+        de("Stop here", "Hier aufhören");
+        de("Walk", "Gang");
+        de("Walking · %d readings. Walk slowly and evenly; at the end, tap where you are and press Stop here.", "Unterwegs · %d Messungen. Gehen Sie langsam und gleichmässig; tippen Sie am Ende, wo Sie stehen, und dann auf Hier aufhören.");
+        de("A walk needs the floor plan: link NetSketch first.", "Für eine Strecke braucht es den Grundriss: verbinden Sie zuerst NetSketch.");
+        de("Tap where the walk starts on the plan first.", "Tippen Sie zuerst im Grundriss, wo die Strecke beginnt.");
+        de("Connect to your Wi-Fi first: a walk measures the network you're on.", "Verbinden Sie sich zuerst mit Ihrem WLAN: eine Strecke misst das Netz, in dem Sie sind.");
+        de("Tap where you are now on the plan (same storey), then press Stop here.", "Tippen Sie im Grundriss, wo Sie jetzt stehen (gleiches Stockwerk), dann auf Hier aufhören.");
+        de("Walk %d: %d points along the line.", "Gang %d: %d Punkte entlang der Strecke.");
         de("(hidden)", "(verborgen)");
         de("  · you", "  · Sie");
         de("  · yours", "  · Ihres");

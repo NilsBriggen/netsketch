@@ -56,7 +56,7 @@ impl App {
     pub(crate) fn add_picture(&mut self, ctx: &egui::Context, path: &std::path::Path) {
         match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| FloorPlan::embed(&b)) {
             Ok(data) => {
-                let plan = FloorPlan { floor: self.floor, path: path.to_string_lossy().into_owned(), data, pos: [0.0, 0.0], width_m: 15.0, opacity: 0.5 };
+                let plan = FloorPlan { floor: self.floor, path: path.to_string_lossy().into_owned(), data: data.into(), pos: [0.0, 0.0], width_m: 15.0, opacity: 0.5 };
                 self.snapshot();
                 match self.net.plans.iter().position(|p| p.floor == self.floor) {
                     Some(i) => self.net.plans[i] = plan,
@@ -92,7 +92,8 @@ impl App {
     }
 
     /// Overview: floor plan picture, measurements and the model library.
-    pub(crate) fn plan_extras(&mut self, ui: &mut egui::Ui) {
+    /// The floor-plan picture under this storey's map: choose, replace, size and place it.
+    pub(crate) fn floor_picture(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if Self::section_hint(ui, "Floor plan picture", "A picture of this storey's plan under the map (PNG or JPEG, e.g. a scan or a screenshot of the architect's PDF). Trace the walls over it with the Walls tool, then the Wi-Fi map is your real home.") {
         let idx = self.net.plans.iter().position(|p| p.floor == self.floor);
@@ -112,7 +113,7 @@ impl App {
         }
         if let Some(p) = self.net.plans.iter_mut().find(|p| p.floor == self.floor) {
             egui::Grid::new("planpic").num_columns(2).show(ui, |ui| {
-                ui.label(tr("Real width")).on_hover_text(tr("Measure one wall you know, then set the picture's full width so the walls come out at their real length"));
+                ui.label(tr("Width of the picture")).on_hover_text(tr("Measure one wall you know, then set the picture's full width so the walls come out at their real length"));
                 ui.add(egui::DragValue::new(&mut p.width_m).range(2.0..=500.0).speed(0.1).suffix(" m"));
                 ui.end_row();
                 ui.label(tr("Position"));
@@ -130,7 +131,11 @@ impl App {
             });
         }
         }
+    }
 
+    /// The Measure workspace: phone link, imported readings, the measured networks and learning the walls.
+    pub(crate) fn measurements(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         if !Self::section_hint(ui, "Real measurements", "Measure with the NetSketch Survey phone app (Android): at each spot it records every network it hears, how busy their channels are and, if you like, the speed. Import its file here, drag each pin to where you stood, then add the networks that aren't yours as neighbours and fit the model to what you measured.\n\nAlso possible: a text file with lines like '4.5, 3.0, 0, Home router, -61' (x m, y m, storey, access point, dBm), or readings recorded in Simulate on a device's Wi-Fi tab.") {
             return;
         }
@@ -153,7 +158,8 @@ impl App {
             }
         });
         if let Some(e) = self.net.survey_error() {
-            ui.label(trf("{} readings · model is off by {} dB on average", &[&(self.net.survey.len()), &format!("{:.1}", e)]));
+            let verdict = if e < 4.0 { (pal().green, tr("close to reality")) } else if e < 8.0 { (pal().amber, tr("roughly right")) } else { (pal().red, tr("far off: calibrate, or check the walls and where the readings were taken")) };
+            ui.label(RichText::new(trf("{} readings · model is off by {} dB on average: {}", &[&(self.net.survey.len()), &format!("{:.1}", e), &verdict.1])).color(verdict.0));
         }
         self.measured_section(ui);
     }
@@ -236,9 +242,12 @@ impl App {
     pub(crate) fn device_extras(&mut self, ui: &mut egui::Ui, id: u32) {
         let ctx = ui.ctx().clone();
         let kind = self.net.dev(id).unwrap().kind;
-
-        self.apps_picker(ui, id);
-        if kind.is_host() && !kind.uses().is_empty() {
+        // Each part lives on one tab of the device panel.
+        let tab = self.dev_tab;
+        if tab == DevTab::Use {
+            self.apps_picker(ui, id);
+        }
+        if tab == DevTab::Use && kind.is_host() && !kind.uses().is_empty() {
             let d = self.net.dev_mut(id).unwrap();
             ui.horizontal(|ui| {
                 ui.label(tr("Priority (QoS)"));
@@ -252,7 +261,7 @@ impl App {
             .on_hover_text(tr("When a link is full, high-priority devices go first: their delay stays low and their speed holds; low ones wait"));
         }
         // Smart-home gadgets: Wi-Fi, or Thread/Zigbee through a hub.
-        if kind == Kind::SmartHome && Self::section_hint(ui, "Smart-home radio", "Thread and Zigbee are low-power meshes on 2.4 GHz channels 11–26. Their gadgets join a hub (Thread border router / Zigbee coordinator) instead of the Wi-Fi: Thread speaks IPv6 (Matter), Zigbee isn't IP at all, so neither needs an address from DHCP.") {
+        if tab == DevTab::WiFi && kind == Kind::SmartHome && Self::section_hint(ui, "Smart-home radio", "Thread and Zigbee are low-power meshes on 2.4 GHz channels 11–26. Their gadgets join a hub (Thread border router / Zigbee coordinator) instead of the Wi-Fi: Thread speaks IPv6 (Matter), Zigbee isn't IP at all, so neither needs an address from DHCP.") {
             let mut smart = self.net.dev(id).unwrap().smart;
             ui.horizontal(|ui| {
                 ui.label(tr("Connects by"));
@@ -281,7 +290,7 @@ impl App {
                 ui.label(RichText::new(how).small().color(pal().dim));
             }
         }
-        if matches!(kind, Kind::HomeRouter | Kind::Speaker | Kind::SmartHome) && Self::section_hint(ui, "Smart-home hub", "A hub runs the Thread or Zigbee network that low-power gadgets join. Many home routers, smart speakers and dedicated hubs can.") {
+        if tab == DevTab::WiFi && matches!(kind, Kind::HomeRouter | Kind::Speaker | Kind::SmartHome) && Self::section_hint(ui, "Smart-home hub", "A hub runs the Thread or Zigbee network that low-power gadgets join. Many home routers, smart speakers and dedicated hubs can.") {
             let d = self.net.dev_mut(id).unwrap();
             ui.checkbox(&mut d.hub, tr("Thread border router / Zigbee hub"));
             if d.hub {
@@ -292,12 +301,12 @@ impl App {
             }
         }
         // Wi-Fi devices pick which of their access point's names they join (home, guest, gadgets…).
-        if kind.wifi_client() && !kind.radio() && !self.net.dev(id).unwrap().on_802154() {
+        if tab == DevTab::WiFi && kind.wifi_client() && !kind.radio() && !self.net.dev(id).unwrap().on_802154() {
             self.join_picker(ui, id);
         }
 
         // Routers: guest Wi-Fi, IPv6, firewall.
-        if matches!(kind, Kind::HomeRouter | Kind::Router) && Self::section(ui, "Firewall & extras") {
+        if tab == DevTab::Security && matches!(kind, Kind::HomeRouter | Kind::Router) && Self::section(ui, "Firewall & extras") {
             if kind == Kind::HomeRouter {
                 let mut guest = self.net.dev(id).unwrap().ifaces.iter().any(|f| f.vlan == GUEST_VLAN);
                 if ui.checkbox(&mut guest, tr("Guest Wi-Fi")).on_hover_text(tr("Its own network 192.168.99.0/24, isolated from the home")).changed() {
@@ -318,7 +327,7 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(trf("{} names: a starter list plus {} imported", &[&(crate::more::AD_LIST.len() + own), &own])).small().color(pal().dim));
                         if ui.small_button(format!("{}  {}", ic::DOWNLOAD_SIMPLE, tr("Import a blocklist…"))).on_hover_text(tr("A hosts file or a list with one name per line, as Pi-hole and router blockers use (e.g. the StevenBlack hosts list)")).clicked() {
-                            if let Some(text) = rfd::FileDialog::new().add_filter("Blocklist", &["txt", "hosts", "list"]).pick_file().and_then(|p| std::fs::read_to_string(p).ok()) {
+                            if let Some(text) = rfd::FileDialog::new().add_filter(tr("Blocklist"), &["txt", "hosts", "list"]).pick_file().and_then(|p| std::fs::read_to_string(p).ok()) {
                                 d.blocklist = crate::more::parse_blocklist(&text);
                             }
                         }
@@ -352,7 +361,8 @@ impl App {
 
         // Power over Ethernet.
         let d = self.net.dev_mut(id).unwrap();
-        if kind == Kind::Switch {
+        if tab != DevTab::Use {
+        } else if kind == Kind::Switch {
             if Self::section(ui, "Power over Ethernet") {
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt(("poe", id)).selected_text(POE[d.poe_class as usize].0).width(220.0).show_ui(ui, |ui| {
@@ -376,7 +386,7 @@ impl App {
             });
         }
 
-        if kind == Kind::Internet || kind.foreign() {
+        if kind == Kind::Internet || kind.foreign() || tab != DevTab::General {
             return;
         }
         // Model library.
@@ -477,15 +487,15 @@ impl App {
                 }
             };
             let (role, col) = if stp.storm.contains(&l.id) {
-                ("LOOP", pal().red)
+                (tr("LOOP"), pal().red)
             } else if stp.blocked.contains(&l.id) {
-                ("standby", pal().amber)
+                (tr("standby"), pal().amber)
             } else if stp.root_port.get(&id) == Some(&l.id) {
                 (tr("towards the root"), pal().accent)
             } else if d.kind.bridges() || d.kind == Kind::HomeRouter {
-                ("forwarding", pal().dim)
+                (tr("forwarding"), pal().dim)
             } else {
-                ("routed", pal().dim)
+                (tr("routed"), pal().dim)
             };
             let u = self.net.utilisation(load, l.id);
             let mut state = format!("{role} · {}", trf("{}% busy", &[&format!("{:.0}", u * 100.0)]));

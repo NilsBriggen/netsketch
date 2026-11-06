@@ -123,11 +123,7 @@ pub fn from_xml(xml: &str) -> Result<(Network, usize), String> {
                 let name = prop(f, |p| p == "name").unwrap_or_default();
                 if name.ends_with(".html") || name.ends_with(".htm") {
                     let body = prop(f, |p| p == "dateiinhalt").unwrap_or_default();
-                    if name.eq_ignore_ascii_case("index.html") {
-                        d.web_page = body;
-                    } else {
-                        d.web_files.push((name, body));
-                    }
+                    d.set_file(&format!("webserver/{name}"), &body);
                 }
             }
         }
@@ -268,7 +264,7 @@ mod tests {
         assert_eq!((nb.name.as_str(), nb.kind, nb.ifaces[0].ip.as_str(), nb.ifaces[0].prefix), ("Notebook 1", Kind::Laptop, "192.168.1.110", 24));
         assert_eq!((nb.pos, nb.ifaces[0].mac.as_str(), nb.dhcp_client), ([195.0, 406.0], "19:03:c4:ef:c8:be", false));
         let srv = &n.devices[1];
-        assert_eq!((srv.kind, srv.services.web, srv.web_page.as_str()), (Kind::Server, true, "<html><h1>Hello</h1></html>"));
+        assert_eq!((srv.kind, srv.services.web, srv.file("webserver/index.html")), (Kind::Server, true, Some("<html><h1>Hello</h1></html>")));
         assert_eq!(n.devices[2].kind, Kind::AccessPoint);
         assert_eq!(n.links.iter().map(|l| l.medium).collect::<Vec<_>>(), [Medium::WiFi, Medium::Cat6]);
         let id = nb.id;

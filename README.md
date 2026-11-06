@@ -31,13 +31,14 @@ Each entry links to the page its specs come from. Values that had to be estimate
 ### See the Wi-Fi
 - A coverage heat map per storey and band (2.4, 5 and 6 GHz), from a multi-wall path-loss model: free-space distance plus each wall's material (hit at an angle costs more) and the floors in between. Signals also bend round wall ends and corners (doorways, halls). Wall losses, receiver sensitivity per data rate, fading and reconnect times follow published measurements (ITU-R P.2040, P.1238, P.526, 3GPP TR 38.901, TGn/TGax channel models, the 802.11 sensitivity tables).
 - How steady each Wi-Fi link is: fading by line of sight, antennas and channel width, frames resent, packets lost, and how often a link drops. In Simulate a weak link really drops out and takes a moment to join again; powerline slows down while a noisy appliance runs.
-- European rules built in: 5 GHz channels 36–64 and 100–140 (30 dBm on the upper ones), 6 GHz up to 6425 MHz, radar (DFS) channel checks, and the 1/5/9/13 plan on 2.4 GHz.
+- Country rules for Europe/Switzerland, the USA and Australia: which channels and power limits are allowed (in Europe 5 GHz 36–64 and 100–140, 6 GHz up to 6425 MHz, the 1/5/9/13 plan on 2.4 GHz), and radar (DFS) channel checks.
 - Channel planning, neighbours' networks and interference, roaming and band steering. The checks also catch routers and neighbours that both pick their channel automatically, radar channels that push you onto the neighbours' channels, extenders on the worse uplink and repeaters chained behind repeaters. You can take a phone for a walk through the house and watch it hand over.
 - "Where would another access point help most?", a coverage score for every storey, and outdoor areas (garden, terrace) with their own score. You choose what good Wi-Fi means for you (browsing, video calls, or 4K and gaming), and the score, the map colours and its dBm legend follow.
 - Calibrate the model with real measurements: import survey files, or use the companion phone app (below).
 
 ### Simulate
 - DHCP, DNS, NAT, routing, VLANs and spanning tree behave like the real thing.
+- Double-click a computer, server, phone or router to open its own desktop: install and remove software, and use a web browser, files and a text editor, email, a firewall, and web, DNS, DHCP, mail, file-sharing and print servers, each with its own page. Several desktops can be open side by side.
 - Every device has a terminal: `ipconfig`, `ping`, `traceroute`, `nslookup`, `speedtest` (real speed and the bottleneck on the way), `wifi`, `stp`, `vlan`, `arp`, `route` and more.
 - A built-in browser opens pages hosted on your simulated servers, or real websites.
 - Watch packets travel along the cables in the packet log and try "what if this cable breaks?".
@@ -55,9 +56,9 @@ Each entry links to the page its specs come from. Values that had to be estimate
 ### Learn
 **Learn** mode has 19 short, up-to-date lessons, from "How a network fits together" through IPv6, Wi-Fi security, mesh and roaming to VLANs, each with a hands-on "try it". There are also ready-made scenarios that each show a real problem:
 
-*Small flat · Typical home · Walk & roam · Range-extender trouble · Crowded apartment block · The speaker that ate the network · The nightmare home · University campus · Office with 100 VLANs · Two networks and a router (the classic first lesson)*
+*Small flat · Typical home · Walk & roam · Range-extender trouble · Crowded apartment block · The speaker that ate the network · The nightmare home · University campus · Office with 100 VLANs · Two networks and a router (the classic first lesson) · Three routers in a row (RIP) · Email at school*
 
-Every lesson ends with a check-yourself question (progress is remembered), and five scenarios are "find the fault" exercises with a **Check my work** button.
+Every lesson ends with a check-yourself question (progress is remembered), and seven scenarios are "find the fault" exercises with a **Check my work** button.
 
 Old Filius projects (`.fls`) can be opened too.
 

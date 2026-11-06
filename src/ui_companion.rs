@@ -10,14 +10,29 @@ impl App {
         for id in ids {
             let p = self.net.points.iter().find(|p| p.id == id).unwrap();
             let c = self.to_screen(vec2(p.pos[0], p.pos[1]));
-            let col = if p.placed { pal().accent } else { pal().amber };
             let selected = self.sel == Sel::Point(id);
-            let r = Rect::from_center_size(c, Vec2::splat(26.0));
-            painter.circle_filled(c, 13.0, pal().bg.gamma_multiply(0.9));
-            painter.circle_stroke(c, 13.0, Stroke::new(if selected { 3.0 } else { 2.0 }, col));
-            painter.text(c, Align2::CENTER_CENTER, ic::MAP_PIN, FontId::proportional(15.0), col);
+            // In the Measure workspace each pin shows how far off the model is there (green < 4 dB, amber < 8, red);
+            // elsewhere placed pins stay small and quiet so the devices stand out.
+            let measuring = self.space == Some(Space::Measure);
+            let err = if measuring { self.net.point_error(p) } else { None };
+            let col = match err {
+                _ if !p.placed => pal().amber,
+                Some(e) if e < 4.0 => pal().green,
+                Some(e) if e < 8.0 => pal().amber,
+                Some(_) => pal().red,
+                None if measuring || selected => pal().accent,
+                None => pal().dim,
+            };
+            let rad = if measuring || selected || !p.placed { 13.0 } else { 8.0 };
+            let r = Rect::from_center_size(c, Vec2::splat(rad * 2.0));
+            painter.circle_filled(c, rad, pal().bg.gamma_multiply(0.9));
+            painter.circle_stroke(c, rad, Stroke::new(if selected { 3.0 } else { 1.5 }, col));
+            painter.text(c, Align2::CENTER_CENTER, ic::MAP_PIN, FontId::proportional(rad * 1.15), col);
+            if let Some(e) = err {
+                painter.text(c + vec2(0.0, 15.0), Align2::CENTER_TOP, format!("±{e:.0} dB"), FontId::proportional(10.5), col);
+            }
             // Placed pins keep quiet (their name shows on hover); unplaced ones ask to be moved.
-            if !p.placed || selected {
+            if (!p.placed || selected) && err.is_none() {
                 let label = if p.placed { p.name.clone() } else { trf("{} — drag me to where you measured", &[&p.name]) };
                 painter.text(c + vec2(0.0, 16.0), Align2::CENTER_TOP, label, FontId::proportional(11.0), col);
             }
@@ -41,7 +56,8 @@ impl App {
             }
             let p = self.net.points.iter().find(|p| p.id == id).unwrap();
             let top: Vec<String> = p.networks.iter().take(5).map(|s| format!("{:>4.0} dBm  {}", s.rssi, if s.ssid.is_empty() { tr("(hidden)") } else { &s.ssid })).collect();
-            resp.on_hover_text(trf("{} — {} networks measured\n{}", &[&p.name, &(p.networks.len()), &(top.join("\n"))]));
+            let off = self.net.point_error(p).map_or(String::new(), |e| format!("\n{}", trf("The model is off by {} dB here", &[&format!("{e:.1}")])));
+            resp.on_hover_text(format!("{}{off}", trf("{} — {} networks measured\n{}", &[&p.name, &(p.networks.len()), &(top.join("\n"))])));
         }
     }
 
@@ -130,7 +146,6 @@ impl App {
 
     /// Overview: import a survey, see every measured access point, decide what each one is, fit the model.
     pub(crate) fn measured_section(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
         self.phone_card(ui);
         self.phone_report(ui);
         let pts = self.net.points.len();
@@ -142,44 +157,250 @@ impl App {
                 ui.label(RichText::new(trf("{} {} to where you stood.", &[&(ic::MAP_PIN), &what])).color(pal().amber));
             }
         }
+        if self.net.points.is_empty() {
+            return;
+        }
+        // Right to left: the button takes what it needs and the search field exactly the rest (never wider).
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(ic::ARROWS_OUT).on_hover_text(tr("Open the list in a big window")).clicked() {
+                self.measured_window = true;
+            }
+            ui.add(egui::TextEdit::singleline(&mut self.measured_filter).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, tr("Find a network…"))).desired_width(ui.available_width()));
+        });
+        let tall = (ui.ctx().content_rect().height() * 0.45).clamp(260.0, 640.0);
+        self.measured_list(ui, false, tall);
+        if let Some(e) = self.net.measured_error() {
+            ui.label(RichText::new(trf("Model vs. measurement: off by {} dB on average", &[&format!("{:.1}", e)])).color(if e < 4.0 { pal().green } else if e < 8.0 { pal().amber } else { pal().red }));
+        }
+        self.learn_walls_ui(ui);
+    }
+
+    /// "Learn walls": how much each wall kind and access point really costs, from all pins at once.
+    fn learn_walls_ui(&mut self, ui: &mut egui::Ui) {
+        if self.net.measured.is_empty() {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let placed = self.net.points.iter().filter(|p| p.placed).count();
+        let need = crate::companion::LEARN_MIN_POINTS;
+        ui.horizontal_wrapped(|ui| {
+            if placed < need {
+                ui.label(RichText::new(trf("{} With {} more placed pins, NetSketch can learn what your walls really cost.", &[&ic::WALL, &(need - placed)])).small().color(pal().dim));
+            } else if ui.button(format!("{} {}", ic::WALL, trf("Learn walls from {} pins", &[&placed]))).on_hover_text(tr("Works out how much each wall material and each of your access points really costs, from all pins at once. Only your own access points count: a neighbour's place is a guess.")).clicked() {
+                self.wall_learn = self.net.learn_walls();
+                if self.wall_learn.is_none() {
+                    self.say(&ctx, trf("Link at least {} placed pins to your own access points first.", &[&need]));
+                }
+            }
+            if !self.net.wall_fit.is_empty() && ui.small_button(tr("Back to the published wall values")).clicked() {
+                self.snapshot();
+                self.net.reset_wall_fit();
+                self.issues = None;
+            }
+        });
+        let Some(f) = self.wall_learn.clone() else { return };
+        let mut done = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(RichText::new(trf("Off by {} dB now, {} dB with the learned values", &[&format!("{:.1}", f.before), &format!("{:.1}", f.after)])).strong());
+            if f.kinds.is_empty() {
+                ui.label(RichText::new(tr("No wall lies between enough pins and your access points: only their strength was learned.")).small().color(pal().dim));
+            } else {
+                egui::Grid::new("wall_fit").striped(true).show(ui, |ui| {
+                    ui.label(RichText::new(tr("Wall")).small().strong());
+                    ui.label(RichText::new(tr("Published → learned, at 5 GHz")).small().strong());
+                    ui.label("");
+                    ui.end_row();
+                    for (k, v, hits) in &f.kinds {
+                        let pub5 = k.loss()[1];
+                        ui.label(k.label());
+                        ui.label(format!("{:.0} → {:.0} dB", pub5, pub5 * v));
+                        ui.label(RichText::new(trf("{} readings", &[hits])).small().color(pal().dim));
+                        ui.end_row();
+                    }
+                });
+            }
+            for (id, c) in &f.cal {
+                if let Some(d) = self.net.dev(*id) {
+                    ui.label(RichText::new(trf("{}: {} dB against a typical one", &[&d.name, &format!("{c:+.0}")])).small());
+                }
+            }
+            if !f.thin.is_empty() {
+                let names: Vec<&str> = f.thin.iter().map(|k| k.label()).collect();
+                ui.label(RichText::new(trf("Too few readings through {}: kept as published.", &[&names.join(", ")])).small().color(pal().dim));
+            }
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new(tr("Use these values")).strong()).clicked() {
+                    done = Some(true);
+                }
+                if ui.button(tr("Discard")).clicked() {
+                    done = Some(false);
+                }
+            });
+        });
+        match done {
+            Some(true) => {
+                self.snapshot();
+                self.net.apply_wall_fit(&f);
+                self.issues = None;
+                self.say(&ctx, trf("Walls learned: the model is now off by {} dB on average.", &[&format!("{:.1}", f.after)]));
+            }
+            Some(false) => self.wall_learn = None,
+            None => {}
+        }
+    }
+
+    /// What the phone watched over time and the devices it found on the network.
+    fn phone_report(&mut self, ui: &mut egui::Ui) {
+        let r = &self.net.phone;
+        if let Some(w) = &r.watch {
+            let count = |k: &str| w.events.iter().filter(|e| e.kind == k).count();
+            let short = |t: &str| t.get(..16).unwrap_or(t).replace('T', " ");
+            ui.label(RichText::new(trf("The phone watched from {} to {}", &[&short(&w.start), &short(&w.end)])).strong());
+            ui.label(trf("{} channel changes · {} hand-overs · {} dropouts · {} delay spikes · {} loss bursts", &[&count("channel"), &count("roam"), &count("drop"), &count("spike"), &count("loss")]));
+            if !w.events.is_empty() {
+                egui::CollapsingHeader::new(trf("What happened ({})", &[&w.events.len()])).id_salt("watch_events").show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("watch_scroll").max_height(200.0).min_scrolled_height(200.0).show(ui, |ui| {
+                        for e in w.events.iter().rev().take(200) {
+                            let who = if e.ssid.is_empty() { e.bssid.clone() } else { e.ssid.clone() };
+                            let what = match e.kind.as_str() {
+                                "channel" => trf("{} moved from channel {} to {}", &[&who, &e.from, &e.to]),
+                                "roam" => trf("The phone moved from {} to {}", &[&e.from, &e.to]),
+                                "drop" => trf("Wi-Fi gone for {} s", &[&format!("{:.0}", e.value)]),
+                                "spike" => trf("Delay spike: {} ms", &[&format!("{:.0}", e.value)]),
+                                "loss" => trf("{}% of pings lost", &[&format!("{:.0}", e.value)]),
+                                "dip" => trf("Signal dipped to {} dBm", &[&format!("{:.0}", e.value)]),
+                                _ => e.note.clone(),
+                            };
+                            ui.label(RichText::new(format!("{}  {what}", short(&e.time))).small());
+                        }
+                    });
+                });
+            }
+        }
+        if !r.findings.is_empty() {
+            ui.label(RichText::new(trf("{} findings from the phone are in the problem list.", &[&r.findings.len()])).small().color(pal().dim));
+        }
+        if !r.lan.is_empty() {
+            let fresh = self.net.lan_new().len();
+            let mut add = false;
+            egui::CollapsingHeader::new(trf("Devices the phone found on the network ({})", &[&r.lan.len()])).id_salt("lan_list").show(ui, |ui| {
+                if fresh > 0 && ui.small_button(format!("{} {}", ic::PLUS, trf("Put {} on the map", &[&fresh]))).on_hover_text(tr("Adds each one the plan doesn't have yet, beside the router and on its Wi-Fi. Drag them to where they stand, and change the kind where the guess is wrong.")).clicked() {
+                    add = true;
+                }
+                for d in &r.lan {
+                    let what = [d.kind.as_str(), d.vendor.as_str(), d.model.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&d.ip).monospace().small().color(pal().dim));
+                        ui.label(if d.name.is_empty() { tr("(no name)") } else { &d.name });
+                        ui.label(RichText::new(what).small().color(pal().dim));
+                    });
+                }
+            });
+            if add {
+                self.snapshot();
+                let ids = self.net.import_lan();
+                self.issues = None;
+                let ctx = ui.ctx().clone();
+                self.say(&ctx, trf("Added {} devices beside the router. Drag each to where it stands.", &[&ids.len()]));
+            }
+        }
+    }
+
+    /// The measured-networks list in its own big, resizable window, with more detail per network.
+    pub(crate) fn measured_window_ui(&mut self, ctx: &egui::Context) {
+        if !self.measured_window {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new(format!("{}  {}", ic::WIFI_HIGH, tr("Measured networks"))).id(Id::new("measured_win")).open(&mut open).resizable(true).default_size(vec2(880.0, 620.0)).show(ctx, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.measured_filter).hint_text(format!("{}  {}", ic::MAGNIFYING_GLASS, tr("Find a network, channel or device…"))).desired_width(f32::INFINITY));
+            // Fill the window as the person sizes it, but never grow it beyond most of the screen by itself.
+            let h = (ui.available_height().min(ctx.content_rect().height() * 0.7) - 40.0).max(200.0);
+            self.measured_list(ui, true, h);
+        });
+        if !open {
+            self.measured_window = false;
+        }
+    }
+
+    /// Every measured access point (filtered by the search): its strength, channels and what it belongs to — one of
+    /// your access points, a neighbour, or a device's own network (a printer's Wi-Fi Direct, a phone's hotspot).
+    fn measured_list(&mut self, ui: &mut egui::Ui, wide: bool, height: f32) {
+        let ctx = ui.ctx().clone();
         let found = self.net.measured_networks();
         if found.is_empty() {
             return;
         }
-        // What each measured access point can be linked to: your radios and the neighbours in the plan.
-        let targets: Vec<(u32, String)> = self.net.devices.iter().filter(|d| d.kind.transmits() && d.kind != Kind::Interference).map(|d| (d.id, d.name.clone())).collect();
+        // What a measured network can belong to: radios and neighbours, then devices that send a network of their own.
+        let radios: Vec<(u32, String)> = self.net.devices.iter().filter(|d| d.kind.transmits() && d.kind != Kind::Interference).map(|d| (d.id, d.name.clone())).collect();
+        let others: Vec<(u32, String)> = self.net.devices.iter().filter(|d| !d.kind.transmits() && d.kind.wifi_client()).map(|d| (d.id, d.name.clone())).collect();
+        let name_of = |id: u32| radios.iter().chain(&others).find(|t| t.0 == id).map(|t| t.1.clone());
+        let q = self.measured_filter.trim().to_lowercase();
+        let shown: Vec<&crate::companion::Measured> = found
+            .iter()
+            .filter(|m| {
+                q.is_empty()
+                    || m.ssid.to_lowercase().contains(&q)
+                    || m.radios.iter().any(|(_, c, _)| c.to_string() == q)
+                    || m.dev.and_then(name_of).is_some_and(|n| n.to_lowercase().contains(&q))
+            })
+            .collect();
         let mut add = vec![];
         let mut link: Option<(String, Option<u32>)> = None;
-        egui::ScrollArea::vertical().id_salt("measured").max_height(260.0).show(ui, |ui| {
-            {
-                for m in &found {
-                    ui.horizontal(|ui| {
+        let seen_at = |key: &str| self.net.points.iter().filter(|p| p.networks.iter().any(|s| crate::companion::key_of(s) == key)).count();
+        // Inside the scrolling side panel egui would squeeze the list to the panel's visible rest (64 px at worst):
+        // it keeps its full height and the panel scrolls instead.
+        egui::ScrollArea::vertical().id_salt(("measured", wide)).max_height(height).min_scrolled_height(height).auto_shrink([false, true]).show(ui, |ui| {
+            if shown.is_empty() {
+                ui.label(RichText::new(tr("No measured network matches.")).color(pal().dim));
+            }
+            for m in &shown {
+                ui.horizontal(|ui| {
                     ui.add_sized([34.0, 18.0], egui::Label::new(RichText::new(format!("{:.0}", m.best)).monospace().color(quality_color(m.best))));
-                    let chans: Vec<String> = m.radios.iter().map(|(b, c, _)| format!("{} ch {c}", b.label())).collect();
+                    let chans: Vec<String> = m.radios.iter().map(|(b, c, w)| if wide { format!("{} ch {c} · {w} MHz", b.label()) } else { format!("{} ch {c}", b.label()) }).collect();
                     let busy = m.utilization.map(|u| format!(" · {}", trf("{}% busy", &[&format!("{:.0}", u * 100.0)]))).unwrap_or_default();
-                    ui.vertical(|ui| {
-                        ui.set_width((ui.available_width() - 170.0).max(90.0));
-                        ui.label(if m.ssid.is_empty() { tr("(hidden)") } else { &m.ssid });
-                        ui.label(RichText::new(format!("{}{busy}", chans.join(" · "))).small().color(pal().dim));
-                    });
-                    let current = m.dev.and_then(|d| targets.iter().find(|t| t.0 == d)).map(|t| t.1.clone()).unwrap_or_else(|| tr("Not in the plan").into());
-                    egui::ComboBox::from_id_salt(("belongs", &m.key)).selected_text(current).width(150.0).show_ui(ui, |ui| {
-                        if ui.selectable_label(m.dev.is_none(), tr("Not in the plan")).clicked() {
-                            link = Some((m.key.clone(), None));
-                        }
-                        if ui.selectable_label(false, format!("{} {}", ic::PLUS, tr("Add as a neighbour"))).clicked() {
-                            add.push(m.key.clone());
-                        }
-                        ui.separator();
-                        for (id, name) in &targets {
-                            if ui.selectable_label(m.dev == Some(*id), name).clicked() {
-                                link = Some((m.key.clone(), Some(*id)));
+                    let combo_w = if wide { 220.0 } else { 150.0 };
+                    // Right to left: the selector first, then the text gets exactly the width left, and wraps.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let current = m.dev.and_then(name_of).unwrap_or_else(|| tr("Not in the plan").into());
+                        egui::ComboBox::from_id_salt(("belongs", &m.key, wide)).selected_text(current).width(combo_w).show_ui(ui, |ui| {
+                            if ui.selectable_label(m.dev.is_none(), tr("Not in the plan")).clicked() {
+                                link = Some((m.key.clone(), None));
                             }
-                        }
+                            if ui.selectable_label(false, format!("{} {}", ic::PLUS, tr("Add as a neighbour"))).clicked() {
+                                add.push(m.key.clone());
+                            }
+                            ui.separator();
+                            for (id, name) in &radios {
+                                if ui.selectable_label(m.dev == Some(*id), name).clicked() {
+                                    link = Some((m.key.clone(), Some(*id)));
+                                }
+                            }
+                            if !others.is_empty() {
+                                ui.separator();
+                                ui.label(RichText::new(tr("A device's own network (Wi-Fi Direct, hotspot):")).small().color(pal().dim));
+                                for (id, name) in &others {
+                                    if ui.selectable_label(m.dev == Some(*id), name).clicked() {
+                                        link = Some((m.key.clone(), Some(*id)));
+                                    }
+                                }
+                            }
+                        });
+                        ui.vertical(|ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(if m.ssid.is_empty() { tr("(hidden)") } else { &m.ssid });
+                            ui.label(RichText::new(format!("{}{busy}", chans.join(" · "))).small().color(pal().dim));
+                            if wide {
+                                let what = [m.security.clone(), m.standard.clone(), match seen_at(&m.key) {
+                                    1 => tr("heard at 1 point").to_string(),
+                                    k => trf("heard at {} points", &[&k]),
+                                }].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+                                ui.label(RichText::new(what).small().color(pal().dim));
+                            }
+                        });
                     });
-                    });
-                    ui.add(egui::Separator::default().spacing(2.0));
-                }
+                });
+                ui.add(egui::Separator::default().spacing(2.0));
             }
         });
         let strangers: Vec<String> = found.iter().filter(|m| m.dev.is_none() && m.best >= -85.0).map(|m| m.key.clone()).collect();
@@ -203,60 +424,19 @@ impl App {
             self.snapshot();
             self.net.link_measured(&k, d);
         }
-        if let Some(e) = self.net.measured_error() {
-            ui.label(RichText::new(trf("Model vs. measurement: off by {} dB on average", &[&format!("{:.1}", e)])).color(if e < 4.0 { pal().green } else if e < 8.0 { pal().amber } else { pal().red }));
-        }
-    }
-
-    /// What the phone watched over time and the devices it found on the network.
-    fn phone_report(&mut self, ui: &mut egui::Ui) {
-        let r = &self.net.phone;
-        if let Some(w) = &r.watch {
-            let count = |k: &str| w.events.iter().filter(|e| e.kind == k).count();
-            let short = |t: &str| t.get(..16).unwrap_or(t).replace('T', " ");
-            ui.label(RichText::new(trf("The phone watched from {} to {}", &[&short(&w.start), &short(&w.end)])).strong());
-            ui.label(trf("{} channel changes · {} hand-overs · {} dropouts · {} delay spikes · {} loss bursts", &[&count("channel"), &count("roam"), &count("drop"), &count("spike"), &count("loss")]));
-            if !w.events.is_empty() {
-                egui::CollapsingHeader::new(trf("What happened ({})", &[&w.events.len()])).id_salt("watch_events").show(ui, |ui| {
-                    egui::ScrollArea::vertical().id_salt("watch_scroll").max_height(200.0).show(ui, |ui| {
-                        for e in w.events.iter().rev().take(200) {
-                            let who = if e.ssid.is_empty() { e.bssid.clone() } else { e.ssid.clone() };
-                            let what = match e.kind.as_str() {
-                                "channel" => trf("{} moved from channel {} to {}", &[&who, &e.from, &e.to]),
-                                "roam" => trf("The phone moved from {} to {}", &[&e.from, &e.to]),
-                                "drop" => trf("Wi-Fi gone for {} s", &[&format!("{:.0}", e.value)]),
-                                "spike" => trf("Delay spike: {} ms", &[&format!("{:.0}", e.value)]),
-                                "loss" => trf("{}% of pings lost", &[&format!("{:.0}", e.value)]),
-                                "dip" => trf("Signal dipped to {} dBm", &[&format!("{:.0}", e.value)]),
-                                _ => e.note.clone(),
-                            };
-                            ui.label(RichText::new(format!("{}  {what}", short(&e.time))).small());
-                        }
-                    });
-                });
-            }
-        }
-        if !r.findings.is_empty() {
-            ui.label(RichText::new(trf("{} findings from the phone are in the problem list.", &[&r.findings.len()])).small().color(pal().dim));
-        }
-        if !r.lan.is_empty() {
-            egui::CollapsingHeader::new(trf("Devices the phone found on the network ({})", &[&r.lan.len()])).id_salt("lan_list").show(ui, |ui| {
-                for d in &r.lan {
-                    let what = [d.kind.as_str(), d.vendor.as_str(), d.model.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&d.ip).monospace().small().color(pal().dim));
-                        ui.label(if d.name.is_empty() { tr("(no name)") } else { &d.name });
-                        ui.label(RichText::new(what).small().color(pal().dim));
-                    });
-                }
-            });
-        }
     }
 
     /// One measuring point: where, what the phone heard, and how the model compares.
     pub(crate) fn point_editor(&mut self, ui: &mut egui::Ui, id: u32) {
         let mut delete = false;
         let models: Vec<(String, u32)> = self.net.measured.clone();
+        // What the model expects over Wi-Fi at this pin from the access point the phone was on.
+        let lan_model = self.net.points.iter().find(|p| p.id == id).filter(|p| p.placed).and_then(|p| {
+            let c = p.connected.as_ref()?;
+            let key = crate::companion::key_of(&crate::companion::Seen { ssid: c.ssid.clone(), bssid: c.bssid.clone(), ..Default::default() });
+            let ap = models.iter().find(|m| m.0 == key).and_then(|m| self.net.dev(m.1))?;
+            Some(self.net.spot_mbps(ap, p.pos, p.floor))
+        });
         let Some(p) = self.net.points.iter_mut().find(|p| p.id == id) else { return };
         let sub = if p.phone.is_empty() { tr("Measuring point").to_string() } else { trf("Measured with {}", &[&p.phone]) };
         Self::header(ui, ic::MAP_PIN, if p.placed { pal().accent } else { pal().amber }, tr("Measuring point"), &sub);
@@ -287,7 +467,14 @@ impl App {
                 ui.label(trf("{} ms (±{} ms, worst {} ms) · {}% lost", &[&format!("{:.0}", g.avg_ms), &format!("{:.0}", g.jitter_ms), &format!("{:.0}", g.max_ms), &format!("{:.0}", g.loss_pct)]));
                 ui.end_row();
             }
-            if let Some(s) = &p.speed {
+            if let Some(s) = p.speed.as_ref().filter(|s| s.lan_down_mbps > 0.0) {
+                ui.label(RichText::new(tr("Wi-Fi speed")).color(pal().dim));
+                let model = lan_model.map_or(String::new(), |m| trf(" · the model expects about {}", &[&format!("{m:.0}")]));
+                ui.label(RichText::new(trf("{} down, {} up Mbit/s to NetSketch{}", &[&format!("{:.0}", s.lan_down_mbps), &format!("{:.0}", s.lan_up_mbps), &model])).strong())
+                    .on_hover_text(tr("Measured between the phone and this computer, so the internet isn't part of it. The model's value assumes the computer is on a cable."));
+                ui.end_row();
+            }
+            if let Some(s) = p.speed.as_ref().filter(|s| s.down_mbps > 0.0) {
                 ui.label(RichText::new(tr("Speed test")).color(pal().dim));
                 let text = if s.up_mbps > 0.0 {
                     trf("{} down, {} up Mbit/s · {} ms (±{} ms)", &[&format!("{:.0}", s.down_mbps), &format!("{:.0}", s.up_mbps), &format!("{:.0}", s.latency_ms), &format!("{:.0}", s.jitter_ms)])
@@ -304,39 +491,42 @@ impl App {
                 for s in &p.networks {
                     ui.horizontal(|ui| {
                     ui.add_sized([34.0, 18.0], egui::Label::new(RichText::new(format!("{:.0}", s.rssi)).monospace().color(quality_color(s.rssi))));
-                    ui.vertical(|ui| {
-                        ui.set_width((ui.available_width() - 110.0).max(90.0));
-                        ui.label(if s.ssid.is_empty() { tr("(hidden)") } else { &s.ssid });
-                        ui.label(RichText::new(trf("{} ch {} · {} MHz", &[&(band_of(s.freq).label()), &s.channel, &s.width])).small().color(pal().dim));
-                        let mut extra: Vec<String> = vec![];
-                        let roam: String = [(s.k, "k"), (s.v, "v"), (s.r, "r")].iter().filter(|x| x.0).map(|x| x.1).collect();
-                        if !roam.is_empty() {
-                            extra.push(format!("802.11{roam}"));
-                        }
-                        if let Some(d) = s.distance_m {
-                            extra.push(trf("{} m away (RTT)", &[&format!("{:.1}", d)]));
-                        }
-                        if let (Some(lo), Some(hi)) = (s.rssi_min, s.rssi_max) {
-                            if hi - lo >= 6.0 {
-                                extra.push(trf("swung {} dB", &[&format!("{:.0}", hi - lo)]));
+                    // Right to left: the model's value first, then the text gets exactly the width left.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let key = crate::companion::key_of(s);
+                        let model = models.iter().find(|m| m.0 == key).and_then(|m| self.net.dev(m.1)).filter(|_| p.placed).map(|d| self.net.measured_rssi(d, p.pos, p.floor, band_of(s.freq)));
+                        match model {
+                            Some(v) => {
+                                let off = v - s.rssi;
+                                ui.label(RichText::new(if off.abs() < 0.5 { trf("model {} (same)", &[&format!("{:.0}", v)]) } else { format!("model {v:.0} ({off:+.0})") }).small().color(if off.abs() < 4.0 { pal().green } else if off.abs() < 8.0 { pal().amber } else { pal().red }));
                             }
+                            None => {}
                         }
-                        if s.wps {
-                            extra.push("WPS".into());
-                        }
-                        if !extra.is_empty() {
-                            ui.label(RichText::new(extra.join(" · ")).small().color(pal().dim));
-                        }
+                        ui.vertical(|ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(if s.ssid.is_empty() { tr("(hidden)") } else { &s.ssid });
+                            ui.label(RichText::new(trf("{} ch {} · {} MHz", &[&(band_of(s.freq).label()), &s.channel, &s.width])).small().color(pal().dim));
+                            let mut extra: Vec<String> = vec![];
+                            let roam: String = [(s.k, "k"), (s.v, "v"), (s.r, "r")].iter().filter(|x| x.0).map(|x| x.1).collect();
+                            if !roam.is_empty() {
+                                extra.push(format!("802.11{roam}"));
+                            }
+                            if let Some(d) = s.distance_m {
+                                extra.push(trf("{} m away (RTT)", &[&format!("{:.1}", d)]));
+                            }
+                            if let (Some(lo), Some(hi)) = (s.rssi_min, s.rssi_max) {
+                                if hi - lo >= 6.0 {
+                                    extra.push(trf("swung {} dB", &[&format!("{:.0}", hi - lo)]));
+                                }
+                            }
+                            if s.wps {
+                                extra.push("WPS".into());
+                            }
+                            if !extra.is_empty() {
+                                ui.label(RichText::new(extra.join(" · ")).small().color(pal().dim));
+                            }
+                        });
                     });
-                    let key = crate::companion::key_of(s);
-                    let model = models.iter().find(|m| m.0 == key).and_then(|m| self.net.dev(m.1)).filter(|_| p.placed).map(|d| self.net.rssi_at(d, p.pos, p.floor, band_of(s.freq)));
-                    match model {
-                        Some(v) => {
-                            let off = v - s.rssi;
-                            ui.label(RichText::new(if off.abs() < 0.5 { trf("model {} (same)", &[&format!("{:.0}", v)]) } else { format!("model {v:.0} ({off:+.0})") }).small().color(if off.abs() < 4.0 { pal().green } else if off.abs() < 8.0 { pal().amber } else { pal().red }));
-                        }
-                        None => {}
-                    }
                     });
                     ui.add(egui::Separator::default().spacing(2.0));
                 }

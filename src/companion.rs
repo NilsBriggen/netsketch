@@ -3,7 +3,7 @@
 //! they were taken; measured networks become neighbours (or are matched to your own access points),
 //! and their position, strength and busy time are fitted to what was really measured.
 use crate::net::{Device, Kind, Network, Security, WifiStd, PX_PER_M};
-use crate::wifi::Band;
+use crate::wifi::{Band, WallKind};
 use serde::{Deserialize, Serialize};
 
 /// What the companion app writes (`.netsurvey`, JSON).
@@ -96,6 +96,9 @@ pub struct Speed {
     /// Upload and delay variation; 0 in files from phone app 1.0, which didn't measure them.
     pub up_mbps: f32,
     pub jitter_ms: f32,
+    /// Over Wi-Fi to the NetSketch computer and back (0 = the phone wasn't linked): the home network without the internet.
+    pub lan_down_mbps: f32,
+    pub lan_up_mbps: f32,
 }
 
 /// Pings to the router at a point.
@@ -248,11 +251,14 @@ impl Network {
             self.points.push(MeasurePoint { id: self.next_id, name: p.name, pos, floor: p.floor, placed, time: p.time, phone: f.device.clone(), connected: p.connected, speed: p.speed, ping: p.ping, networks: p.networks });
         }
         self.take_report(&f.device, f.watch, f.findings, f.lan);
-        // Networks named like one of your access points belong to it.
+        // Networks named like one of your access points belong to it; a printer's Wi-Fi Direct network
+        // ("DIRECT-xx-EPSON…") to the printer, when the plan has just one.
         for m in self.measured_networks() {
             if m.dev.is_none() {
                 if let Some(d) = self.own_radio_for(&m) {
                     self.match_measured(&m.key, d);
+                } else if let Some(p) = self.printer_for(&m) {
+                    self.link_measured(&m.key, Some(p));
                 }
             }
         }
@@ -396,6 +402,16 @@ impl Network {
             .map(|d| d.id)
     }
 
+    /// The plan's only printer, for a measured Wi-Fi Direct network that doesn't look like a TV's.
+    fn printer_for(&self, m: &Measured) -> Option<u32> {
+        if !m.ssid.starts_with("DIRECT-") || m.ssid.contains("TV") || m.ssid.contains('[') {
+            return None;
+        }
+        let mut printers = self.devices.iter().filter(|d| d.kind == Kind::Printer && d.own_net.is_none());
+        let p = printers.next()?;
+        printers.next().is_none().then_some(p.id)
+    }
+
     /// Every access point heard at any point, strongest first.
     pub fn measured_networks(&self) -> Vec<Measured> {
         let mut out: Vec<Measured> = vec![];
@@ -435,9 +451,25 @@ impl Network {
 
     /// Links a measured access point to a device in the plan (or unlinks it).
     pub fn link_measured(&mut self, key: &str, dev: Option<u32>) {
+        let before = self.measured.iter().find(|m| m.0 == key).map(|m| m.1);
         self.measured.retain(|m| m.0 != key);
-        if let Some(d) = dev {
-            self.match_measured(key, d);
+        // A printer or TV that no longer has a measured network of its own stops sending one.
+        if let Some(b) = before.filter(|b| !self.measured.iter().any(|m| m.1 == *b)) {
+            if let Some(d) = self.dev_mut(b).filter(|d| !d.kind.transmits()) {
+                d.own_net = None;
+            }
+        }
+        let Some(d) = dev else { return };
+        self.match_measured(key, d);
+        // A device that isn't an access point sends this network by itself (Wi-Fi Direct, a setup hotspot):
+        // it takes the measured channel, and its strength is fitted (it stays where it is).
+        if self.dev(d).is_some_and(|x| !x.kind.transmits()) {
+            let Some(m) = self.measured_networks().into_iter().find(|m| m.key == key) else { return };
+            let Some(&(band, ch, width)) = m.radios.iter().max_by_key(|r| r.0.i()) else { return };
+            if let Some(x) = self.dev_mut(d) {
+                x.own_net = Some(crate::wifi::OwnNet { ssid: m.ssid.clone(), band: band.i() as u8, ch, width, busy: m.utilization.unwrap_or(0.03).clamp(0.02, 1.0) });
+            }
+            self.fit_measured(d, false);
         }
     }
 
@@ -500,7 +532,7 @@ impl Network {
         probe.cal_db = 0.0;
         // Offset that makes the model match on average, and what's left over.
         let fit = |n: &Network, p: &Device| {
-            let res: Vec<f32> = reads.iter().map(|(pos, fl, b, rssi)| rssi - n.rssi_at(p, *pos, *fl, *b)).collect();
+            let res: Vec<f32> = reads.iter().map(|(pos, fl, b, rssi)| rssi - n.measured_rssi(p, *pos, *fl, *b)).collect();
             let k = res.iter().sum::<f32>() / res.len() as f32;
             (k, res.iter().map(|r| (r - k).powi(2)).sum::<f32>() / res.len() as f32)
         };
@@ -565,16 +597,271 @@ impl Network {
         }
     }
 
+    /// Average difference between model and measurement at one placed pin (the networks that belong to a device).
+    pub fn point_error(&self, p: &MeasurePoint) -> Option<f32> {
+        if !p.placed {
+            return None;
+        }
+        let e: Vec<f32> = p
+            .networks
+            .iter()
+            .filter_map(|s| {
+                let key = key_of(s);
+                let d = self.measured.iter().find(|m| m.0 == key).and_then(|m| self.dev(m.1))?;
+                Some((self.measured_rssi(d, p.pos, p.floor, band_of(s.freq)) - s.rssi).abs())
+            })
+            .collect();
+        (!e.is_empty()).then(|| e.iter().sum::<f32>() / e.len() as f32)
+    }
+
     /// Average difference between model and measurement over all placed pins.
     pub fn measured_error(&self) -> Option<f32> {
         let e: Vec<f32> = self
             .measured
             .iter()
             .filter_map(|(k, d)| self.dev(*d).map(|d| (k, d)))
-            .flat_map(|(k, d)| self.readings_of(k).into_iter().map(move |(pos, fl, b, rssi)| (self.rssi_at(d, pos, fl, b) - rssi).abs()))
+            .flat_map(|(k, d)| self.readings_of(k).into_iter().map(move |(pos, fl, b, rssi)| (self.measured_rssi(d, pos, fl, b) - rssi).abs()))
             .collect();
         (!e.is_empty()).then(|| e.iter().sum::<f32>() / e.len() as f32)
     }
+
+    /// Learns how much each wall kind really costs in this home, together with each of your access points'
+    /// strength, from all placed pins at once (Gauss–Newton with the published values as a prior). Only your own
+    /// devices count: a neighbour's position is itself a guess. None below `LEARN_MIN_POINTS` pins.
+    pub fn learn_walls(&self) -> Option<WallFit> {
+        let reads: Vec<(u32, [f32; 2], i8, Band, f32)> = self
+            .measured
+            .iter()
+            .filter(|(_, d)| self.dev(*d).is_some_and(|d| d.kind != Kind::Neighbor))
+            .flat_map(|(k, d)| self.readings_of(k).into_iter().map(move |(p, f, b, r)| (*d, p, f, b, r)))
+            .collect();
+        let points = self.points.iter().filter(|p| p.placed && reads.iter().any(|r| r.1 == p.pos && r.2 == p.floor)).count();
+        if points < LEARN_MIN_POINTS {
+            return None;
+        }
+        let mut devs: Vec<u32> = reads.iter().map(|r| r.0).collect();
+        devs.sort();
+        devs.dedup();
+        let di = |id: u32| devs.iter().position(|d| *d == id).unwrap_or(0);
+        let mut n = self.clone();
+        for id in &devs {
+            if let Some(d) = n.dev_mut(*id) {
+                d.cal_db = 0.0;
+            }
+        }
+        let pred = |n: &Network| -> Vec<f32> { reads.iter().map(|(id, p, f, b, _)| n.dev(*id).map_or(0.0, |d| n.measured_rssi(d, *p, *f, *b))).collect() };
+        let set = |n: &mut Network, k: WallKind, v: f32| {
+            n.wall_fit.retain(|f| f.0 != k);
+            n.wall_fit.push((k, v));
+        };
+        let err = |n: &Network, off: &[f32]| {
+            let p = pred(n);
+            reads.iter().zip(&p).map(|(r, p)| (r.4 - p - off[di(r.0)]).abs()).sum::<f32>() / reads.len() as f32
+        };
+        let off0: Vec<f32> = devs.iter().map(|id| self.dev(*id).map_or(0.0, |d| d.cal_db)).collect();
+        let before = err(&n, &off0);
+        // Which kinds the measured ways cross: a kind needs 3 readings to be learned.
+        let base = pred(&n);
+        let (mut kinds, mut thin) = (vec![], vec![]);
+        for k in WallKind::ALL {
+            if !n.walls.iter().any(|w| w.kind == k) {
+                continue;
+            }
+            let was = n.wall_factor(k);
+            set(&mut n, k, was * 1.1);
+            let hit = pred(&n).iter().zip(&base).filter(|(a, b)| (*a - *b).abs() > 0.05).count();
+            set(&mut n, k, was);
+            if hit >= 3 {
+                kinds.push((k, hit));
+            } else if hit > 0 {
+                thin.push(k);
+            }
+        }
+        let (nk, nd) = (kinds.len(), devs.len());
+        let mut fac: Vec<f32> = kinds.iter().map(|(k, _)| n.wall_factor(*k)).collect();
+        let mut off = off0.clone();
+        // How far single readings scatter (people, doors, how the phone is held) weighs the priors (factor 1 ± 0.3,
+        // offset 0 ± 10 dB) against the measurements: ~6 dB to start, then what is left over (at least 2 dB).
+        let mut sd = 6.0f32;
+        for _ in 0..10 {
+            let p0 = pred(&n);
+            let r: Vec<f32> = reads.iter().zip(&p0).map(|(rd, p)| rd.4 - p - off[di(rd.0)]).collect();
+            let (lam_f, lam_o) = ((sd / 0.3).powi(2) as f64, (sd / 10.0).powi(2) as f64);
+            let mut jf = vec![vec![0f32; reads.len()]; nk];
+            for (j, (k, _)) in kinds.iter().enumerate() {
+                set(&mut n, *k, fac[j] + 0.05);
+                for (i, p1) in pred(&n).into_iter().enumerate() {
+                    jf[j][i] = (p1 - p0[i]) / 0.05;
+                }
+                set(&mut n, *k, fac[j]);
+            }
+            let col = |c: usize, i: usize| if c < nk { jf[c][i] } else if di(reads[i].0) == c - nk { 1.0 } else { 0.0 };
+            let np = nk + nd;
+            let (mut a, mut b) = (vec![vec![0f64; np]; np], vec![0f64; np]);
+            for (i, ri) in r.iter().enumerate() {
+                for c in 0..np {
+                    let x = col(c, i) as f64;
+                    if x == 0.0 {
+                        continue;
+                    }
+                    b[c] += x * *ri as f64;
+                    for (c2, v) in a[c].iter_mut().enumerate() {
+                        *v += x * col(c2, i) as f64;
+                    }
+                }
+            }
+            for j in 0..nk {
+                a[j][j] += lam_f;
+                b[j] -= lam_f * (fac[j] as f64 - 1.0);
+            }
+            for d in 0..nd {
+                a[nk + d][nk + d] += lam_o;
+                b[nk + d] -= lam_o * off[d] as f64;
+            }
+            let Some(x) = solve(a, b) else { break };
+            for j in 0..nk {
+                fac[j] = (fac[j] + x[j] as f32).clamp(0.5, 2.0);
+                set(&mut n, kinds[j].0, fac[j]);
+            }
+            for d in 0..nd {
+                off[d] = (off[d] + x[nk + d] as f32).clamp(-30.0, 30.0);
+            }
+            let rms = (r.iter().map(|v| v * v).sum::<f32>() / r.len() as f32).sqrt();
+            sd = rms.max(2.0);
+            if x.iter().all(|v| v.abs() < 1e-3) {
+                break;
+            }
+        }
+        Some(WallFit {
+            after: err(&n, &off),
+            before,
+            kinds: kinds.iter().zip(&fac).map(|((k, hit), f)| (*k, *f, *hit)).collect(),
+            thin,
+            cal: devs.iter().copied().zip(off).collect(),
+        })
+    }
+
+    pub fn apply_wall_fit(&mut self, f: &WallFit) {
+        for (k, v, _) in &f.kinds {
+            self.wall_fit.retain(|x| x.0 != *k);
+            if (*v - 1.0).abs() > 0.005 {
+                self.wall_fit.push((*k, *v));
+            }
+        }
+        for (id, c) in &f.cal {
+            if let Some(d) = self.dev_mut(*id) {
+                d.cal_db = *c;
+            }
+        }
+    }
+
+    /// Back to the published wall values; your access points are fitted again to match.
+    pub fn reset_wall_fit(&mut self) {
+        self.wall_fit.clear();
+        let own: Vec<u32> = self.measured.iter().map(|m| m.1).filter(|id| self.dev(*id).is_some_and(|d| d.kind != Kind::Neighbor)).collect();
+        for id in own {
+            self.fit_measured(id, false);
+        }
+    }
+}
+
+impl Network {
+    /// The devices the phone found on the network that the plan doesn't have yet (by name or address), with the
+    /// kind its guess points to. Routers and access points are left out: where they stand isn't known.
+    pub fn lan_new(&self) -> Vec<(LanDevice, Kind)> {
+        let has = |d: &LanDevice| {
+            let name = d.name.to_lowercase();
+            self.devices.iter().any(|x| (!name.is_empty() && x.name.to_lowercase() == name) || x.ifaces.iter().any(|f| !d.ip.is_empty() && f.ip == d.ip))
+        };
+        self.phone.lan.iter().filter(|d| !has(d)).filter_map(|d| lan_kind(d).map(|k| (d.clone(), k))).collect()
+    }
+
+    /// Puts `lan_new` on the map in a row beside the router, each joined to it over Wi-Fi.
+    pub fn import_lan(&mut self) -> Vec<u32> {
+        let Some(r) = self.devices.iter().find(|d| d.kind == Kind::HomeRouter).map(|d| (d.id, d.pos, d.floor)) else { return vec![] };
+        let mut ids = vec![];
+        for (i, (d, kind)) in self.lan_new().into_iter().enumerate() {
+            let pos = [r.1[0] + 50.0 * (i % 8) as f32 - 175.0, r.1[1] + 90.0 + 50.0 * (i / 8) as f32];
+            let id = self.add_device(kind, pos);
+            let x = self.dev_mut(id).unwrap();
+            x.floor = r.2;
+            let label = if d.name.is_empty() { [d.vendor.as_str(), d.model.as_str()].iter().filter(|v| !v.is_empty()).cloned().collect::<Vec<_>>().join(" ") } else { d.name.clone() };
+            if !label.is_empty() {
+                x.name = label;
+            }
+            let _ = self.connect(r.0, id, crate::net::Medium::WiFi);
+            ids.push(id);
+        }
+        ids
+    }
+}
+
+/// What a device the phone found probably is (from the phone's English guess); None for routers and access points.
+fn lan_kind(d: &LanDevice) -> Option<Kind> {
+    let k = d.kind.to_lowercase();
+    let name = format!("{} {} {}", d.name, d.vendor, d.model).to_lowercase();
+    Some(if k == "router" || k == "access point" {
+        return None;
+    } else if k.contains("printer") {
+        Kind::Printer
+    } else if k.contains("tv") || k.contains("chromecast") {
+        Kind::Tv
+    } else if k.contains("speaker") {
+        Kind::Speaker
+    } else if k.contains("camera") {
+        Kind::Camera
+    } else if k.contains("iphone") || k.contains("ipad") {
+        Kind::Phone
+    } else if k.contains("media server") || ["nas", "diskstation", "synology", "qnap"].iter().any(|w| name.contains(w)) {
+        Kind::Nas
+    } else if k.contains("computer") {
+        Kind::Desktop
+    } else {
+        // A gadget with a web page, or no idea: closest to a smart-home device. Change it on the map.
+        Kind::SmartHome
+    })
+}
+
+/// Fewest placed pins `learn_walls` works from: fewer can't tell walls from a weak router.
+pub const LEARN_MIN_POINTS: usize = 6;
+
+/// What `learn_walls` found.
+#[derive(Clone, Debug, Default)]
+pub struct WallFit {
+    /// (kind, factor on the published loss, readings whose way crosses it).
+    pub kinds: Vec<(crate::wifi::WallKind, f32, usize)>,
+    /// Kinds crossed by fewer than 3 readings: they keep their value.
+    pub thin: Vec<crate::wifi::WallKind>,
+    /// Each access point's strength offset (dB), as `Device::cal_db`.
+    pub cal: Vec<(u32, f32)>,
+    /// Average difference model ↔ measurement (dB) with the current values and with the learned ones.
+    pub before: f32,
+    pub after: f32,
+}
+
+/// Solves a·x = b (Gaussian elimination with partial pivoting); None when it's singular.
+fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for c in 0..n {
+        let p = (c..n).max_by(|i, j| a[*i][c].abs().total_cmp(&a[*j][c].abs()))?;
+        if a[p][c].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(c, p);
+        b.swap(c, p);
+        for r in c + 1..n {
+            let f = a[r][c] / a[c][c];
+            for k in c..n {
+                a[r][k] -= f * a[c][k];
+            }
+            b[r] -= f * b[c];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for r in (0..n).rev() {
+        x[r] = (b[r] - (r + 1..n).map(|k| a[r][k] * x[k]).sum::<f64>()) / a[r][r];
+    }
+    Some(x)
 }
 
 #[cfg(test)]
@@ -594,6 +881,7 @@ mod tests {
         assert!(n.points.iter().all(|p| !p.placed), "positions come from the person, not the phone");
         let sp = n.points.iter().find_map(|p| p.speed.as_ref()).unwrap();
         assert!((sp.up_mbps - 48.5).abs() < 0.01 && (sp.jitter_ms - 2.1).abs() < 0.01, "upload and jitter from the phone");
+        assert!((sp.lan_down_mbps - 420.0).abs() < 0.01 && (sp.lan_up_mbps - 310.0).abs() < 0.01, "Wi-Fi speed to NetSketch");
         let found = n.measured_networks();
         // The flat's own router is recognised by its name; a neighbour is not.
         let own = found.iter().find(|m| m.ssid == "HomeNet").unwrap();
@@ -738,5 +1026,100 @@ mod tests {
         }
         assert!(!n.phone.findings.is_empty() && n.phone.lan.iter().any(|d| d.model == "FRITZ!Box 7590"));
         assert!(n.check().iter().any(|i| i.text.starts_with("From the phone:")));
+    }
+
+    #[test]
+    fn a_printers_own_network_belongs_to_the_printer() {
+        let mut n = template("flat");
+        let pr = n.add_device(Kind::Printer, [40.0, 100.0]);
+        let json = r#"{"format":"netsketch-survey","device":"Pixel","points":[{"name":"Desk","time":"t9","x":11,"y":5,"networks":[
+            {"ssid":"DIRECT-fz-EPSON-ET-8500 Series","bssid":"de:cd:2f:0c:0b:01","freq":2412,"channel":1,"width":20,"rssi":-61}]}]}"#;
+        n.import_companion(json).unwrap();
+        // Matched to the only printer, which now sends that network on channel 1 at a fitted strength.
+        let o = n.dev(pr).unwrap().own_net.clone().expect("the printer's own network");
+        assert!(o.ssid.starts_with("DIRECT-") && o.band == 0 && o.ch == 1);
+        let p = n.points.last().unwrap().clone();
+        assert!((n.measured_rssi(n.dev(pr).unwrap(), p.pos, p.floor, Band::B24) + 61.0).abs() < 0.5, "fitted to the reading");
+        assert!(n.check().iter().any(|i| i.dev == Some(pr) && i.text.contains("Wi-Fi Direct")));
+        // A router on channel 1 next to it now takes turns with the printer's network.
+        let r = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().clone();
+        n.dev_mut(r.id).unwrap().ch[0] = 1;
+        let r = n.dev(r.id).unwrap().clone();
+        assert!(n.contention(&r, Band::B24).1.contains(&pr));
+        // Unlinking it stops the printer sending.
+        let key = n.measured.iter().find(|m| m.1 == pr).unwrap().0.clone();
+        n.link_measured(&key, None);
+        assert!(n.dev(pr).unwrap().own_net.is_none());
+    }
+
+    #[test]
+    fn devices_the_phone_found_go_on_the_map_once() {
+        let mut n = template("flat");
+        let lan = |name: &str, ip: &str, kind: &str| LanDevice { ip: ip.into(), name: name.into(), kind: kind.into(), ..Default::default() };
+        let router = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().clone();
+        n.phone.lan = vec![lan("", &router.ifaces[0].ip, "Router"), lan("EPSON-ET", "192.168.1.40", "Printer"), lan("DiskStation", "192.168.1.41", "Computer or NAS"), lan("Living room", "192.168.1.42", "TV or speaker (Chromecast)")];
+        let kinds: Vec<Kind> = n.lan_new().iter().map(|x| x.1).collect();
+        assert_eq!(kinds, vec![Kind::Printer, Kind::Nas, Kind::Tv]);
+        let ids = n.import_lan();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.iter().all(|id| n.links.iter().any(|l| l.medium == crate::net::Medium::WiFi && (l.a == *id || l.b == *id))));
+        assert_eq!(n.dev(ids[1]).unwrap().name, "DiskStation");
+        assert!(n.lan_new().is_empty() && n.import_lan().is_empty(), "added only once");
+    }
+
+    #[test]
+    fn walls_and_router_strength_are_learned_from_many_pins() {
+        let mut n = template("flat");
+        // A long room cut by three walls: every pin further right is behind one more of them.
+        let m = PX_PER_M;
+        n.walls.clear();
+        n.devices.retain(|d| !d.kind.radio() || d.kind == Kind::HomeRouter);
+        for (i, (x, k)) in [(4.0, WallKind::Drywall), (8.0, WallKind::InnerBrick), (12.0, WallKind::Concrete)].into_iter().enumerate() {
+            n.walls.push(crate::wifi::Wall { id: 900 + i as u32, a: [x * m, -40.0 * m], b: [x * m, 50.0 * m], kind: k, floor: 0, door: false });
+        }
+        let r = n.devices.iter().find(|d| d.kind == Kind::HomeRouter).unwrap().id;
+        n.dev_mut(r).unwrap().pos = [1.0 * m, 5.0 * m];
+        n.dev_mut(r).unwrap().floor = 0;
+        // The home really differs from the books: drywall and concrete heavier, the brick lighter, the router 5 dB weak.
+        let truth = vec![(WallKind::Drywall, 1.4), (WallKind::InnerBrick, 0.7), (WallKind::Concrete, 1.25)];
+        let aps = vec![r];
+        n.wall_fit = truth.clone();
+        n.dev_mut(r).unwrap().cal_db = -5.0;
+        let (x0, x1, y0, y1) = (1.5 * m, 16.5 * m, 1.0 * m, 9.0 * m);
+        let mut id = 0;
+        for i in 0..8 {
+            for j in 0..6 {
+                let pos = [x0 + (x1 - x0) * (i as f32 + 0.5) / 8.0, y0 + (y1 - y0) * (j as f32 + 0.5) / 6.0];
+                let networks = aps
+                    .iter()
+                    .map(|a| {
+                        // ±3 dB of noise, as a phone's readings scatter.
+                        let noise = (crate::sim::hash(7, id as u64, *a as u64) % 1000) as f32 / 1000.0 * 6.0 - 3.0;
+                        let rssi = n.measured_rssi(n.dev(*a).unwrap(), pos, 0, Band::B24) + noise;
+                        Seen { ssid: format!("ap{a}"), bssid: format!("aa:bb:cc:dd:{a:02x}:01"), freq: 2437, rssi, ..Default::default() }
+                    })
+                    .filter(|s| s.rssi > -90.0)
+                    .collect();
+                id += 1;
+                n.points.push(MeasurePoint { id, pos, placed: true, networks, ..Default::default() });
+            }
+        }
+        for a in &aps {
+            n.measured.push((format!("ap{a}|aa:bb:cc:dd:{a:02x}"), *a));
+        }
+        n.wall_fit.clear();
+        n.dev_mut(aps[0]).unwrap().cal_db = 0.0;
+        let f = n.learn_walls().expect("enough pins");
+        assert!(f.after < 2.5 && f.after < f.before - 1.0 && f.kinds.len() == 3, "{f:?}");
+        for (k, v, hits) in &f.kinds {
+            let want = truth.iter().find(|t| t.0 == *k).unwrap().1;
+            assert!(*hits >= 10 && (v - want).abs() / want < 0.15, "{k:?}: learned {v}, really {want} ({hits} readings)");
+        }
+        let weak = f.cal.iter().find(|c| c.0 == aps[0]).unwrap().1;
+        assert!((weak + 5.0).abs() < 2.0, "{weak}");
+        n.apply_wall_fit(&f);
+        assert!(n.measured_error().unwrap() < 2.5);
+        n.reset_wall_fit();
+        assert!(n.wall_fit.is_empty());
     }
 }
